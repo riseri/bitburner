@@ -1,3 +1,5 @@
+import { PORTS } from "lib/ports.js";
+
 const HOME = "home";
 
 const HACK = "jit-hack.js";
@@ -45,13 +47,13 @@ export async function main(ns) {
 		["min-steal", 0.01],
 		["max-steal", 0.50],
 		["switch-threshold", 1.25],
-		["port", 20],
+		["port", PORTS.WORKER_EVENTS],
 		["cloud", true],
 		["cloud-reserve", 0.10],
 		["cloud-min-ram", 32],
 		["cloud-prefix", "cloud"],
-		["fleet-port", 19],
-		["control-port", 18],
+		["fleet-port", PORTS.FLEET_STATUS],
+		["control-port", PORTS.JIT_CONTROL],
 	]);
 
 	ns.disableLog("ALL");
