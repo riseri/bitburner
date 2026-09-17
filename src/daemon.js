@@ -13,7 +13,8 @@ const PREP_BUFFER_MS = 150;
 
 const NETWORK_REFRESH_MS = 10_000;
 const UI_REFRESH_MS = 10_000;
-const PROCESS_REAP_MS = 1_000;
+const PROCESS_RECONCILE_MS = 30_000;
+const PROCESS_RECONCILE_LIMIT = 20;
 const OVERDUE_CHECK_MS = 250;
 const RESERVATION_CLEANUP_MS = 500;
 const MAX_BATCHES_PLANNED_PER_TICK = 1;
@@ -240,6 +241,7 @@ export async function main(ns) {
 	let reservations = [];
 
 	const running = new Map();
+	const runningByChunk = new Map();
 	const batches = new Map();
 	const foreignUsedByHost = new Map();
 
@@ -268,7 +270,8 @@ export async function main(ns) {
 	let consecutiveAllocationFailures = 0;
 
 	let lastUi = 0;
-	let lastReap = 0;
+	let lastReconcile = 0;
+	let lastLoopAt = Date.now();
 	let lastOverdueCheck = 0;
 	let lastReservationCleanup = 0;
 	let lastNetworkRefresh = Date.now();
@@ -298,6 +301,27 @@ export async function main(ns) {
 		const loopNow =
 			Date.now();
 
+		const loopLag =
+			Math.max(
+				0,
+				loopNow - lastLoopAt - 5
+			);
+
+		stats.loopLagSum += loopLag;
+		stats.loopLagCount++;
+		stats.loopLagMax =
+			Math.max(
+				stats.loopLagMax,
+				loopLag
+			);
+		stats.pipeline.loopLagMax =
+			Math.max(
+				stats.pipeline.loopLagMax,
+				loopLag
+			);
+
+		lastLoopAt = loopNow;
+
 		// Launches are the highest-priority work in the controller. Never do
 		// allocator/network/bookkeeping work while a chunk is already due.
 		{
@@ -309,6 +333,7 @@ export async function main(ns) {
 				batches,
 				stats,
 				running,
+				runningByChunk,
 				drain
 			);
 
@@ -329,15 +354,16 @@ export async function main(ns) {
 
 		if (
 			loopNow -
-			lastReap >=
-			PROCESS_REAP_MS
+			lastReconcile >=
+			PROCESS_RECONCILE_MS
 		) {
-			lastReap =
-				loopNow;
+			lastReconcile = loopNow;
 
-			reapRunning(
+			reconcileRunning(
 				ns,
-				running
+				running,
+				runningByChunk,
+				PROCESS_RECONCILE_LIMIT
 			);
 		}
 
@@ -368,7 +394,9 @@ export async function main(ns) {
 				stats,
 				target,
 				runtime,
-				cfg
+				cfg,
+				running,
+				runningByChunk
 			);
 
 		if (eventProblem) {
@@ -715,6 +743,7 @@ export async function main(ns) {
 			);
 
 			clearRunning(running);
+			runningByChunk.clear();
 
 			port.clear();
 
@@ -869,6 +898,8 @@ export async function main(ns) {
 			stats.lastHackAt =
 				NaN;
 
+			resetPipelineStats(stats);
+
 			consecutiveAllocationFailures = 0;
 
 			maintenance = null;
@@ -1002,6 +1033,7 @@ export async function main(ns) {
 				batches,
 				stats,
 				running,
+				runningByChunk,
 				drain
 			);
 
@@ -4543,6 +4575,7 @@ function recordPhaseMiss(
 		)
 	) {
 		stats.misses[phase]++;
+		stats.pipeline.misses[phase]++;
 
 		if (execFailure) {
 			stats.execFails[phase]++;
@@ -4610,6 +4643,7 @@ function beginDrain(
 	}
 
 	stats.recoveries++;
+	stats.pipeline.recoveries++;
 	stats.lastReason =
 		`draining: ${issue.reason}`;
 
@@ -4655,7 +4689,9 @@ function consumeEvents(
 	stats,
 	target,
 	runtime,
-	cfg
+	cfg,
+	running,
+	runningByChunk
 ) {
 	while (
 		!port.empty()
@@ -4670,6 +4706,12 @@ function consumeEvents(
 		) {
 			continue;
 		}
+
+		untrackRunningByChunk(
+			running,
+			runningByChunk,
+			String(event.chunkId ?? "")
+		);
 
 		if (
 			String(
@@ -4797,6 +4839,14 @@ function consumeEvents(
 				drift
 			);
 
+		stats.pipeline.driftSum += drift;
+		stats.pipeline.driftCount++;
+		stats.pipeline.driftMax =
+			Math.max(
+				stats.pipeline.driftMax,
+				drift
+			);
+
 		if (
 			phase ===
 			"H"
@@ -4880,6 +4930,11 @@ function consumeEvents(
 					stats.minSpacing,
 					spacing
 				);
+			stats.pipeline.minSpacing =
+				Math.min(
+					stats.pipeline.minSpacing,
+					spacing
+				);
 
 			if (
 				spacing <
@@ -4937,6 +4992,11 @@ function consumeEvents(
 				stats.minSpacing =
 					Math.min(
 						stats.minSpacing,
+						spacing
+					);
+				stats.pipeline.minSpacing =
+					Math.min(
+						stats.pipeline.minSpacing,
 						spacing
 					);
 
@@ -5168,6 +5228,7 @@ function launchDueChunks(
 	batches,
 	stats,
 	running,
+	runningByChunk,
 	drain
 ) {
 	while (
@@ -5251,6 +5312,11 @@ function launchDueChunks(
 			pid,
 			chunk
 		);
+
+		runningByChunk.set(
+			chunk.chunkId,
+			pid
+		);
 	}
 
 	return {
@@ -5308,28 +5374,69 @@ function networkFromFleetStatus(
 	};
 }
 
-function reapRunning(
-	ns,
-	running
+function untrackRunningByChunk(
+	running,
+	runningByChunk,
+	chunkId
 ) {
-	for (
-		const [
+	if (!chunkId) {
+		return;
+	}
+
+	const pid =
+		runningByChunk.get(
+			chunkId
+		);
+
+	if (pid == null) {
+		return;
+	}
+
+	const chunk =
+		running.get(pid);
+
+	if (chunk) {
+		untrackRunning(
+			running,
 			pid,
-			chunk,
-		]
+			chunk
+		);
+	}
+
+	runningByChunk.delete(
+		chunkId
+	);
+}
+
+function reconcileRunning(
+	ns,
+	running,
+	runningByChunk,
+	limit
+) {
+	let checked = 0;
+
+	for (
+		const [pid, chunk]
 		of running
 	) {
-		if (
-			!ns.isRunning(
-				pid
-			)
-		) {
-			untrackRunning(
-				running,
-				pid,
-				chunk
-			);
+		if (checked++ >= limit) {
+			break;
 		}
+
+		if (ns.isRunning(pid)) {
+			continue;
+		}
+
+		untrackRunning(
+			running,
+			pid,
+			chunk
+		);
+
+		runningByChunk.delete(
+			chunk.chunkId
+		);
 	}
 }
 
@@ -5404,9 +5511,32 @@ function createStats() {
 			W2: 0,
 		},
 
+		loopLagSum: 0,
+		loopLagCount: 0,
+		loopLagMax: 0,
+
+		pipeline: createPipelineStats(),
+
 		lastReason:
 			"none",
 	};
+}
+
+function createPipelineStats() {
+	return {
+		started: Date.now(),
+		recoveries: 0,
+		misses: { H: 0, W1: 0, G: 0, W2: 0 },
+		driftSum: 0,
+		driftCount: 0,
+		driftMax: 0,
+		minSpacing: Infinity,
+		loopLagMax: 0,
+	};
+}
+
+function resetPipelineStats(stats) {
+	stats.pipeline = createPipelineStats();
 }
 
 function renderTargetAnalysis(
@@ -5559,6 +5689,19 @@ function renderDashboard(
 			stats.minSpacing
 		)
 			? `${stats.minSpacing.toFixed(1)}ms`
+			: "n/a";
+
+	const pipelineDriftAvg =
+		stats.pipeline.driftCount
+			? stats.pipeline.driftSum /
+			stats.pipeline.driftCount
+			: 0;
+
+	const pipelineSpacing =
+		Number.isFinite(
+			stats.pipeline.minSpacing
+		)
+			? `${stats.pipeline.minSpacing.toFixed(1)}ms`
 			: "n/a";
 
 	const currentProfile =
@@ -5803,6 +5946,28 @@ function renderDashboard(
 		`Allocator   ` +
 		`${stats.allocationFails} skipped slots ` +
 		`| worst streak ${stats.maxConsecutiveAllocationFails}`
+	);
+
+	ns.print(
+		`Pipe misses ` +
+		`H:${stats.pipeline.misses.H} ` +
+		`W1:${stats.pipeline.misses.W1} ` +
+		`G:${stats.pipeline.misses.G} ` +
+		`W2:${stats.pipeline.misses.W2} ` +
+		`| recoveries ${stats.pipeline.recoveries}`
+	);
+
+	ns.print(
+		`Pipe drift  ` +
+		`avg ${pipelineDriftAvg.toFixed(2)}ms ` +
+		`| max ${stats.pipeline.driftMax.toFixed(2)}ms ` +
+		`| spacing ${pipelineSpacing}`
+	);
+
+	ns.print(
+		`Loop lag    ` +
+		`max ${stats.pipeline.loopLagMax.toFixed(1)}ms current ` +
+		`| ${stats.loopLagMax.toFixed(1)}ms lifetime`
 	);
 
 	ns.print(
