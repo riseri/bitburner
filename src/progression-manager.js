@@ -113,7 +113,6 @@ function buildStatus(ns, fleetStatus) {
 			torOwned,
 			programs,
 			backdoors,
-			singularityAvailable,
 		}),
 		error: "",
 	};
@@ -172,13 +171,11 @@ function buildPath(parents, target) {
 	return path.reverse();
 }
 
-function chooseNextObjective({ torOwned, programs, backdoors, singularityAvailable }) {
-	const actorHint = singularityAvailable ? "automation can handle this later" : "manual for now";
-
+function chooseNextObjective({ torOwned, programs, backdoors }) {
 	if (!torOwned) {
 		return {
 			kind: "tor",
-			label: `Get a TOR router (${actorHint})`,
+			label: "Get a TOR router",
 		};
 	}
 
@@ -187,7 +184,7 @@ function chooseNextObjective({ torOwned, programs, backdoors, singularityAvailab
 		return {
 			kind: "program",
 			program: missingProgram.name,
-			label: `Acquire ${missingProgram.name} (${actorHint})`,
+			label: `Acquire ${missingProgram.name}`,
 		};
 	}
 
@@ -198,7 +195,7 @@ function chooseNextObjective({ torOwned, programs, backdoors, singularityAvailab
 			host: readyBackdoor.host,
 			faction: readyBackdoor.faction,
 			path: readyBackdoor.path,
-			label: `Backdoor ${readyBackdoor.host} for ${readyBackdoor.faction} (${actorHint})`,
+			label: `Backdoor ${readyBackdoor.host} for ${readyBackdoor.faction}`,
 		};
 	}
 
