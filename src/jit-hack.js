@@ -9,8 +9,10 @@ export async function main(ns) {
 	const phase = String(ns.args[4] ?? "H");
 	const chunkId = String(ns.args[5] ?? "");
 	const maxLate = Number(ns.args[6] ?? 30);
+	const controlPortNumber = Number(ns.args[7] ?? 0);
 
 	const port = ns.getPortHandle(portNumber);
+	const controlPort = controlPortNumber > 0 ? ns.getPortHandle(controlPortNumber) : null;
 
 	while (true) {
 		const duration = ns.getHackTime(target);
@@ -24,6 +26,20 @@ export async function main(ns) {
 				)
 			);
 			continue;
+		}
+
+		const control = controlPort ? controlPort.peek() : null;
+		if (
+			control &&
+			typeof control === "object" &&
+			control.type === "jit-control" &&
+			Number(control.hackPauseUntil) >= landAt
+		) {
+			await report(port, {
+				type: "skip", phase, batchId, chunkId, target, time: Date.now(),
+				reason: `H suppressed for local recovery until ${Number(control.hackPauseUntil)}`,
+			});
+			return;
 		}
 
 		if (untilCall < -maxLate) {
