@@ -5529,6 +5529,26 @@ function untrackRunningByChunk(
 	);
 }
 
+// Prep waves are intentionally simple and are not latency-sensitive.
+// Keep their small running set exact without bringing the full PID sweep back
+// into the live JIT scheduler.
+function reapRunning(
+	ns,
+	running
+) {
+	for (const [pid, chunk] of running) {
+		if (ns.isRunning(pid)) {
+			continue;
+		}
+
+		untrackRunning(
+			running,
+			pid,
+			chunk
+		);
+	}
+}
+
 function reconcileRunning(
 	ns,
 	running,
