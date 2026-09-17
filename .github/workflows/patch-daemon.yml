@@ -1,0 +1,254 @@
+name: One-shot daemon dashboard patch
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch daemon accounting and warmup status
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/daemon.js")
+          text = path.read_text()
+
+          def replace_once(old, new, label):
+              global text
+              if old not in text:
+                  raise SystemExit(f"Expected daemon snippet not found: {label}")
+              text = text.replace(old, new, 1)
+
+          replace_once(
+              '''\tlet nextHackLanding =
+          \t\tDate.now() +
+          \t\truntime.plan.times.W +
+          \t\tcfg.lead +
+          \t\tSTARTUP_BUFFER_MS;
+          ''',
+              '''\tlet nextHackLanding =
+          \t\tDate.now() +
+          \t\truntime.plan.times.W +
+          \t\tcfg.lead +
+          \t\tSTARTUP_BUFFER_MS;
+
+          \tstats.nextHackLanding =
+          \t\tnextHackLanding;
+          ''',
+              "initial hack ETA",
+          )
+
+          replace_once(
+              '''\t\t\tnextHackLanding =
+          \t\t\t\tDate.now() +
+          \t\t\t\truntime.plan.times.W +
+          \t\t\t\tcfg.lead +
+          \t\t\t\tSTARTUP_BUFFER_MS;
+
+          \t\t\tconsecutiveAllocationFailures = 0;
+          ''',
+              '''\t\t\tnextHackLanding =
+          \t\t\t\tDate.now() +
+          \t\t\t\truntime.plan.times.W +
+          \t\t\t\tcfg.lead +
+          \t\t\t\tSTARTUP_BUFFER_MS;
+
+          \t\t\tstats.nextHackLanding =
+          \t\t\t\tnextHackLanding;
+
+          \t\t\tconsecutiveAllocationFailures = 0;
+          ''',
+              "reconfigured hack ETA",
+          )
+
+          replace_once(
+              '''\t\texpected,
+          \t\tlanding,
+
+          \t\tphases: {
+          ''',
+              '''\t\texpected,
+          \t\tlanding,
+
+          \t\tmoneyEarned: 0,
+
+          \t\tphases: {
+          ''',
+              "batch earned-money state",
+          )
+
+          replace_once(
+              '''\t\t\tstats.money +=
+          \t\t\t\tearned;
+
+          \t\t\tstats.income.push({
+          ''',
+              '''\t\t\tstats.money +=
+          \t\t\t\tearned;
+
+          \t\t\tbatch.moneyEarned +=
+          \t\t\t\tearned;
+
+          \t\t\tstats.lastHackAt =
+          \t\t\t\tfinished;
+
+          \t\t\tstats.income.push({
+          ''',
+              "hack event accounting",
+          )
+
+          replace_once(
+              '''\t\tif (
+          \t\t\tphase ===
+          \t\t\t"W2"
+          \t\t) {
+          \t\t\tstats.completed++;
+
+          \t\t\tstats.batchTimes.push(
+          \t\t\t\tstate.max
+          \t\t\t);
+
+          \t\t\tstats.lastW2 =
+          \t\t\t\tstate.max;
+          ''',
+              '''\t\tif (
+          \t\t\tphase ===
+          \t\t\t"W2"
+          \t\t) {
+          \t\t\tif (
+          \t\t\t\tbatch.phases.H.skipped
+          \t\t\t) {
+          \t\t\t\tstats.recovered++;
+          \t\t\t} else {
+          \t\t\t\tstats.completed++;
+
+          \t\t\t\tif (
+          \t\t\t\t\tbatch.moneyEarned >
+          \t\t\t\t\t0
+          \t\t\t\t) {
+          \t\t\t\t\tstats.profitable++;
+          \t\t\t\t}
+
+          \t\t\t\tstats.batchTimes.push(
+          \t\t\t\t\tstate.max
+          \t\t\t\t);
+          \t\t\t}
+
+          \t\t\tstats.lastW2 =
+          \t\t\t\tstate.max;
+          ''',
+              "W2 batch classification",
+          )
+
+          replace_once(
+              '''\t\tcompleted: 0,
+
+          \t\t// Total number of safe batch landing slots skipped because the
+          ''',
+              '''\t\tcompleted: 0,
+
+          \t\trecovered: 0,
+
+          \t\tprofitable: 0,
+
+          \t\tnextHackLanding:
+          \t\t\tNaN,
+
+          \t\tlastHackAt:
+          \t\t\tNaN,
+
+          \t\t// Total number of safe batch landing slots skipped because the
+          ''',
+              "dashboard stats",
+          )
+
+          replace_once(
+              '''\tconst p =
+          \t\truntime.plan;
+
+          \tns.clearLog();
+          ''',
+              '''\tconst p =
+          \t\truntime.plan;
+
+          \tconst hackStatus =
+          \t\tNumber.isFinite(
+          \t\t\tstats.lastHackAt
+          \t\t)
+          \t\t\t? "LIVE"
+          \t\t\t: Number.isFinite(
+          \t\t\t\tstats.nextHackLanding
+          \t\t\t)
+          \t\t\t\t? `ETA ${formatTime(
+          \t\t\t\t\tMath.max(
+          \t\t\t\t\t\t0,
+          \t\t\t\t\t\tstats.nextHackLanding -
+          \t\t\t\t\t\tnow
+          \t\t\t\t\t)
+          \t\t\t\t)}`
+          \t\t\t\t: "n/a";
+
+          \tns.clearLog();
+          ''',
+              "hack status",
+          )
+
+          replace_once(
+              '''\tns.print(
+          \t\t`Batches     ` +
+          \t\t`${stats.scheduled} scheduled ` +
+          \t\t`| ${stats.completed} completed`
+          \t);
+
+          \tns.print(
+          \t\t`Allocator   ` +
+          ''',
+              '''\tns.print(
+          \t\t`Batches     ` +
+          \t\t`${stats.scheduled} scheduled ` +
+          \t\t`| ${stats.completed} completed ` +
+          \t\t`| ${stats.recovered} recovered`
+          \t);
+
+          \tns.print(
+          \t\t`Hack status ${hackStatus} ` +
+          \t\t`| ${stats.profitable} paid batch(es)`
+          \t);
+
+          \tns.print(
+          \t\t`Allocator   ` +
+          ''',
+              "dashboard batch output",
+          )
+
+          path.write_text(text)
+          PY
+
+      - name: Validate daemon syntax
+        run: |
+          node --check src/daemon.js
+          git diff --check
+
+      - name: Commit daemon patch
+        run: |
+          if git diff --quiet -- src/daemon.js; then
+            echo "No daemon changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/daemon.js
+          git commit -m "Clarify daemon batch recovery and hack warmup [skip ci]"
+          git push origin HEAD:main
