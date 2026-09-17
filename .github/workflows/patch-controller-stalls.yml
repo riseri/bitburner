@@ -1,0 +1,104 @@
+name: Patch controller stalls
+
+on:
+  push:
+    branches: [fix/jit-controller-stalls]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch daemon
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/daemon.js')
+          text = path.read_text()
+
+          def r(old, new, label):
+              global text
+              if old not in text:
+                  raise SystemExit(f'missing snippet: {label}')
+              text = text.replace(old, new, 1)
+
+          r('const PROCESS_REAP_MS = 1_000;\n', 'const PROCESS_RECONCILE_MS = 30_000;\nconst PROCESS_RECONCILE_LIMIT = 20;\n', 'reap constants')
+
+          r('''\tconst running = new Map();\n\tconst batches = new Map();\n''', '''\tconst running = new Map();\n\tconst runningByChunk = new Map();\n\tconst batches = new Map();\n''', 'running index')
+
+          r('''\tlet lastUi = 0;\n\tlet lastReap = 0;\n\tlet lastOverdueCheck = 0;\n''', '''\tlet lastUi = 0;\n\tlet lastReconcile = 0;\n\tlet lastLoopAt = Date.now();\n\tlet lastOverdueCheck = 0;\n''', 'loop timers')
+
+          r('''\twhile (true) {\n\t\tconst loopNow =\n\t\t\tDate.now();\n''', '''\twhile (true) {\n\t\tconst loopNow =\n\t\t\tDate.now();\n\n\t\tconst loopLag =\n\t\t\tMath.max(\n\t\t\t\t0,\n\t\t\t\tloopNow - lastLoopAt - 5\n\t\t\t);\n\n\t\tstats.loopLagSum += loopLag;\n\t\tstats.loopLagCount++;\n\t\tstats.loopLagMax =\n\t\t\tMath.max(\n\t\t\t\tstats.loopLagMax,\n\t\t\t\tloopLag\n\t\t\t);\n\t\tstats.pipeline.loopLagMax =\n\t\t\tMath.max(\n\t\t\t\tstats.pipeline.loopLagMax,\n\t\t\t\tloopLag\n\t\t\t);\n\n\t\tlastLoopAt = loopNow;\n''', 'loop lag')
+
+          r('''\t\tif (\n\t\t\tloopNow -\n\t\t\tlastReap >=\n\t\t\tPROCESS_REAP_MS\n\t\t) {\n\t\t\tlastReap =\n\t\t\t\tloopNow;\n\n\t\t\treapRunning(\n\t\t\t\tns,\n\t\t\t\trunning\n\t\t\t);\n\t\t}\n''', '''\t\tif (\n\t\t\tloopNow -\n\t\t\tlastReconcile >=\n\t\t\tPROCESS_RECONCILE_MS\n\t\t) {\n\t\t\tlastReconcile = loopNow;\n\n\t\t\treconcileRunning(\n\t\t\t\tns,\n\t\t\t\trunning,\n\t\t\t\trunningByChunk,\n\t\t\t\tPROCESS_RECONCILE_LIMIT\n\t\t\t);\n\t\t}\n''', 'bounded reconcile')
+
+          r('''\t\t\t\trunning,\n\t\t\t\tdrain\n\t\t\t);\n''', '''\t\t\t\trunning,\n\t\t\t\trunningByChunk,\n\t\t\t\tdrain\n\t\t\t);\n''', 'first launch index')
+          r('''\t\t\t\trunning,\n\t\t\t\tdrain\n\t\t\t);\n''', '''\t\t\t\trunning,\n\t\t\t\trunningByChunk,\n\t\t\t\tdrain\n\t\t\t);\n''', 'second launch index')
+
+          r('''\t\t\t\tstats,\n\t\t\t\ttarget,\n\t\t\t\truntime,\n\t\t\t\tcfg\n\t\t\t);\n''', '''\t\t\t\tstats,\n\t\t\t\ttarget,\n\t\t\t\truntime,\n\t\t\t\tcfg,\n\t\t\t\trunning,\n\t\t\t\trunningByChunk\n\t\t\t);\n''', 'consume event running args')
+
+          r('''\t\t\tclearRunning(running);\n\n\t\t\tport.clear();\n''', '''\t\t\tclearRunning(running);\n\t\t\trunningByChunk.clear();\n\n\t\t\tport.clear();\n''', 'clear chunk index')
+
+          r('''\t\t\tstats.lastHackAt =\n\t\t\t\tNaN;\n\n\t\t\tconsecutiveAllocationFailures = 0;\n''', '''\t\t\tstats.lastHackAt =\n\t\t\t\tNaN;\n\n\t\t\tresetPipelineStats(stats);\n\n\t\t\tconsecutiveAllocationFailures = 0;\n''', 'reset pipeline stats')
+
+          r('''function recordPhaseMiss(\n\tstats,\n\tphase,\n\texecFailure = false\n) {\n''', '''function recordPhaseMiss(\n\tstats,\n\tphase,\n\texecFailure = false\n) {\n''', 'record miss anchor')
+          r('''\t\tstats.misses[phase]++;\n\n\t\tif (execFailure) {\n''', '''\t\tstats.misses[phase]++;\n\t\tstats.pipeline.misses[phase]++;\n\n\t\tif (execFailure) {\n''', 'pipeline misses')
+
+          r('''\tstats.recoveries++;\n\tstats.lastReason =\n''', '''\tstats.recoveries++;\n\tstats.pipeline.recoveries++;\n\tstats.lastReason =\n''', 'pipeline recoveries')
+
+          r('''function consumeEvents(\n\tns,\n\tport,\n\tbatches,\n\tstats,\n\ttarget,\n\truntime,\n\tcfg\n) {\n''', '''function consumeEvents(\n\tns,\n\tport,\n\tbatches,\n\tstats,\n\ttarget,\n\truntime,\n\tcfg,\n\trunning,\n\trunningByChunk\n) {\n''', 'consume signature')
+
+          r('''\t\tif (\n\t\t\t!event ||\n\t\t\ttypeof event !==\n\t\t\t"object"\n\t\t) {\n\t\t\tcontinue;\n\t\t}\n''', '''\t\tif (\n\t\t\t!event ||\n\t\t\ttypeof event !==\n\t\t\t"object"\n\t\t) {\n\t\t\tcontinue;\n\t\t}\n\n\t\tuntrackRunningByChunk(\n\t\t\trunning,\n\t\t\trunningByChunk,\n\t\t\tString(event.chunkId ?? "")\n\t\t);\n''', 'event cleanup')
+
+          r('''\t\tstats.driftMax =\n\t\t\tMath.max(\n\t\t\t\tstats.driftMax,\n\t\t\t\tdrift\n\t\t\t);\n''', '''\t\tstats.driftMax =\n\t\t\tMath.max(\n\t\t\t\tstats.driftMax,\n\t\t\t\tdrift\n\t\t\t);\n\n\t\tstats.pipeline.driftSum += drift;\n\t\tstats.pipeline.driftCount++;\n\t\tstats.pipeline.driftMax =\n\t\t\tMath.max(\n\t\t\t\tstats.pipeline.driftMax,\n\t\t\t\tdrift\n\t\t\t);\n''', 'pipeline drift')
+
+          r('''\t\t\tstats.minSpacing =\n\t\t\t\tMath.min(\n\t\t\t\t\tstats.minSpacing,\n\t\t\t\t\tspacing\n\t\t\t\t);\n''', '''\t\t\tstats.minSpacing =\n\t\t\t\tMath.min(\n\t\t\t\t\tstats.minSpacing,\n\t\t\t\t\tspacing\n\t\t\t\t);\n\t\t\tstats.pipeline.minSpacing =\n\t\t\t\tMath.min(\n\t\t\t\t\tstats.pipeline.minSpacing,\n\t\t\t\t\tspacing\n\t\t\t\t);\n''', 'pipeline spacing first')
+          r('''\t\t\t\tstats.minSpacing =\n\t\t\t\t\tMath.min(\n\t\t\t\t\t\tstats.minSpacing,\n\t\t\t\t\t\tspacing\n\t\t\t\t\t);\n''', '''\t\t\t\tstats.minSpacing =\n\t\t\t\t\tMath.min(\n\t\t\t\t\t\tstats.minSpacing,\n\t\t\t\t\t\tspacing\n\t\t\t\t\t);\n\t\t\t\tstats.pipeline.minSpacing =\n\t\t\t\t\tMath.min(\n\t\t\t\t\t\tstats.pipeline.minSpacing,\n\t\t\t\t\t\tspacing\n\t\t\t\t\t);\n''', 'pipeline spacing second')
+
+          r('''\tstats,\n\trunning,\n\tdrain\n) {\n''', '''\tstats,\n\trunning,\n\trunningByChunk,\n\tdrain\n) {\n''', 'launch signature')
+
+          r('''\t\ttrackRunning(\n\t\t\trunning,\n\t\t\tpid,\n\t\t\tchunk\n\t\t);\n''', '''\t\ttrackRunning(\n\t\t\trunning,\n\t\t\tpid,\n\t\t\tchunk\n\t\t);\n\n\t\trunningByChunk.set(\n\t\t\tchunk.chunkId,\n\t\t\tpid\n\t\t);\n''', 'launch chunk index')
+
+          old_reap = '''function reapRunning(\n\tns,\n\trunning\n) {\n\tfor (\n\t\tconst [\n\t\t\tpid,\n\t\t\tchunk,\n\t\t]\n\t\tof running\n\t) {\n\t\tif (\n\t\t\t!ns.isRunning(\n\t\t\t\tpid\n\t\t\t)\n\t\t) {\n\t\t\tuntrackRunning(\n\t\t\t\trunning,\n\t\t\t\tpid,\n\t\t\t\tchunk\n\t\t\t);\n\t\t}\n\t}\n}\n'''
+          new_reap = '''function untrackRunningByChunk(\n\trunning,\n\trunningByChunk,\n\tchunkId\n) {\n\tif (!chunkId) {\n\t\treturn;\n\t}\n\n\tconst pid =\n\t\trunningByChunk.get(\n\t\t\tchunkId\n\t\t);\n\n\tif (pid == null) {\n\t\treturn;\n\t}\n\n\tconst chunk =\n\t\trunning.get(pid);\n\n\tif (chunk) {\n\t\tuntrackRunning(\n\t\t\trunning,\n\t\t\tpid,\n\t\t\tchunk\n\t\t);\n\t}\n\n\trunningByChunk.delete(\n\t\tchunkId\n\t);\n}\n\nfunction reconcileRunning(\n\tns,\n\trunning,\n\trunningByChunk,\n\tlimit\n) {\n\tlet checked = 0;\n\n\tfor (\n\t\tconst [pid, chunk]\n\t\tof running\n\t) {\n\t\tif (checked++ >= limit) {\n\t\t\tbreak;\n\t\t}\n\n\t\tif (ns.isRunning(pid)) {\n\t\t\tcontinue;\n\t\t}\n\n\t\tuntrackRunning(\n\t\t\trunning,\n\t\t\tpid,\n\t\t\tchunk\n\t\t);\n\n\t\trunningByChunk.delete(\n\t\t\tchunk.chunkId\n\t\t);\n\t}\n}\n'''
+          r(old_reap, new_reap, 'replace full reap')
+
+          r('''\t\tlastReason:\n\t\t\t"none",\n''', '''\t\tloopLagSum: 0,\n\t\tloopLagCount: 0,\n\t\tloopLagMax: 0,\n\n\t\tpipeline: createPipelineStats(),\n\n\t\tlastReason:\n\t\t\t"none",\n''', 'stats telemetry')
+
+          marker = 'function renderTargetAnalysis('
+          insert = '''function createPipelineStats() {\n\treturn {\n\t\tstarted: Date.now(),\n\t\trecoveries: 0,\n\t\tmisses: { H: 0, W1: 0, G: 0, W2: 0 },\n\t\tdriftSum: 0,\n\t\tdriftCount: 0,\n\t\tdriftMax: 0,\n\t\tminSpacing: Infinity,\n\t\tloopLagMax: 0,\n\t};\n}\n\nfunction resetPipelineStats(stats) {\n\tstats.pipeline = createPipelineStats();\n}\n\n'''
+          if marker not in text:
+              raise SystemExit('missing render target marker')
+          text = text.replace(marker, insert + marker, 1)
+
+          r('''\tconst minSpacing =\n\t\tNumber.isFinite(\n\t\t\tstats.minSpacing\n\t\t)\n\t\t\t? `${stats.minSpacing.toFixed(1)}ms`\n\t\t\t: "n/a";\n''', '''\tconst minSpacing =\n\t\tNumber.isFinite(\n\t\t\tstats.minSpacing\n\t\t)\n\t\t\t? `${stats.minSpacing.toFixed(1)}ms`\n\t\t\t: "n/a";\n\n\tconst pipelineDriftAvg =\n\t\tstats.pipeline.driftCount\n\t\t\t? stats.pipeline.driftSum /\n\t\t\tstats.pipeline.driftCount\n\t\t\t: 0;\n\n\tconst pipelineSpacing =\n\t\tNumber.isFinite(\n\t\t\tstats.pipeline.minSpacing\n\t\t)\n\t\t\t? `${stats.pipeline.minSpacing.toFixed(1)}ms`\n\t\t\t: "n/a";\n''', 'pipeline dashboard vars')
+
+          r('''\tns.print(\n\t\t`Misses      ` +\n\t\t`H:${stats.misses.H} ` +\n''', '''\tns.print(\n\t\t`Pipe misses ` +\n\t\t`H:${stats.pipeline.misses.H} ` +\n\t\t`W1:${stats.pipeline.misses.W1} ` +\n\t\t`G:${stats.pipeline.misses.G} ` +\n\t\t`W2:${stats.pipeline.misses.W2} ` +\n\t\t`| recoveries ${stats.pipeline.recoveries}`\n\t);\n\n\tns.print(\n\t\t`Pipe drift  ` +\n\t\t`avg ${pipelineDriftAvg.toFixed(2)}ms ` +\n\t\t`| max ${stats.pipeline.driftMax.toFixed(2)}ms ` +\n\t\t`| spacing ${pipelineSpacing}`\n\t);\n\n\tns.print(\n\t\t`Loop lag    ` +\n\t\t`max ${stats.pipeline.loopLagMax.toFixed(1)}ms current ` +\n\t\t`| ${stats.loopLagMax.toFixed(1)}ms lifetime`\n\t);\n\n\tns.print(\n\t\t`Misses      ` +\n\t\t`H:${stats.misses.H} ` +\n''', 'dashboard pipeline metrics')
+
+          path.write_text(text)
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          cp src/daemon.js /tmp/daemon.mjs
+          node --check /tmp/daemon.mjs
+          git diff --check
+
+      - name: Commit patch and remove workflow
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/patch-controller-stalls.yml
+          git add src/daemon.js
+          git commit -m "Reduce JIT controller stall risk"
+          git push origin HEAD:fix/jit-controller-stalls
