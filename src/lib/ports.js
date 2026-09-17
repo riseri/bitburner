@@ -4,4 +4,5 @@ export const PORTS = Object.freeze({
 	CONTRACT_STATUS: 18,
 	JIT_STATUS: 17,
 	PROGRESSION_STATUS: 16,
+	JIT_CONTROL: 15,
 });
