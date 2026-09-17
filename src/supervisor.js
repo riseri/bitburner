@@ -4,6 +4,7 @@ const HOME = "home";
 const DAEMON = "daemon.js";
 const FLEET = "fleet-manager.js";
 const CONTRACTS = "contract-manager.js";
+const PROGRESSION = "progression-manager.js";
 const CONTRACT_SELFTEST = "contract-selftest.js";
 const HEARTBEAT_STALE_MS = 15_000;
 
@@ -11,6 +12,7 @@ const HEARTBEAT_STALE_MS = 15_000;
 export async function main(ns) {
 	const flags = ns.flags([
 		["contracts", true],
+		["progression", true],
 		["contract-selftest", false],
 		["interval", 5_000],
 	]);
@@ -19,11 +21,16 @@ export async function main(ns) {
 
 	const cfg = {
 		contracts: asBoolean(flags.contracts),
+		progression: asBoolean(flags.progression),
 		contractSelftest: asBoolean(flags["contract-selftest"]),
 		interval: Math.max(1_000, Number(flags.interval) || 5_000),
 	};
 
-	for (const script of [DAEMON, FLEET, CONTRACTS]) {
+	const required = [DAEMON, FLEET];
+	if (cfg.contracts) required.push(CONTRACTS);
+	if (cfg.progression) required.push(PROGRESSION);
+
+	for (const script of required) {
 		if (!ns.fileExists(script, HOME)) {
 			ns.tprint(`ERROR: supervisor missing ${script}`);
 			return;
@@ -37,40 +44,47 @@ export async function main(ns) {
 	ensureRunning(ns, DAEMON);
 
 	while (true) {
-		// daemon.js owns fleet-manager startup today. The supervisor still
-		// repairs the fleet process if it disappears after daemon startup.
+		// daemon.js still owns initial fleet-manager startup. Supervisor repairs
+		// background managers if one exits or stops publishing heartbeats.
 		ensureRunning(ns, FLEET);
-
-		if (cfg.contracts) {
-			ensureRunning(ns, CONTRACTS);
-		}
+		if (cfg.contracts) ensureRunning(ns, CONTRACTS);
+		if (cfg.progression) ensureRunning(ns, PROGRESSION);
 
 		const fleetStatus = ns.getPortHandle(PORTS.FLEET_STATUS).peek();
 		const contractStatus = cfg.contracts
 			? ns.getPortHandle(PORTS.CONTRACT_STATUS).peek()
 			: null;
+		const progressionStatus = cfg.progression
+			? ns.getPortHandle(PORTS.PROGRESSION_STATUS).peek()
+			: null;
 
 		const fleetHealth = heartbeatHealth(fleetStatus, "fleet-status");
 		const contractHealth = cfg.contracts
 			? heartbeatHealth(contractStatus, "contract-status")
-			: { healthy: true, age: 0, label: "disabled" };
+			: disabledHealth();
+		const progressionHealth = cfg.progression
+			? heartbeatHealth(progressionStatus, "progression-status")
+			: disabledHealth();
 
 		if (!fleetHealth.healthy && isRunning(ns, FLEET)) {
 			restart(ns, FLEET, `stale fleet heartbeat (${formatAge(fleetHealth.age)})`);
 		}
-
 		if (cfg.contracts && !contractHealth.healthy && isRunning(ns, CONTRACTS)) {
 			restart(ns, CONTRACTS, `stale contract heartbeat (${formatAge(contractHealth.age)})`);
 		}
+		if (cfg.progression && !progressionHealth.healthy && isRunning(ns, PROGRESSION)) {
+			restart(ns, PROGRESSION, `stale progression heartbeat (${formatAge(progressionHealth.age)})`);
+		}
 
-		render(
-			ns,
+		render(ns, {
+			cfg,
 			fleetStatus,
 			contractStatus,
+			progressionStatus,
 			fleetHealth,
 			contractHealth,
-			cfg
-		);
+			progressionHealth,
+		});
 
 		await ns.sleep(cfg.interval);
 	}
@@ -79,13 +93,14 @@ export async function main(ns) {
 function ensureRunning(ns, script) {
 	if (isRunning(ns, script)) return;
 	const pid = ns.run(script, 1);
-	if (!pid) ns.tprint(`WARN: supervisor could not start ${script}`);
+	if (!pid) ns.print(`WARN: supervisor could not start ${script}`);
 }
 
 function restart(ns, script, reason) {
 	ns.scriptKill(script, HOME);
 	const pid = ns.run(script, 1);
-	ns.tprint(`${script} restarted: ${reason}${pid ? ` (pid ${pid})` : " (start failed)"}`);
+	// Keep recovery chatter in the supervisor log. Do not spam the terminal.
+	ns.print(`${script} restarted: ${reason}${pid ? ` (pid ${pid})` : " (start failed)"}`);
 }
 
 function isRunning(ns, script) {
@@ -99,10 +114,14 @@ function findProcess(ns, script) {
 async function runOnce(ns, script) {
 	const pid = ns.run(script, 1);
 	if (!pid) {
-		ns.tprint(`WARN: unable to start ${script}`);
+		ns.print(`WARN: unable to start ${script}`);
 		return;
 	}
 	while (ns.isRunning(pid, HOME)) await ns.sleep(100);
+}
+
+function disabledHealth() {
+	return { healthy: true, age: 0, label: "disabled" };
 }
 
 function heartbeatHealth(value, expectedType) {
@@ -117,10 +136,21 @@ function heartbeatHealth(value, expectedType) {
 	};
 }
 
-function render(ns, fleetStatus, contractStatus, fleetHealth, contractHealth, cfg) {
+function render(ns, state) {
+	const {
+		cfg,
+		fleetStatus,
+		contractStatus,
+		progressionStatus,
+		fleetHealth,
+		contractHealth,
+		progressionHealth,
+	} = state;
+
 	const daemon = readDaemonDashboard(ns);
 	const fleet = fleetStatus?.type === "fleet-status" ? fleetStatus : null;
 	const contracts = contractStatus?.type === "contract-status" ? contractStatus : null;
+	const progression = progressionStatus?.type === "progression-status" ? progressionStatus : null;
 
 	ns.clearLog();
 	ns.print("BITBURNER AUTOMATION");
@@ -131,6 +161,7 @@ function render(ns, fleetStatus, contractStatus, fleetHealth, contractHealth, cf
 	ns.print(`  Money engine     ${processStatus(ns, DAEMON)}`);
 	ns.print(`  Fleet manager    ${processHealth(ns, FLEET, fleetHealth)}`);
 	ns.print(`  Contract hunter  ${cfg.contracts ? processHealth(ns, CONTRACTS, contractHealth) : "Disabled"}`);
+	ns.print(`  Progression      ${cfg.progression ? processHealth(ns, PROGRESSION, progressionHealth) : "Disabled"}`);
 	ns.print("");
 
 	if (daemon) {
@@ -144,10 +175,9 @@ function render(ns, fleetStatus, contractStatus, fleetHealth, contractHealth, cf
 
 	renderFleet(ns, fleet);
 	renderContracts(ns, contracts, cfg);
+	renderProgression(ns, progression, cfg);
 
-	if (daemon) {
-		renderHealth(ns, daemon);
-	}
+	if (daemon) renderHealth(ns, daemon);
 }
 
 function renderMoneyEngine(ns, daemon) {
@@ -232,9 +262,7 @@ function renderFleet(ns, fleet) {
 			`${formatRam(cloud.maxRam)} largest | ${formatRam(cloud.ramLimit)} max`
 		);
 	}
-	if (Number(cloud.spent) > 0) {
-		ns.print(`  Cloud invested   ${cash(cloud.spent)}`);
-	}
+	if (Number(cloud.spent) > 0) ns.print(`  Cloud invested   ${cash(cloud.spent)}`);
 	if (cloud.nextAction) ns.print(`  Next upgrade      ${humanCloudAction(String(cloud.nextAction))}`);
 	if (cloud.lastAction && cloud.lastAction !== "none") {
 		ns.print(`  Last upgrade      ${humanCloudAction(String(cloud.lastAction))}`);
@@ -258,9 +286,7 @@ function renderContracts(ns, contracts, cfg) {
 
 	ns.print(`  Solved            ${Number(contracts.solved) || 0}`);
 	ns.print(`  Found             ${Number(contracts.found) || 0}`);
-	if (Number(contracts.unsupported) > 0) {
-		ns.print(`  Unsupported       ${Number(contracts.unsupported)}`);
-	}
+	if (Number(contracts.unsupported) > 0) ns.print(`  Unsupported       ${Number(contracts.unsupported)}`);
 	if (Number(contracts.quarantined) > 0) {
 		ns.print(`  Quarantined       ${Number(contracts.quarantined)} solver type(s)`);
 	}
@@ -269,6 +295,56 @@ function renderContracts(ns, contracts, cfg) {
 	}
 	if (contracts.lastAction) ns.print(`  Current activity  ${humanContractAction(String(contracts.lastAction))}`);
 	if (contracts.error) ns.print(`  Contract warning  ${contracts.error}`);
+	ns.print("");
+}
+
+function renderProgression(ns, progression, cfg) {
+	ns.print("PROGRESSION");
+	if (!cfg.progression) {
+		ns.print("  Planner          Disabled");
+		ns.print("");
+		return;
+	}
+	if (!progression) {
+		ns.print("  Waiting for progression status...");
+		ns.print("");
+		return;
+	}
+	if (progression.error) {
+		ns.print(`  Planner warning  ${progression.error}`);
+		ns.print("");
+		return;
+	}
+
+	ns.print(`  BitNode          BN${Number(progression.currentNode) || "?"}`);
+	ns.print(`  Singularity      ${progression.singularity?.available ? `Available (${progression.singularity.source})` : "Locked - requires BN4 or Source-File 4"}`);
+	ns.print(`  Source Files     ${formatSourceFiles(progression.sourceFiles)}`);
+	ns.print(`  TOR router       ${progression.torOwned ? "Owned" : "Not owned"}`);
+	ns.print(`  Port programs    ${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0}`);
+
+	const missingPrograms = Array.isArray(progression.programs)
+		? progression.programs.filter(program => !program.owned).map(program => program.name)
+		: [];
+	if (missingPrograms.length) ns.print(`  Missing programs ${missingPrograms.join(", ")}`);
+
+	ns.print(
+		`  Faction access   ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} key backdoors installed`
+	);
+
+	const ready = Array.isArray(progression.backdoors)
+		? progression.backdoors.find(target => target.ready)
+		: null;
+	if (ready) {
+		ns.print(`  Ready backdoor   ${ready.host} -> ${ready.faction}`);
+		if (Array.isArray(ready.path) && ready.path.length) {
+			ns.print(`  Route            ${ready.path.join(" -> ")}`);
+		}
+	}
+
+	if (progression.nextObjective?.label) {
+		ns.print(`  Next objective   ${progression.nextObjective.label}`);
+	}
+	ns.print(`  Automation       Planner only - no player actions or resets`);
 	ns.print("");
 }
 
@@ -290,7 +366,6 @@ function renderHealth(ns, daemon) {
 		if (hasLifetimeProblem) ns.print(`  Lifetime misses   ${humanPhaseCounters(daemon.misses)}`);
 		if (daemon.recovery) ns.print(`  Recovery          ${humanRecovery(daemon.recovery)}`);
 	}
-
 	if (daemon.last && daemon.last !== "none") ns.print(`  Last event        ${daemon.last}`);
 }
 
@@ -314,12 +389,8 @@ function readDaemonDashboard(ns) {
 		};
 	}
 
-	const reconfigureHeader = findLog(logs, "JIT DAEMON :: RECONFIGURE");
-	if (reconfigureHeader) {
-		return {
-			mode: "reconfigure",
-			reason: field(logs, "Reason"),
-		};
+	if (findLog(logs, "JIT DAEMON :: RECONFIGURE")) {
+		return { mode: "reconfigure", reason: field(logs, "Reason") };
 	}
 
 	const header = findLog(logs, "JIT DAEMON ::");
@@ -357,10 +428,8 @@ function readDaemonDashboard(ns) {
 function parseTargets(logs) {
 	const entries = [];
 	const pattern = /^\s*(>)?\s*([^\s]+)\s+(\$\S+\/s)\s+steady:(\$\S+\/s)\s+S:\s*([\d.]+%)\s+P:\s*(\S+)\s+prep:\s*(\S+)/;
-
 	for (const raw of logs) {
-		const line = stripPrefix(raw);
-		const match = line.match(pattern);
+		const match = stripPrefix(raw).match(pattern);
 		if (!match) continue;
 		entries.push({
 			selected: Boolean(match[1]),
@@ -372,15 +441,13 @@ function parseTargets(logs) {
 			prep: match[7],
 		});
 	}
-
 	return entries;
 }
 
 function field(logs, label) {
 	for (let i = logs.length - 1; i >= 0; i--) {
 		const line = stripPrefix(logs[i]);
-		if (!line.startsWith(label)) continue;
-		return line.slice(label.length).trim();
+		if (line.startsWith(label)) return line.slice(label.length).trim();
 	}
 	return "";
 }
@@ -394,10 +461,7 @@ function findLog(logs, text) {
 }
 
 function stripPrefix(line) {
-	// Timestamped logs can prefix each print with text such as "12:34:56".
-	// Locate the known dashboard content instead of depending on a timestamp format.
-	const markers = ["JIT DAEMON ::", "TARGET ANALYSIS ::"];
-	for (const marker of markers) {
+	for (const marker of ["JIT DAEMON ::", "TARGET ANALYSIS ::"]) {
 		const index = line.indexOf(marker);
 		if (index >= 0) return line.slice(index);
 	}
@@ -414,23 +478,23 @@ function processHealth(ns, script, health) {
 	return health.label === "missing" ? "Starting" : `Stale (${formatAge(health.age)})`;
 }
 
+function formatSourceFiles(sourceFiles) {
+	if (!Array.isArray(sourceFiles) || !sourceFiles.length) return "None active";
+	return sourceFiles.map(sf => `SF${sf.number}.${sf.level}`).join(", ");
+}
+
 function humanState(value) {
-	if (value.startsWith("DRAINING ::")) {
-		return `Recovering safely - ${value.slice(11).trim()}`;
-	}
+	if (value.startsWith("DRAINING ::")) return `Recovering safely - ${value.slice(11).trim()}`;
 	return value === "RUNNING" ? "Running normally" : value;
 }
 
 function humanSteal(value) {
-	return value
-		.replace("| chance", "per batch | success chance")
-		.replace(/^(\S+%)/, "$1");
+	return value.replace("| chance", "per batch | success chance");
 }
 
 function humanBatchRate(value) {
 	return value
 		.replace("/s actual", " batches/sec")
-		.replace("|", "|")
 		.replace("/s model", " batches/sec expected");
 }
 
@@ -451,10 +515,7 @@ function humanPipeline(value) {
 }
 
 function humanBatches(value) {
-	return value
-		.replace("scheduled", "scheduled")
-		.replace("completed", "completed")
-		.replace("recovered", "safely recovered");
+	return value.replace("recovered", "safely recovered");
 }
 
 function humanAllocator(value) {
@@ -488,8 +549,7 @@ function humanPhaseCounters(value) {
 		.replace(/H:/g, "hack ")
 		.replace(/W1:/g, "weaken-1 ")
 		.replace(/G:/g, "grow ")
-		.replace(/W2:/g, "weaken-2 ")
-		.replace("| recoveries", "| recoveries");
+		.replace(/W2:/g, "weaken-2 ");
 }
 
 function humanCloudAction(value) {
@@ -508,6 +568,7 @@ function humanContractAction(value) {
 		.replace(/^waiting for fleet snapshot$/, "Waiting for network scan")
 		.replace(/^solved /, "Solved ")
 		.replace(/^unsupported /, "Found unsupported contract: ")
+		.replace(/^manual /, "Manual contract: ")
 		.replace(/^quarantined /, "Skipped quarantined solver: ")
 		.replace(/^dry-run solved /, "Dry-run validated ");
 }
@@ -531,15 +592,14 @@ function formatRam(gb) {
 
 function cash(value) {
 	const n = Number(value) || 0;
-	const units = [
+	for (const [threshold, suffix] of [
 		[1e18, "Q"],
 		[1e15, "q"],
 		[1e12, "t"],
 		[1e9, "b"],
 		[1e6, "m"],
 		[1e3, "k"],
-	];
-	for (const [threshold, suffix] of units) {
+	]) {
 		if (Math.abs(n) >= threshold) return `$${(n / threshold).toFixed(2)}${suffix}`;
 	}
 	return `$${n.toFixed(Math.abs(n) >= 100 ? 0 : 2)}`;
