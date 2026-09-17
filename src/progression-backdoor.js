@@ -69,9 +69,16 @@ export async function main(ns) {
 		await ns.singularity.installBackdoor();
 		ns.print(`Installed backdoor on ${target}`);
 	} finally {
-		if (reachedTarget && !connectRoute(ns, restore)) {
-			// If this ever fires, the network tree changed mid-action. Extremely normal browser game behavior.
-			ns.print(`WARN: could not restore previous connection to ${current}`);
+		if (reachedTarget) {
+			const afterAction = String(ns.singularity.getCurrentServer());
+
+			if (afterAction !== target) {
+				// Human touched the wheel. Their terminal session wins, obviously.
+				ns.print(`Connection moved to ${afterAction}; skipping automatic restore`);
+			} else if (!connectRoute(ns, restore)) {
+				// If this ever fires, the network tree changed mid-action. Extremely normal browser game behavior.
+				ns.print(`WARN: could not restore previous connection to ${current}`);
+			}
 		}
 	}
 }
