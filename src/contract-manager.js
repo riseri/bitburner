@@ -4,6 +4,7 @@ import { SOLVERS, solveContract } from "contract-solvers.js";
 const HOME = "home";
 const QUARANTINE_FILE = "contract-quarantine.txt";
 const DEFAULT_SCAN_MS = 30_000;
+const HEARTBEAT_MS = 5_000;
 const AUTO_DISABLED_TYPES = new Set([
 	"Square Root",
 ]);
@@ -61,7 +62,7 @@ export async function main(ns) {
 		state.lastRun = Date.now();
 		state.quarantined = quarantine.size;
 		publish(statusPort, state);
-		await ns.sleep(cfg.interval);
+		await sleepWithHeartbeats(ns, statusPort, state, cfg.interval);
 	}
 }
 
@@ -130,6 +131,18 @@ async function scanContracts(ns, servers, cfg, quarantine, state) {
 
 	if (foundThisPass === 0) {
 		state.lastAction = "no contracts found";
+	}
+}
+
+async function sleepWithHeartbeats(ns, port, state, duration) {
+	const wakeAt = Date.now() + duration;
+
+	while (true) {
+		const remaining = wakeAt - Date.now();
+		if (remaining <= 0) return;
+
+		await ns.sleep(Math.min(HEARTBEAT_MS, remaining));
+		publish(port, state);
 	}
 }
 
