@@ -1,0 +1,150 @@
+name: Patch non-destructive recovery v2
+
+on:
+  push:
+    branches: [fix/non-destructive-recovery]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch daemon
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/daemon.js')
+          s = p.read_text()
+
+          def one(old, new, label):
+              global s
+              n = s.count(old)
+              if n != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {n}')
+              s = s.replace(old, new, 1)
+
+          one('const PLANNING_LAUNCH_GUARD_MS = 20;\n',
+              'const PLANNING_LAUNCH_GUARD_MS = 20;\nconst SOFT_RECOVERY_MS = 2_000;\nconst SOFT_RECOVERY_MAX_MS = 15_000;\n',
+              'constants')
+          one('\t\t["fleet-port", 19],\n', '\t\t["fleet-port", 19],\n\t\t["control-port", 18],\n', 'flag')
+          one('\t\tfleetPort: Number(flags["fleet-port"]),\n', '\t\tfleetPort: Number(flags["fleet-port"]),\n\t\tcontrolPort: Number(flags["control-port"]),\n', 'cfg')
+          one('\tconst fleetPort = ns.getPortHandle(cfg.fleetPort);\n\tfleetPort.clear();\n',
+              '\tconst fleetPort = ns.getPortHandle(cfg.fleetPort);\n\tfleetPort.clear();\n\n\tconst controlPort = ns.getPortHandle(cfg.controlPort);\n\tcontrolPort.clear();\n\tpublishHackPause(controlPort, 0, "startup");\n', 'control init')
+          one('\tlet maintenance = null;\n\tlet drain = null;\n', '\tlet maintenance = null;\n\tlet drain = null;\n\tlet recovery = null;\n', 'recovery var')
+
+          old = '''\t\tif (eventProblem) {\n\t\t\tif (\n\t\t\t\teventProblem.kind ===\n\t\t\t\t"drain"\n\t\t\t) {\n\t\t\t\tconst result =\n\t\t\t\t\tbeginDrain(\n\t\t\t\t\t\tdrain,\n\t\t\t\t\t\teventProblem,\n\t\t\t\t\t\tqueue,\n\t\t\t\t\t\tbatches,\n\t\t\t\t\t\tstats,\n\t\t\t\t\t\tcfg\n\t\t\t\t\t);\n\n\t\t\t\tdrain =\n\t\t\t\t\tresult.drain;\n\n\t\t\t\tqueue =\n\t\t\t\t\tresult.queue;\n\t\t\t} else if (!maintenance) {\n\t\t\t\tmaintenance =\n\t\t\t\t\teventProblem;\n\t\t\t}\n\t\t}\n'''
+          new = '''\t\tif (eventProblem) {\n\t\t\tif (eventProblem.kind === "recover" && !drain && !maintenance) {\n\t\t\t\trecovery = beginSoftRecovery(\n\t\t\t\t\trecovery, eventProblem, controlPort, runtime, stats\n\t\t\t\t);\n\t\t\t} else if (eventProblem.kind === "drain") {\n\t\t\t\tconst result = beginDrain(\n\t\t\t\t\tdrain, eventProblem, queue, batches, stats, cfg\n\t\t\t\t);\n\t\t\t\tdrain = result.drain;\n\t\t\t\tqueue = result.queue;\n\t\t\t} else if (!maintenance) {\n\t\t\t\tmaintenance = eventProblem;\n\t\t\t}\n\t\t}\n\n\t\tif (recovery && !drain && !maintenance) {\n\t\t\tconst local = updateSoftRecovery(\n\t\t\t\tns, target, recovery, controlPort, runtime, stats\n\t\t\t);\n\t\t\trecovery = local.recovery;\n\t\t\tif (local.problem) {\n\t\t\t\tconst result = beginDrain(\n\t\t\t\t\tdrain, local.problem, queue, batches, stats, cfg\n\t\t\t\t);\n\t\t\t\tdrain = result.drain;\n\t\t\t\tqueue = result.queue;\n\t\t\t}\n\t\t}\n'''
+          one(old, new, 'event dispatch')
+
+          one('\t\t\t!maintenance &&\n\t\t\t!drain &&\n\t\t\tloopNow -\n\t\t\tlastOverdueCheck >=\n',
+              '\t\t\t!maintenance &&\n\t\t\t!drain &&\n\t\t\t!recovery &&\n\t\t\tloopNow -\n\t\t\tlastOverdueCheck >=\n', 'overdue gate')
+          one('\t\t\tconst deferredRetuneReady =\n\t\t\t\t!drain &&\n',
+              '\t\t\tconst deferredRetuneReady =\n\t\t\t\t!drain &&\n\t\t\t\t!recovery &&\n', 'capacity gate')
+          one('\t\t\t!maintenance &&\n\t\t\t!drain &&\n\t\t\thackingLevel >=\n',
+              '\t\t\t!maintenance &&\n\t\t\t!drain &&\n\t\t\t!recovery &&\n\t\t\thackingLevel >=\n', 'level gate')
+          one('\t\tif (maintenance) {\n\t\t\tif (\n',
+              '\t\tif (maintenance) {\n\t\t\trecovery = null;\n\t\t\tpublishHackPause(controlPort, 0, "maintenance");\n\n\t\t\tif (\n', 'maintenance reset')
+
+          one('\t\t\t\tcloudState,\n\t\t\t\tdrain,\n\t\t\t\tforeignUsedByHost\n',
+              '\t\t\t\tcloudState,\n\t\t\t\tdrain,\n\t\t\t\trecovery,\n\t\t\t\tforeignUsedByHost\n', 'dashboard call')
+          one('\ttargetAnalysis,\n\tcloudState,\n\tdrain,\n\tforeignUsedByHost\n',
+              '\ttargetAnalysis,\n\tcloudState,\n\tdrain,\n\trecovery,\n\tforeignUsedByHost\n', 'dashboard signature')
+          one('\t\t\t\tchunk.chunkId,\n\t\t\t\tmaxLate\n\t\t\t);\n',
+              '\t\t\t\tchunk.chunkId,\n\t\t\t\tmaxLate,\n\t\t\t\tcfg.controlPort\n\t\t\t);\n', 'worker control arg')
+
+          one('\t\trecoveries: 0,\n\n\t\tcancelledHackChunks: 0,\n',
+              '\t\trecoveries: 0,\n\n\t\tsoftRecoveries: 0,\n\t\tsoftRecoveryExtensions: 0,\n\t\tsoftRecoverySuccesses: 0,\n\t\tsuppressedHackChunks: 0,\n\n\t\tcancelledHackChunks: 0,\n', 'stats')
+          one('\t\trecoveries: 0,\n\t\tmisses: { H: 0, W1: 0, G: 0, W2: 0 },\n',
+              '\t\trecoveries: 0,\n\t\tsoftRecoveries: 0,\n\t\tsuppressedHackChunks: 0,\n\t\tmisses: { H: 0, W1: 0, G: 0, W2: 0 },\n', 'pipe stats')
+          one('\t\tmoneyEarned: 0,\n\n\t\tphases: {\n', '\t\tmoneyEarned: 0,\n\t\tpoisoned: false,\n\n\t\tphases: {\n', 'poison flag')
+
+          # mark skipped non-H batches as poisoned
+          target = '\tconst state =\n\t\tbatch.phases[phase];\n\n\tif (!state) {\n'
+          repl = '\tconst state =\n\t\tbatch.phases[phase];\n\n\tif (phase !== "H") {\n\t\tbatch.poisoned = true;\n\t}\n\n\tif (!state) {\n'
+          one(target, repl, 'poison skip')
+
+          helpers = '''function publishHackPause(port, pauseUntil, reason) {\n\tport.clear();\n\tport.tryWrite({\n\t\ttype: "jit-control",\n\t\thackPauseUntil: Math.max(0, Number(pauseUntil) || 0),\n\t\treason: String(reason ?? ""),\n\t\tgeneratedAt: Date.now(),\n\t});\n}\n\nfunction beginSoftRecovery(current, issue, controlPort, runtime, stats) {\n\tconst now = Date.now();\n\tconst windowMs = Math.max(SOFT_RECOVERY_MS, Math.ceil(runtime.plan.period * 12));\n\tconst checkLead = Math.min(500, Math.max(100, Math.ceil(runtime.plan.period * 2)));\n\n\tif (!current) {\n\t\tcurrent = {\n\t\t\treason: issue.reason,\n\t\t\tstarted: now,\n\t\t\tpauseUntil: now + windowMs,\n\t\t\tcheckAt: now + windowMs - checkLead,\n\t\t};\n\t\tstats.softRecoveries++;\n\t\tstats.pipeline.softRecoveries++;\n\t} else {\n\t\tcurrent.reason = issue.reason;\n\t\tcurrent.pauseUntil = Math.max(current.pauseUntil, now + windowMs);\n\t\tcurrent.checkAt = current.pauseUntil - checkLead;\n\t\tstats.softRecoveryExtensions++;\n\t}\n\n\tstats.lastReason = `recovering: ${issue.reason}`;\n\tpublishHackPause(controlPort, current.pauseUntil, current.reason);\n\treturn current;\n}\n\nfunction updateSoftRecovery(ns, target, current, controlPort, runtime, stats) {\n\tif (!current) return { recovery: null, problem: null };\n\n\tconst now = Date.now();\n\tif (now < current.checkAt) return { recovery: current, problem: null };\n\n\tconst maxMoney = ns.getServerMaxMoney(target);\n\tconst money = ns.getServerMoneyAvailable(target);\n\tconst minSec = ns.getServerMinSecurityLevel(target);\n\tconst sec = ns.getServerSecurityLevel(target);\n\tconst healthy = money >= maxMoney * 0.995 && sec <= minSec + 0.02;\n\n\tif (healthy && now >= current.pauseUntil) {\n\t\tpublishHackPause(controlPort, 0, "recovered");\n\t\tstats.softRecoverySuccesses++;\n\t\tstats.lastReason = `recovered locally: ${current.reason}`;\n\t\treturn { recovery: null, problem: null };\n\t}\n\n\tif (healthy) {\n\t\tcurrent.checkAt = current.pauseUntil;\n\t\treturn { recovery: current, problem: null };\n\t}\n\n\tif (now - current.started >= SOFT_RECOVERY_MAX_MS) {\n\t\tpublishHackPause(controlPort, 0, "recovery timeout");\n\t\treturn {\n\t\t\trecovery: null,\n\t\t\tproblem: {\n\t\t\t\treason: `local recovery timed out: ${current.reason}`,\n\t\t\t\tkind: "drain",\n\t\t\t\tafterKind: "resync",\n\t\t\t\tresetPeriod: false,\n\t\t\t},\n\t\t};\n\t}\n\n\tconst windowMs = Math.max(SOFT_RECOVERY_MS, Math.ceil(runtime.plan.period * 12));\n\tconst checkLead = Math.min(500, Math.max(100, Math.ceil(runtime.plan.period * 2)));\n\tcurrent.pauseUntil = now + windowMs;\n\tcurrent.checkAt = current.pauseUntil - checkLead;\n\tstats.softRecoveryExtensions++;\n\tpublishHackPause(controlPort, current.pauseUntil, current.reason);\n\treturn { recovery: current, problem: null };\n}\n\nfunction beginDrain(\n'''
+          one('function beginDrain(\n', helpers, 'helpers')
+
+          # Change only direct worker misses to local recovery. Keep ordering/spacing safety drains intact.
+          a = s.index('function consumeEvents(\n')
+          b = s.index('function findOverdueBatch(\n', a)
+          part = s[a:b]
+
+          miss = '\t\tif (\n\t\t\tevent.type ===\n\t\t\t"miss"\n\t\t) {\n'
+          skip = '''\t\tif (event.type === "skip") {\n\t\t\tmarkBatchPhaseSkipped(batches, event.batchId, String(event.phase ?? "H"));\n\t\t\tstats.suppressedHackChunks++;\n\t\t\tstats.pipeline.suppressedHackChunks++;\n\t\t\tstats.lastReason = String(event.reason ?? "H suppressed for local recovery");\n\t\t\tcontinue;\n\t\t}\n\n'''
+          if miss not in part: raise SystemExit('miss marker missing')
+          part = part.replace(miss, skip + miss, 1)
+
+          oldret = '''\t\t\treturn {\n\t\t\t\treason,\n\t\t\t\tkind:\n\t\t\t\t\t"drain",\n\t\t\t\tafterKind:\n\t\t\t\t\t"resync",\n\t\t\t\tbumpGap:\n\t\t\t\t\ttrue,\n\t\t\t};\n'''
+          newret = '''\t\t\tif (missedPhase === "W2") {\n\t\t\t\tstats.recovered++;\n\t\t\t\tstats.lastW2 = NaN;\n\t\t\t\tbatches.delete(String(event.batchId));\n\t\t\t}\n\n\t\t\treturn {\n\t\t\t\treason,\n\t\t\t\tkind: "recover",\n\t\t\t};\n'''
+          if part.count(oldret) < 1: raise SystemExit('miss return missing')
+          part = part.replace(oldret, newret, 1)
+
+          oldw2 = '''\t\t\tif (\n\t\t\t\tbatch.phases.H.skipped\n\t\t\t) {\n'''
+          neww2 = '''\t\t\tif (\n\t\t\t\tbatch.phases.H.skipped ||\n\t\t\t\tbatch.poisoned\n\t\t\t) {\n'''
+          if oldw2 not in part: raise SystemExit('W2 accounting marker missing')
+          part = part.replace(oldw2, neww2, 1)
+          s = s[:a] + part + s[b:]
+
+          # Dashboard state and recovery counters.
+          oldstate = '''\tns.print(\n\t\t`State       ` +\n\t\t`${drain\n\t\t\t? `DRAINING :: ${drain.reason}`\n\t\t\t: "RUNNING"}`\n\t);\n'''
+          newstate = '''\tns.print(\n\t\t`State       ` +\n\t\t`${drain\n\t\t\t? `DRAINING :: ${drain.reason}`\n\t\t\t: recovery\n\t\t\t\t? `RECOVERING :: ${recovery.reason}`\n\t\t\t\t: "RUNNING"}`\n\t);\n'''
+          one(oldstate, newstate, 'state')
+
+          oldrec = '''\tns.print(\n\t\t`Recovery    ` +\n\t\t`${stats.recoveries} drain(s) ` +\n\t\t`| cancelled H chunks ${stats.cancelledHackChunks}`\n\t);\n'''
+          newrec = '''\tns.print(\n\t\t`Recovery    ` +\n\t\t`${stats.softRecoveries} local ` +\n\t\t`| ${stats.softRecoverySuccesses} restored ` +\n\t\t`| H skips ${stats.suppressedHackChunks}`\n\t);\n\n\tns.print(\n\t\t`Fallback    ` +\n\t\t`${stats.recoveries} drain(s) ` +\n\t\t`| cancelled H chunks ${stats.cancelledHackChunks}`\n\t);\n'''
+          one(oldrec, newrec, 'recovery display')
+
+          p.write_text(s)
+          PY
+
+      - name: Patch hack worker
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/jit-hack.js')
+          s = p.read_text()
+          def one(old, new, label):
+              global s
+              n=s.count(old)
+              if n!=1: raise SystemExit(f'{label}: expected 1 match, found {n}')
+              s=s.replace(old,new,1)
+
+          one('\tconst maxLate = Number(ns.args[6] ?? 30);\n\n\tconst port = ns.getPortHandle(portNumber);\n',
+              '\tconst maxLate = Number(ns.args[6] ?? 30);\n\tconst controlPortNumber = Number(ns.args[7] ?? 0);\n\n\tconst port = ns.getPortHandle(portNumber);\n\tconst controlPort = controlPortNumber > 0 ? ns.getPortHandle(controlPortNumber) : null;\n', 'args')
+
+          marker='\t\tif (untilCall < -maxLate) {\n'
+          gate='''\t\tconst control = controlPort ? controlPort.peek() : null;\n\t\tif (\n\t\t\tcontrol &&\n\t\t\ttypeof control === "object" &&\n\t\t\tcontrol.type === "jit-control" &&\n\t\t\tNumber(control.hackPauseUntil) >= landAt\n\t\t) {\n\t\t\tawait report(port, {\n\t\t\t\ttype: "skip", phase, batchId, chunkId, target, time: Date.now(),\n\t\t\t\treason: `H suppressed for local recovery until ${Number(control.hackPauseUntil)}`,\n\t\t\t});\n\t\t\treturn;\n\t\t}\n\n'''
+          one(marker, gate+marker, 'gate')
+          p.write_text(s)
+          PY
+
+      - name: Validate
+        shell: bash
+        run: |
+          cp src/daemon.js /tmp/daemon.mjs
+          cp src/jit-hack.js /tmp/jit-hack.mjs
+          node --check /tmp/daemon.mjs
+          node --check /tmp/jit-hack.mjs
+          git diff --check
+
+      - name: Commit
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f .github/workflows/patch-nondestructive-recovery.yml .github/workflows/patch-nondestructive-recovery-v2.yml
+          git add src/daemon.js src/jit-hack.js
+          git commit -m "Keep JIT income alive through isolated timing misses [skip ci]"
+          git push origin HEAD:fix/non-destructive-recovery
