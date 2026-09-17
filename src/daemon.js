@@ -1079,6 +1079,7 @@ export async function main(ns) {
 				queue,
 				running,
 				reservations,
+				batches,
 				targetAnalysis,
 				cloudState,
 				drain,
@@ -5591,6 +5592,40 @@ function renderTargetAnalysis(
 	}
 }
 
+function nextPendingHackLanding(batches) {
+	let next = Infinity;
+
+	for (const batch of batches.values()) {
+		const phase =
+			batch.phases?.H;
+
+		if (
+			!phase ||
+			phase.complete ||
+			phase.skipped
+		) {
+			continue;
+		}
+
+		const landing =
+			Number(
+				batch.landing?.H
+			);
+
+		if (
+			Number.isFinite(landing)
+		) {
+			next =
+				Math.min(
+					next,
+					landing
+				);
+		}
+	}
+
+	return next;
+}
+
 function renderDashboard(
 	ns,
 	target,
@@ -5601,6 +5636,7 @@ function renderDashboard(
 	queue,
 	running,
 	reservations,
+	batches,
 	targetAnalysis,
 	cloudState,
 	drain,
@@ -5715,22 +5751,27 @@ function renderDashboard(
 	const p =
 		runtime.plan;
 
+	const pendingHackLanding =
+		nextPendingHackLanding(
+			batches
+		);
+
 	const hackStatus =
 		Number.isFinite(
 			stats.lastHackAt
 		)
 			? "LIVE"
 			: Number.isFinite(
-				stats.nextHackLanding
+				pendingHackLanding
 			)
-				? `ETA ${formatTime(
-					Math.max(
-						0,
-						stats.nextHackLanding -
-						now
-					)
-				)}`
-				: "n/a";
+				? pendingHackLanding > now
+					? `ETA ${formatTime(
+						pendingHackLanding - now
+					)}`
+					: `DUE +${formatTime(
+						now - pendingHackLanding
+					)}`
+				: "WAITING";
 
 	ns.clearLog();
 
