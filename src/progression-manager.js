@@ -126,6 +126,7 @@ function analyzeBackdoor(ns, target, discovered, parents, hackingLevel) {
 			discovered: false,
 			rooted: false,
 			installed: false,
+			skillReady: false,
 			ready: false,
 			requiredHacking: 0,
 			path: [],
@@ -136,6 +137,7 @@ function analyzeBackdoor(ns, target, discovered, parents, hackingLevel) {
 	const rooted = ns.hasRootAccess(target.host);
 	const installed = Boolean(server.backdoorInstalled);
 	const requiredHacking = ns.getServerRequiredHackingLevel(target.host);
+	const skillReady = hackingLevel >= requiredHacking;
 	const path = buildPath(parents, target.host);
 
 	return {
@@ -143,10 +145,11 @@ function analyzeBackdoor(ns, target, discovered, parents, hackingLevel) {
 		discovered: true,
 		rooted,
 		installed,
+		skillReady,
 		ready:
 			!installed &&
 			rooted &&
-			hackingLevel >= requiredHacking &&
+			skillReady &&
 			path.length > 0,
 		requiredHacking,
 		path,
@@ -200,7 +203,7 @@ function chooseNextObjective({ torOwned, programs, backdoors, singularityAvailab
 	}
 
 	const hackingBlocked = backdoors
-		.filter(target => target.discovered && target.rooted && !target.installed)
+		.filter(target => target.discovered && target.rooted && !target.installed && !target.skillReady)
 		.sort((a, b) => a.requiredHacking - b.requiredHacking)[0];
 	if (hackingBlocked) {
 		return {
@@ -208,6 +211,33 @@ function chooseNextObjective({ torOwned, programs, backdoors, singularityAvailab
 			host: hackingBlocked.host,
 			requiredHacking: hackingBlocked.requiredHacking,
 			label: `Raise hacking to ${hackingBlocked.requiredHacking} for ${hackingBlocked.host}`,
+		};
+	}
+
+	const rootingBlocked = backdoors.find(
+		target => target.discovered && !target.rooted && !target.installed
+	);
+	if (rootingBlocked) {
+		return {
+			kind: "root",
+			host: rootingBlocked.host,
+			label: `Wait for fleet rooting on ${rootingBlocked.host}`,
+		};
+	}
+
+	const routeBlocked = backdoors.find(
+		target =>
+			target.discovered &&
+			target.rooted &&
+			target.skillReady &&
+			!target.installed &&
+			target.path.length === 0
+	);
+	if (routeBlocked) {
+		return {
+			kind: "route",
+			host: routeBlocked.host,
+			label: `Waiting for network route data for ${routeBlocked.host}`,
 		};
 	}
 
