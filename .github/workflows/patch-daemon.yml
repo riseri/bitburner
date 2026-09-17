@@ -16,12 +16,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Restore last good daemon
+        run: git checkout b2124b026c009842e7573a2c18a9e18bd16d70f1 -- src/daemon.js
+
       - name: Patch daemon accounting and warmup status
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path("src/daemon.js")
           text = path.read_text()
 
@@ -32,13 +34,13 @@ jobs:
               text = text.replace(old, new, 1)
 
           replace_once(
-              '''\tlet nextHackLanding =
+          """\tlet nextHackLanding =
           \t\tDate.now() +
           \t\truntime.plan.times.W +
           \t\tcfg.lead +
           \t\tSTARTUP_BUFFER_MS;
-          ''',
-              '''\tlet nextHackLanding =
+          """,
+          """\tlet nextHackLanding =
           \t\tDate.now() +
           \t\truntime.plan.times.W +
           \t\tcfg.lead +
@@ -46,20 +48,20 @@ jobs:
 
           \tstats.nextHackLanding =
           \t\tnextHackLanding;
-          ''',
-              "initial hack ETA",
+          """,
+          "initial hack ETA",
           )
 
           replace_once(
-              '''\t\t\tnextHackLanding =
+          """\t\t\tnextHackLanding =
           \t\t\t\tDate.now() +
           \t\t\t\truntime.plan.times.W +
           \t\t\t\tcfg.lead +
           \t\t\t\tSTARTUP_BUFFER_MS;
 
           \t\t\tconsecutiveAllocationFailures = 0;
-          ''',
-              '''\t\t\tnextHackLanding =
+          """,
+          """\t\t\tnextHackLanding =
           \t\t\t\tDate.now() +
           \t\t\t\truntime.plan.times.W +
           \t\t\t\tcfg.lead +
@@ -68,34 +70,37 @@ jobs:
           \t\t\tstats.nextHackLanding =
           \t\t\t\tnextHackLanding;
 
+          \t\t\tstats.lastHackAt =
+          \t\t\t\tNaN;
+
           \t\t\tconsecutiveAllocationFailures = 0;
-          ''',
-              "reconfigured hack ETA",
+          """,
+          "reconfigured hack ETA",
           )
 
           replace_once(
-              '''\t\texpected,
+          """\t\texpected,
           \t\tlanding,
 
           \t\tphases: {
-          ''',
-              '''\t\texpected,
+          """,
+          """\t\texpected,
           \t\tlanding,
 
           \t\tmoneyEarned: 0,
 
           \t\tphases: {
-          ''',
-              "batch earned-money state",
+          """,
+          "batch earned-money state",
           )
 
           replace_once(
-              '''\t\t\tstats.money +=
+          """\t\t\tstats.money +=
           \t\t\t\tearned;
 
           \t\t\tstats.income.push({
-          ''',
-              '''\t\t\tstats.money +=
+          """,
+          """\t\t\tstats.money +=
           \t\t\t\tearned;
 
           \t\t\tbatch.moneyEarned +=
@@ -105,14 +110,14 @@ jobs:
           \t\t\t\tfinished;
 
           \t\t\tstats.income.push({
-          ''',
-              "hack event accounting",
+          """,
+          "hack event accounting",
           )
 
           replace_once(
-              '''\t\tif (
+          """\t\tif (
           \t\t\tphase ===
-          \t\t\t"W2"
+          \t\t\t\"W2\"
           \t\t) {
           \t\t\tstats.completed++;
 
@@ -122,10 +127,10 @@ jobs:
 
           \t\t\tstats.lastW2 =
           \t\t\t\tstate.max;
-          ''',
-              '''\t\tif (
+          """,
+          """\t\tif (
           \t\t\tphase ===
-          \t\t\t"W2"
+          \t\t\t\"W2\"
           \t\t) {
           \t\t\tif (
           \t\t\t\tbatch.phases.H.skipped
@@ -148,16 +153,16 @@ jobs:
 
           \t\t\tstats.lastW2 =
           \t\t\t\tstate.max;
-          ''',
-              "W2 batch classification",
+          """,
+          "W2 batch classification",
           )
 
           replace_once(
-              '''\t\tcompleted: 0,
+          """\t\tcompleted: 0,
 
           \t\t// Total number of safe batch landing slots skipped because the
-          ''',
-              '''\t\tcompleted: 0,
+          """,
+          """\t\tcompleted: 0,
 
           \t\trecovered: 0,
 
@@ -170,24 +175,24 @@ jobs:
           \t\t\tNaN,
 
           \t\t// Total number of safe batch landing slots skipped because the
-          ''',
-              "dashboard stats",
+          """,
+          "dashboard stats",
           )
 
           replace_once(
-              '''\tconst p =
+          """\tconst p =
           \t\truntime.plan;
 
           \tns.clearLog();
-          ''',
-              '''\tconst p =
+          """,
+          """\tconst p =
           \t\truntime.plan;
 
           \tconst hackStatus =
           \t\tNumber.isFinite(
           \t\t\tstats.lastHackAt
           \t\t)
-          \t\t\t? "LIVE"
+          \t\t\t? \"LIVE\"
           \t\t\t: Number.isFinite(
           \t\t\t\tstats.nextHackLanding
           \t\t\t)
@@ -198,15 +203,15 @@ jobs:
           \t\t\t\t\t\tnow
           \t\t\t\t\t)
           \t\t\t\t)}`
-          \t\t\t\t: "n/a";
+          \t\t\t\t: \"n/a\";
 
           \tns.clearLog();
-          ''',
-              "hack status",
+          """,
+          "hack status",
           )
 
           replace_once(
-              '''\tns.print(
+          """\tns.print(
           \t\t`Batches     ` +
           \t\t`${stats.scheduled} scheduled ` +
           \t\t`| ${stats.completed} completed`
@@ -214,8 +219,8 @@ jobs:
 
           \tns.print(
           \t\t`Allocator   ` +
-          ''',
-              '''\tns.print(
+          """,
+          """\tns.print(
           \t\t`Batches     ` +
           \t\t`${stats.scheduled} scheduled ` +
           \t\t`| ${stats.completed} completed ` +
@@ -229,8 +234,8 @@ jobs:
 
           \tns.print(
           \t\t`Allocator   ` +
-          ''',
-              "dashboard batch output",
+          """,
+          "dashboard batch output",
           )
 
           path.write_text(text)
@@ -243,12 +248,8 @@ jobs:
 
       - name: Commit daemon patch
         run: |
-          if git diff --quiet -- src/daemon.js; then
-            echo "No daemon changes to commit"
-            exit 0
-          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add src/daemon.js
-          git commit -m "Clarify daemon batch recovery and hack warmup [skip ci]"
+          git commit -m "Repair daemon and clarify recovery metrics [skip ci]"
           git push origin HEAD:main
