@@ -465,11 +465,7 @@ export async function main(ns) {
 							reason:
 								overdue,
 							kind:
-								"drain",
-							afterKind:
-								"resync",
-							bumpGap:
-								true,
+								"recover",
 						},
 						queue,
 						batches,
@@ -5065,7 +5061,7 @@ function consumeEvents(
 						`${spacing.toFixed(1)}ms`,
 
 					kind:
-						"drain",
+						"recover",
 
 					bumpGap:
 						true,
@@ -5097,7 +5093,7 @@ function consumeEvents(
 							`${order[index - 1]}`,
 
 						kind:
-							"drain",
+							"recover",
 
 						bumpGap:
 							true,
@@ -5130,7 +5126,7 @@ function consumeEvents(
 							`${spacing.toFixed(1)}ms`,
 
 						kind:
-							"drain",
+							"recover",
 
 						bumpGap:
 							true,
@@ -5212,7 +5208,7 @@ function consumeEvents(
 							).toFixed(2)}%`,
 
 						kind:
-							"drain",
+							"recover",
 					};
 				}
 
@@ -5228,7 +5224,7 @@ function consumeEvents(
 							`${minSec.toFixed(3)}`,
 
 						kind:
-							"drain",
+							"recover",
 					};
 				}
 			}
