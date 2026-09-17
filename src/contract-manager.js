@@ -4,6 +4,9 @@ import { SOLVERS, solveContract } from "contract-solvers.js";
 const HOME = "home";
 const QUARANTINE_FILE = "contract-quarantine.txt";
 const DEFAULT_SCAN_MS = 30_000;
+const AUTO_DISABLED_TYPES = new Set([
+	"Square Root",
+]);
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -73,9 +76,9 @@ async function scanContracts(ns, servers, cfg, quarantine, state) {
 			state.found++;
 			const type = ns.codingcontract.getContractType(file, host);
 
-			if (!SOLVERS[type]) {
+			if (!SOLVERS[type] || AUTO_DISABLED_TYPES.has(type)) {
 				state.unsupported++;
-				state.lastAction = `unsupported ${type} @ ${host}/${file}`;
+				state.lastAction = `manual ${type} @ ${host}/${file}`;
 				continue;
 			}
 
