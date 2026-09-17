@@ -5,14 +5,19 @@ const DAEMON = "daemon.js";
 const FLEET = "fleet-manager.js";
 const CONTRACTS = "contract-manager.js";
 const PROGRESSION = "progression-manager.js";
+const PROGRESSION_PURCHASE = "progression-purchase.js";
+const PROGRESSION_BACKDOOR = "progression-backdoor.js";
 const CONTRACT_SELFTEST = "contract-selftest.js";
 const HEARTBEAT_STALE_MS = 15_000;
+const PROGRESSION_ACTION_RETRY_MS = 30_000;
 
 /** @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([
 		["contracts", true],
 		["progression", true],
+		["progression-actions", false],
+		["progression-cash-reserve", 0.10],
 		["contract-selftest", false],
 		["interval", 5_000],
 	]);
@@ -22,6 +27,8 @@ export async function main(ns) {
 	const cfg = {
 		contracts: asBoolean(flags.contracts),
 		progression: asBoolean(flags.progression),
+		progressionActions: asBoolean(flags["progression-actions"]),
+		progressionCashReserve: clampFraction(flags["progression-cash-reserve"]),
 		contractSelftest: asBoolean(flags["contract-selftest"]),
 		interval: Math.max(1_000, Number(flags.interval) || 5_000),
 	};
@@ -29,6 +36,9 @@ export async function main(ns) {
 	const required = [DAEMON, FLEET];
 	if (cfg.contracts) required.push(CONTRACTS);
 	if (cfg.progression) required.push(PROGRESSION);
+	if (cfg.progression && cfg.progressionActions) {
+		required.push(PROGRESSION_PURCHASE, PROGRESSION_BACKDOOR);
+	}
 
 	for (const script of required) {
 		if (!ns.fileExists(script, HOME)) {
@@ -42,6 +52,8 @@ export async function main(ns) {
 	}
 
 	ensureRunning(ns, DAEMON);
+
+	let lastProgressionActionAt = 0;
 
 	while (true) {
 		// daemon.js still owns initial fleet-manager startup. Supervisor repairs
@@ -57,6 +69,15 @@ export async function main(ns) {
 		const progressionStatus = cfg.progression
 			? ns.getPortHandle(PORTS.PROGRESSION_STATUS).peek()
 			: null;
+
+		if (cfg.progression && cfg.progressionActions) {
+			lastProgressionActionAt = maybeStartProgressionAction(
+				ns,
+				progressionStatus,
+				cfg,
+				lastProgressionActionAt
+			);
+		}
 
 		const fleetHealth = heartbeatHealth(fleetStatus, "fleet-status");
 		const contractHealth = cfg.contracts
@@ -120,6 +141,60 @@ async function runOnce(ns, script) {
 	while (ns.isRunning(pid, HOME)) await ns.sleep(100);
 }
 
+function maybeStartProgressionAction(ns, progression, cfg, lastAttempt) {
+	if (
+		!progression ||
+		typeof progression !== "object" ||
+		progression.type !== "progression-status" ||
+		progression.error ||
+		!progression.singularity?.available ||
+		Date.now() - lastAttempt < PROGRESSION_ACTION_RETRY_MS ||
+		progressionActorProcess(ns)
+	) {
+		return lastAttempt;
+	}
+
+	const kind = progression.nextObjective?.kind;
+	const script =
+		kind === "tor" || kind === "program"
+			? PROGRESSION_PURCHASE
+			: kind === "backdoor"
+				? PROGRESSION_BACKDOOR
+				: "";
+
+	if (!script) return lastAttempt;
+
+	const args =
+		script === PROGRESSION_PURCHASE
+			? [
+				"--status-port",
+				PORTS.PROGRESSION_STATUS,
+				"--cash-reserve",
+				cfg.progressionCashReserve,
+			]
+			: [
+				"--status-port",
+				PORTS.PROGRESSION_STATUS,
+				"--fleet-port",
+				PORTS.FLEET_STATUS,
+			];
+
+	// One-shot actors only. No daemon hydra, no heartbeat sequel, no cinematic universe.
+	const pid = ns.run(script, 1, ...args);
+	if (!pid) ns.print(`WARN: unable to start ${script}`);
+	return Date.now();
+}
+
+function progressionActorProcess(ns) {
+	return ns
+		.ps(HOME)
+		.find(
+			process =>
+				process.filename === PROGRESSION_PURCHASE ||
+				process.filename === PROGRESSION_BACKDOOR
+		) ?? null;
+}
+
 function disabledHealth() {
 	return { healthy: true, age: 0, label: "disabled" };
 }
@@ -162,6 +237,7 @@ function render(ns, state) {
 	ns.print(`  Fleet manager    ${processHealth(ns, FLEET, fleetHealth)}`);
 	ns.print(`  Contract hunter  ${cfg.contracts ? processHealth(ns, CONTRACTS, contractHealth) : "Disabled"}`);
 	ns.print(`  Progression      ${cfg.progression ? processHealth(ns, PROGRESSION, progressionHealth) : "Disabled"}`);
+	ns.print(`  Action runner    ${cfg.progression && cfg.progressionActions ? "Enabled" : "Planner only"}`);
 	ns.print("");
 
 	if (daemon) {
@@ -344,7 +420,16 @@ function renderProgression(ns, progression, cfg) {
 	if (progression.nextObjective?.label) {
 		ns.print(`  Next objective   ${progression.nextObjective.label}`);
 	}
-	ns.print(`  Automation       Planner only - no player actions or resets`);
+
+	if (cfg.progressionActions) {
+		const actor = progressionActorProcess(ns);
+		ns.print("  Automation       Safe actions enabled - TOR, programs, faction backdoors");
+		if (actor) {
+			ns.print(`  Current action   ${actor.filename === PROGRESSION_BACKDOOR ? "Faction backdoor" : "TOR / program purchase"}`);
+		}
+	} else {
+		ns.print("  Automation       Planner only - run with --progression-actions true to enable");
+	}
 	ns.print("");
 }
 
@@ -603,6 +688,12 @@ function cash(value) {
 		if (Math.abs(n) >= threshold) return `$${(n / threshold).toFixed(2)}${suffix}`;
 	}
 	return `$${n.toFixed(Math.abs(n) >= 100 ? 0 : 2)}`;
+}
+
+function clampFraction(value) {
+	const n = Number(value);
+	const fraction = n > 1 ? n / 100 : n;
+	return Math.min(0.95, Math.max(0, Number.isFinite(fraction) ? fraction : 0.10));
 }
 
 function asBoolean(value) {
