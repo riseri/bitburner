@@ -243,7 +243,7 @@ jobs:
 
       - name: Validate daemon syntax
         run: |
-          node --check src/daemon.js
+          node --input-type=module --check < src/daemon.js
           git diff --check
 
       - name: Commit daemon patch
