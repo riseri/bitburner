@@ -20,6 +20,8 @@ const RESERVATION_CLEANUP_MS = 500;
 const MAX_BATCHES_PLANNED_PER_TICK = 1;
 const PLANNING_BUDGET_MS = 4;
 const PLANNING_LAUNCH_GUARD_MS = 20;
+const SOFT_RECOVERY_MS = 2_000;
+const SOFT_RECOVERY_MAX_MS = 15_000;
 
 // RAM gains do not invalidate existing reservations, so batch them into an
 // occasional retune instead of destroying the pipeline on every cloud upgrade.
@@ -49,6 +51,7 @@ export async function main(ns) {
 		["cloud-min-ram", 32],
 		["cloud-prefix", "cloud"],
 		["fleet-port", 19],
+		["control-port", 18],
 	]);
 
 	ns.disableLog("ALL");
@@ -73,6 +76,7 @@ export async function main(ns) {
 		),
 		port: Number(flags.port),
 		fleetPort: Number(flags["fleet-port"]),
+		controlPort: Number(flags["control-port"]),
 		periodScale: 1,
 		ram: {},
 		cloud: {
@@ -139,6 +143,10 @@ export async function main(ns) {
 
 	const fleetPort = ns.getPortHandle(cfg.fleetPort);
 	fleetPort.clear();
+
+	const controlPort = ns.getPortHandle(cfg.controlPort);
+	controlPort.clear();
+	publishHackPause(controlPort, 0, "startup");
 
 	// Stop the old single-host controller if it exists.
 	ns.scriptKill("jit.js", HOME);
@@ -294,6 +302,7 @@ export async function main(ns) {
 
 	let maintenance = null;
 	let drain = null;
+	let recovery = null;
 
 	stats.started = Date.now();
 
@@ -400,34 +409,39 @@ export async function main(ns) {
 			);
 
 		if (eventProblem) {
-			if (
-				eventProblem.kind ===
-				"drain"
-			) {
-				const result =
-					beginDrain(
-						drain,
-						eventProblem,
-						queue,
-						batches,
-						stats,
-						cfg
-					);
-
-				drain =
-					result.drain;
-
-				queue =
-					result.queue;
+			if (eventProblem.kind === "recover" && !drain && !maintenance) {
+				recovery = beginSoftRecovery(
+					recovery, eventProblem, controlPort, runtime, stats
+				);
+			} else if (eventProblem.kind === "drain") {
+				const result = beginDrain(
+					drain, eventProblem, queue, batches, stats, cfg
+				);
+				drain = result.drain;
+				queue = result.queue;
 			} else if (!maintenance) {
-				maintenance =
-					eventProblem;
+				maintenance = eventProblem;
+			}
+		}
+
+		if (recovery && !drain && !maintenance) {
+			const local = updateSoftRecovery(
+				ns, target, recovery, controlPort, runtime, stats
+			);
+			recovery = local.recovery;
+			if (local.problem) {
+				const result = beginDrain(
+					drain, local.problem, queue, batches, stats, cfg
+				);
+				drain = result.drain;
+				queue = result.queue;
 			}
 		}
 
 		if (
 			!maintenance &&
 			!drain &&
+			!recovery &&
 			loopNow -
 			lastOverdueCheck >=
 			OVERDUE_CHECK_MS
@@ -521,6 +535,7 @@ export async function main(ns) {
 
 			const deferredRetuneReady =
 				!drain &&
+				!recovery &&
 				capacityCanHelp &&
 				capacityGainRatio >=
 				CAPACITY_RETUNE_RATIO &&
@@ -631,6 +646,7 @@ export async function main(ns) {
 		if (
 			!maintenance &&
 			!drain &&
+			!recovery &&
 			hackingLevel >=
 			retuneAt
 		) {
@@ -686,6 +702,9 @@ export async function main(ns) {
 		 * Reconfiguration / recovery.
 		 */
 		if (maintenance) {
+			recovery = null;
+			publishHackPause(controlPort, 0, "maintenance");
+
 			if (
 				maintenance.bumpGap
 			) {
@@ -1083,6 +1102,7 @@ export async function main(ns) {
 				targetAnalysis,
 				cloudState,
 				drain,
+				recovery,
 				foreignUsedByHost
 			);
 		}
@@ -4529,6 +4549,7 @@ function makeBatchState(
 		landing,
 
 		moneyEarned: 0,
+		poisoned: false,
 
 		phases: {
 			H:
@@ -4601,6 +4622,10 @@ function markBatchPhaseSkipped(
 	const state =
 		batch.phases[phase];
 
+	if (phase !== "H") {
+		batch.poisoned = true;
+	}
+
 	if (!state) {
 		return;
 	}
@@ -4618,6 +4643,88 @@ function markBatchPhaseSkipped(
 
 	state.min = landing;
 	state.max = landing;
+}
+
+function publishHackPause(port, pauseUntil, reason) {
+	port.clear();
+	port.tryWrite({
+		type: "jit-control",
+		hackPauseUntil: Math.max(0, Number(pauseUntil) || 0),
+		reason: String(reason ?? ""),
+		generatedAt: Date.now(),
+	});
+}
+
+function beginSoftRecovery(current, issue, controlPort, runtime, stats) {
+	const now = Date.now();
+	const windowMs = Math.max(SOFT_RECOVERY_MS, Math.ceil(runtime.plan.period * 12));
+	const checkLead = Math.min(500, Math.max(100, Math.ceil(runtime.plan.period * 2)));
+
+	if (!current) {
+		current = {
+			reason: issue.reason,
+			started: now,
+			pauseUntil: now + windowMs,
+			checkAt: now + windowMs - checkLead,
+		};
+		stats.softRecoveries++;
+		stats.pipeline.softRecoveries++;
+	} else {
+		current.reason = issue.reason;
+		current.pauseUntil = Math.max(current.pauseUntil, now + windowMs);
+		current.checkAt = current.pauseUntil - checkLead;
+		stats.softRecoveryExtensions++;
+	}
+
+	stats.lastReason = `recovering: ${issue.reason}`;
+	publishHackPause(controlPort, current.pauseUntil, current.reason);
+	return current;
+}
+
+function updateSoftRecovery(ns, target, current, controlPort, runtime, stats) {
+	if (!current) return { recovery: null, problem: null };
+
+	const now = Date.now();
+	if (now < current.checkAt) return { recovery: current, problem: null };
+
+	const maxMoney = ns.getServerMaxMoney(target);
+	const money = ns.getServerMoneyAvailable(target);
+	const minSec = ns.getServerMinSecurityLevel(target);
+	const sec = ns.getServerSecurityLevel(target);
+	const healthy = money >= maxMoney * 0.995 && sec <= minSec + 0.02;
+
+	if (healthy && now >= current.pauseUntil) {
+		publishHackPause(controlPort, 0, "recovered");
+		stats.softRecoverySuccesses++;
+		stats.lastReason = `recovered locally: ${current.reason}`;
+		return { recovery: null, problem: null };
+	}
+
+	if (healthy) {
+		current.checkAt = current.pauseUntil;
+		return { recovery: current, problem: null };
+	}
+
+	if (now - current.started >= SOFT_RECOVERY_MAX_MS) {
+		publishHackPause(controlPort, 0, "recovery timeout");
+		return {
+			recovery: null,
+			problem: {
+				reason: `local recovery timed out: ${current.reason}`,
+				kind: "drain",
+				afterKind: "resync",
+				resetPeriod: false,
+			},
+		};
+	}
+
+	const windowMs = Math.max(SOFT_RECOVERY_MS, Math.ceil(runtime.plan.period * 12));
+	const checkLead = Math.min(500, Math.max(100, Math.ceil(runtime.plan.period * 2)));
+	current.pauseUntil = now + windowMs;
+	current.checkAt = current.pauseUntil - checkLead;
+	stats.softRecoveryExtensions++;
+	publishHackPause(controlPort, current.pauseUntil, current.reason);
+	return { recovery: current, problem: null };
 }
 
 function beginDrain(
@@ -4725,6 +4832,14 @@ function consumeEvents(
 			continue;
 		}
 
+		if (event.type === "skip") {
+			markBatchPhaseSkipped(batches, event.batchId, String(event.phase ?? "H"));
+			stats.suppressedHackChunks++;
+			stats.pipeline.suppressedHackChunks++;
+			stats.lastReason = String(event.reason ?? "H suppressed for local recovery");
+			continue;
+		}
+
 		if (
 			event.type ===
 			"miss"
@@ -4759,14 +4874,15 @@ function consumeEvents(
 				continue;
 			}
 
+			if (missedPhase === "W2") {
+				stats.recovered++;
+				stats.lastW2 = NaN;
+				batches.delete(String(event.batchId));
+			}
+
 			return {
 				reason,
-				kind:
-					"drain",
-				afterKind:
-					"resync",
-				bumpGap:
-					true,
+				kind: "recover",
 			};
 		}
 
@@ -5026,7 +5142,8 @@ function consumeEvents(
 			"W2"
 		) {
 			if (
-				batch.phases.H.skipped
+				batch.phases.H.skipped ||
+				batch.poisoned
 			) {
 				stats.recovered++;
 			} else {
@@ -5257,7 +5374,8 @@ function launchDueChunks(
 				cfg.port,
 				chunk.phase,
 				chunk.chunkId,
-				maxLate
+				maxLate,
+				cfg.controlPort
 			);
 
 		if (!pid) {
@@ -5496,6 +5614,11 @@ function createStats() {
 
 		recoveries: 0,
 
+		softRecoveries: 0,
+		softRecoveryExtensions: 0,
+		softRecoverySuccesses: 0,
+		suppressedHackChunks: 0,
+
 		cancelledHackChunks: 0,
 
 		misses: {
@@ -5527,6 +5650,8 @@ function createPipelineStats() {
 	return {
 		started: Date.now(),
 		recoveries: 0,
+		softRecoveries: 0,
+		suppressedHackChunks: 0,
 		misses: { H: 0, W1: 0, G: 0, W2: 0 },
 		driftSum: 0,
 		driftCount: 0,
@@ -5640,6 +5765,7 @@ function renderDashboard(
 	targetAnalysis,
 	cloudState,
 	drain,
+	recovery,
 	foreignUsedByHost
 ) {
 	const now =
@@ -5792,7 +5918,9 @@ function renderDashboard(
 		`State       ` +
 		`${drain
 			? `DRAINING :: ${drain.reason}`
-			: "RUNNING"}`
+			: recovery
+				? `RECOVERING :: ${recovery.reason}`
+				: "RUNNING"}`
 	);
 
 	if (
@@ -6025,6 +6153,13 @@ function renderDashboard(
 
 	ns.print(
 		`Recovery    ` +
+		`${stats.softRecoveries} local ` +
+		`| ${stats.softRecoverySuccesses} restored ` +
+		`| H skips ${stats.suppressedHackChunks}`
+	);
+
+	ns.print(
+		`Fallback    ` +
 		`${stats.recoveries} drain(s) ` +
 		`| cancelled H chunks ${stats.cancelledHackChunks}`
 	);
