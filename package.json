@@ -1,0 +1,22 @@
+{
+  "name": "bitburner",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "bitburner-filesync"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/riseri/bitburner.git"
+  },
+  "keywords": [],
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/riseri/bitburner/issues"
+  },
+  "homepage": "https://github.com/riseri/bitburner#readme",
+  "devDependencies": {
+    "bitburner-filesync": "^1.2.0-beta4"
+  }
+}
