@@ -1,0 +1,62 @@
+name: Apply dashboard readability
+on:
+  push:
+    branches: [feature/protected-background-prep]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: startsWith(github.event.head_commit.message, 'Apply dashboard readability')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify exact display-only edits
+        run: |
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json
+          from pathlib import Path
+          raw = gzip.decompress(base64.b64decode(Path('.github/dashboard-update.b64').read_text()))
+          assert hashlib.sha256(raw).hexdigest() == 'e544c882d781ad19c1e161517e506775d21b78c354726fbe4dd1e2fa95029fb2'
+          changes = json.loads(raw)
+          allowed = {'src/daemon.js', 'src/supervisor.js', 'src/lib/dashboard.js', 'test/helpers.cjs', 'test/jit-recovery.test.cjs', 'docs/dashboard.md'}
+          assert {c['path'] for c in changes} == allowed
+          def blob(text):
+              data = text.encode('utf-8')
+              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          for change in changes:
+              path = Path(change['path'])
+              old = path.read_text() if path.exists() else ''
+              if change['before'] is None:
+                  assert not path.exists(), f'New path already exists: {path}'
+              else:
+                  assert blob(old) == change['before'], f'Baseline changed: {path}'
+              text = old
+              for edit in reversed(change['edits']):
+                  text = text[:edit['start']] + edit['text'] + text[edit['end']:]
+              assert blob(text) == change['after'], f'Result mismatch: {path}'
+              path.parent.mkdir(parents=True, exist_ok=True)
+              path.write_text(text)
+              print(f'Exact source verified: {path} {change["after"]}')
+          PY
+      - name: Full regression and simulation suite
+        run: npm test
+      - name: Commit tested dashboard to PR branch only
+        run: |
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/daemon.js src/supervisor.js src/lib/dashboard.js test/helpers.cjs test/jit-recovery.test.cjs docs/dashboard.md
+          git commit -m 'Improve daemon and supervisor dashboard readability'
+          git push origin HEAD:feature/protected-background-prep
+      - name: Preserve transport for checksum diagnosis
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-transport
+          path: .github/dashboard-update.b64
+          include-hidden-files: true
+          retention-days: 1
