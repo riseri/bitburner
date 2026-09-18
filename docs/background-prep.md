@@ -1,9 +1,15 @@
 # Protected background target preparation
 
-This is preparation only, not multi-target hacking. The existing daemon continues
-running its active JIT target with the same 100ms gap and 600ms launch cushion.
-A cooperative side task prepares at most one richer target and stops at `READY`.
-No second daemon, additional Hack operation, or automatic promotion is started.
+This component is preparation only: its dedicated G/W workers never hack.
+It prepares at most one target and stops at `READY`, using the same 100ms JIT gap
+and 600ms launch cushion for the existing earning pipeline.
+
+The two-target scheduler now consumes that READY result and may automatically
+admit it as a second independent earning pipeline. It first builds a fresh plan;
+the prep estimate is not the admitted income forecast. See [Controlled two-target
+JIT](multi-target.md) for shared limits, admission and target-local recovery.
+Use `--max-targets 1` to retain the prep-only behavior described below, including
+waiting at READY without automatic promotion. Never start a second daemon.
 
 ## Default behavior
 
@@ -31,8 +37,10 @@ single action's duration. Once selected, the one candidate stays pinned.
 
 ## Isolation and RAM ownership
 
-- At most one `background-grow.js` or `background-weaken.js` PID exists per daemon.
-  Each worker immediately executes only its named action against the prep target.
+- The optional background-prep task owns at most one `background-grow.js` or
+  `background-weaken.js` PID. Target-local hard repairs can own separate bounded
+  G/W workers; all their RAM holds share the allocator. Each worker executes only
+  its named action against its owned target.
 - Total prep RAM is limited to the smaller of **1% of fleet RAM and 16,384 GB
   (16 TB)** by default. The fraction is capped at 5% and the absolute limit at
   16 TB. Home is never used for background workers.
@@ -52,18 +60,19 @@ single action's duration. Once selected, the one candidate stays pinned.
 - A daemon exit cancels its prep child. Startup orphan cleanup matches the two
   dedicated filenames, a positive dead owner PID and the `bgprep-` ownership tag.
 - Prep errors disable only this optional feature and remain visible. Three waves
-  without progress disable it rather than spinning. Exec failures retry after 30s.
+  without progress disable prep rather than spinning. Exec failures retry after 30s.
 
 The stage sequence is deliberately simple: weaken to minimum, grow toward maximum,
 then weaken again. Large repairs can use multiple bounded waves. No simultaneous
 prep batch train or JIT worker timer changes are introduced.
 
 `READY` means money is at least 99.99% and security is within +0.001 of minimum,
-with no prep worker left. The daemon's normal elective selection excludes this
-session's background candidate, so preparing it does not silently replace the
-money target. Existing safety/level/network maintenance is otherwise unchanged.
-A deliberate later restart can select the prepared target; simultaneous hacking
-of both targets is a separate feature. Do not run a second daemon manually.
+with no prep worker left. In single-target mode, the candidate remains prepared
+without automatically replacing the earner. In default two-target mode, the scheduler can claim the
+candidate and set it to TUNING, then WARMUP, then LIVE alongside the existing
+earner. It clears prep ownership before issuing normal JIT work for that target.
+A deliberate later restart can also select an already-prepared target. Do not
+run a second daemon manually.
 
 ## Dashboard and controls
 
@@ -108,7 +117,7 @@ ownership and scheduling invariants, not a guarantee of zero impact in-game.
 After merging and pulling, sync the whole `src` directory, including
 `lib/background-prep.js` and both new standalone background workers. Restart the
 supervisor/daemon once. Watch sustained active `Income 60s`, misses, recovery and
-restart counts while the separate prep status advances. A prepared target must
-reach `READY` without launching a second H pipeline or resetting the first merely
-because prep completed. Higher throughput and multi-target hacking are not part
-of this change.
+restart counts while the separate prep status advances. In `--max-targets 1`
+mode a candidate must reach READY without another H pipeline.
+In default two-target mode, follow the additional admission and concurrent-income
+checks in `docs/multi-target.md`; preparation itself must never reset the earner.

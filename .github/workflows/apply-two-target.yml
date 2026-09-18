@@ -1,4 +1,4 @@
-name: Apply verified two-target JIT
+name: Verify final two-target isolation
 on:
   push:
     branches: [feature/two-target-jit]
@@ -6,7 +6,7 @@ permissions:
   contents: write
 jobs:
   apply:
-    if: github.event.head_commit.message == 'Stage verified two-target JIT implementation'
+    if: github.event.head_commit.message == 'Finalize two-target prep isolation'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -14,43 +14,31 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Verify and apply exact tested source
+      - name: Apply checked prep ownership guard
         run: |
           python3 - <<'PY'
+          import hashlib
           from pathlib import Path
-          import base64, gzip, hashlib, json
-          encoded = ''.join(Path(f'.github/multi-source-{i}.b64').read_text() for i in range(6))
-          raw = gzip.decompress(base64.b64decode(encoded))
-          assert hashlib.sha256(raw).hexdigest() == '303d52dcc58ac2324a99c340046be3d5879d7344ed77f24e9bf701aa2c140bb2'
-          changes = json.loads(raw)
-          allowed = {'src/daemon.js', 'src/lib/target-pipelines.js', 'src/lib/background-prep.js', 'src/lib/jit-worker.js', 'src/supervisor.js', 'test/helpers.cjs', 'test/simulator.cjs', 'test/background-prep-simulation.test.cjs', 'test/multi-target.test.cjs', 'test/multi-target-simulation.test.cjs', 'docs/multi-target.md'}
-          assert {c['path'] for c in changes} == allowed
-          def blob(text):
-              data = text.encode('utf-8')
-              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
-          for change in changes:
-              path = Path(change['path'])
-              old = path.read_text() if path.exists() else ''
-              if change['before'] is None:
-                  assert not path.exists(), f'Unexpected existing file: {path}'
-              else:
-                  assert blob(old) == change['before'], f'Baseline changed: {path}'
-              result = old
-              for edit in reversed(change['edits']):
-                  result = result[:edit['start']] + edit['text'] + result[edit['end']:]
-              assert blob(result) == change['after'], f'Result hash mismatch: {path}'
-              path.parent.mkdir(parents=True, exist_ok=True)
-              path.write_text(result)
-              print(f'Exact source verified: {path} {change["after"]}')
+          path = Path('src/lib/target-pipelines.js')
+          text = path.read_text()
+          def blob(value):
+              raw = value.encode('utf-8')
+              return hashlib.sha1(f'blob {len(raw)}\0'.encode() + raw).hexdigest()
+          assert blob(text) == '52515354941d3ce3e3766297ec6ffbf6487539ef'
+          before = '\tif (p.drain) {\n\t\tif (p.repair?.active) cancelBackgroundPrep(ns, p.repair, "target is draining");'
+          after = '\tif ((p.recovery || p.drain) && pool.cfg.backgroundPrep?.active) {\n\t\tcancelBackgroundPrep(ns, pool.cfg.backgroundPrep, "earning target recovery has priority");\n\t}\n' + before
+          assert text.count(before) == 1
+          text = text.replace(before, after, 1)
+          assert blob(text) == '5aed2dff53c428476d60b53b212c5e4de967a50b'
+          path.write_text(text)
           PY
       - name: Complete regression and simulation suite
         run: npm test
-      - name: Commit tested runtime to review branch only
+      - name: Commit verified ownership guard
         run: |
           git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/daemon.js src/lib/target-pipelines.js src/lib/background-prep.js src/lib/jit-worker.js src/supervisor.js test/helpers.cjs test/simulator.cjs test/background-prep-simulation.test.cjs test/multi-target.test.cjs test/multi-target-simulation.test.cjs docs/multi-target.md
-          git diff --cached --check
-          git commit -m 'Run two JIT targets with shared admission and isolated recovery'
+          git add src/lib/target-pipelines.js
+          git commit -m 'Yield optional preparation during target-local recovery'
           git push origin HEAD:feature/two-target-jit
