@@ -1,3 +1,4 @@
+import { runTargetPipelines } from "lib/target-pipelines.js";
 import { dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary } from "lib/background-prep.js";
@@ -16,22 +17,8 @@ const RELEASE_MS = 1_000; // reserve space for callback/reporting jitter
 const STARTUP_BUFFER_MS = 250;
 const PREP_BUFFER_MS = 150;
 
-const NETWORK_REFRESH_MS = 10_000;
-const UI_REFRESH_MS = 10_000;
-const PROCESS_RECONCILE_MS = 30_000;
-const PROCESS_RECONCILE_LIMIT = 20;
-const OVERDUE_CHECK_MS = 250;
-const RESERVATION_CLEANUP_MS = 500;
-const MAX_BATCHES_PLANNED_PER_TICK = 1;
-const PLANNING_BUDGET_MS = 4;
-const PLANNING_LAUNCH_GUARD_MS = 20;
 const SOFT_RECOVERY_MS = 2_000;
 const SOFT_RECOVERY_MAX_MS = 15_000;
-
-// RAM gains do not invalidate existing reservations, so batch them into an
-// occasional retune instead of destroying the pipeline on every cloud upgrade.
-const CAPACITY_RETUNE_COOLDOWN_MS = 10 * 60 * 1000;
-const CAPACITY_RETUNE_RATIO = 1.25;
 
 // Target ranking estimates earning time inside this horizon, including prep and warmup.
 const TARGET_HORIZON_MS = 10 * 60 * 1000;
@@ -44,6 +31,10 @@ const SERVER_MAX_GROWTH_LOG = 0.00349388925425578;
 export async function main(ns) {
 	const flags = ns.flags([
 		["target", "auto"],
+		["max-targets", 2],
+		["max-batch-rate", 4],
+		["max-workers", 6_000],
+		["max-launches", 32],
 		["dashboard-details", false],
 		["background-prep", true],
 		["prep-max-ram", 16_384],
@@ -68,6 +59,10 @@ export async function main(ns) {
 
 	const cfg = {
 		requestedTarget: String(flags.target ?? "auto"),
+		maxTargets: Number(flags["max-targets"]),
+		maxBatchRate: Number(flags["max-batch-rate"]),
+		maxWorkers: Number(flags["max-workers"]),
+		maxLaunches: Number(flags["max-launches"]),
 		dashboardDetails: asBoolean(flags["dashboard-details"]),
 		gap: Math.max(15, Number(flags.gap)),
 		lead: Math.max(10, Number(flags.lead)),
@@ -118,8 +113,14 @@ export async function main(ns) {
 		maxRam: flags["prep-max-ram"], fraction: flags["prep-ram-fraction"],
 		horizonMinutes: flags["prep-horizon"],
 	});
-	ns.atExit(() => cancelBackgroundPrep(ns, cfg.backgroundPrep, "daemon stopped"));
+	ns.atExit(() => cancelBackgroundPrep(ns, cfg.backgroundPrep, "daemon stopped"), "background-prep");
 	validateDaemonPorts(cfg);
+	if (![1, 2].includes(cfg.maxTargets) || !(cfg.maxBatchRate > 0 && cfg.maxBatchRate <= 8) ||
+		!Number.isSafeInteger(cfg.maxWorkers) || cfg.maxWorkers < 16 ||
+		!Number.isSafeInteger(cfg.maxLaunches) || cfg.maxLaunches < 4 || cfg.maxLaunches > 128) {
+		throw new Error("Require max-targets 1 or 2, max-batch-rate (0,8], max-workers >=16, max-launches 4..128");
+	}
+	cfg.minimumPeriod = 1000 / cfg.maxBatchRate;
 	cfg.lead = Math.max(cfg.lead, cfg.gap * 6);
 
 	if (
@@ -266,897 +267,21 @@ export async function main(ns) {
 		return;
 	}
 
-	let queue = [];
-	let reservations = [];
-
-	const running = new Map();
-	const runningByChunk = new Map();
-	const batches = new Map();
-	const foreignUsedByHost = new Map();
-
-	seedForeignUsage(
-		ns,
-		network.hosts,
-		running,
-		foreignUsedByHost
-	);
-
-	let foreignUsageCursor = 0;
-
-	let batchCounter = 0;
-
-	let nextHackLanding =
-		Date.now() +
-		runtime.plan.times.W +
-		cfg.lead +
-		STARTUP_BUFFER_MS;
-
-	stats.nextHackLanding =
-		nextHackLanding;
-
-	// Placement misses are expected in a fragmented distributed RAM pool.
-	// They are telemetry only and never trigger a pipeline restart by themselves.
-	let consecutiveAllocationFailures = 0;
-
-	let lastUi = 0;
-	let lastReconcile = 0;
-	let lastLoopAt = Date.now();
-	let lastOverdueCheck = 0;
-	let lastReservationCleanup = 0;
-	let lastNetworkRefresh = Date.now();
-	let lastFleetStatusAt = 0;
-
-	let lastTunedLevel =
-		ns.getHackingLevel();
-
-	let lastObservedFleetCapacity =
-		workerFleetCapacity(
-			network.hosts,
-			cfg
-		);
-
-	let tunedFleetCapacity =
-		lastObservedFleetCapacity;
-
-	let lastCapacityRetune =
-		Date.now();
-
-	let maintenance = null;
-	let drain = null;
-	let recovery = null;
-
-	stats.started = Date.now();
-
-	while (true) {
-		const loopNow =
-			Date.now();
-
-		const loopLag =
-			Math.max(
-				0,
-				loopNow - lastLoopAt - 5
-			);
-
-		stats.loopLagSum += loopLag;
-		stats.loopLagCount++;
-		stats.loopLagMax =
-			Math.max(
-				stats.loopLagMax,
-				loopLag
-			);
-		stats.pipeline.loopLagMax =
-			Math.max(
-				stats.pipeline.loopLagMax,
-				loopLag
-			);
-
-		lastLoopAt = loopNow;
-
-		// Refresh only one host's non-daemon RAM usage per loop. This keeps the
-		// allocator's base-capacity view fresh without issuing dozens of RAM API
-		// calls in one latency-sensitive burst.
-		foreignUsageCursor = refreshOneForeignUsage(
-			ns,
-			network.hosts,
-			running,
-			foreignUsedByHost,
-			foreignUsageCursor,
-			cfg.backgroundPrep
-		);
-
-		if (
-			loopNow -
-			lastReconcile >=
-			PROCESS_RECONCILE_MS
-		) {
-			lastReconcile = loopNow;
-
-			reconcileRunning(
-				ns,
-				running,
-				runningByChunk,
-				PROCESS_RECONCILE_LIMIT
-			);
-		}
-
-		const fleetStatus =
-			fleetPort.peek();
-
-		if (
-			fleetStatus &&
-			typeof fleetStatus === "object" &&
-			fleetStatus.type === "fleet-status" &&
-			Number(fleetStatus.generatedAt) >
-			lastFleetStatusAt
-		) {
-			lastFleetStatusAt =
-				Number(fleetStatus.generatedAt);
-
-			applyFleetStatus(
-				cloudState,
-				fleetStatus
-			);
-		}
-
-		const eventProblem =
-			consumeEvents(
-				ns,
-				port,
-				batches,
-				stats,
-				target,
-				runtime,
-				cfg,
-				running,
-				runningByChunk
-			);
-
-		if (eventProblem && !maintenance) {
-			if (eventProblem.kind === "recover") {
-				if (!drain) recovery = beginSoftRecovery(recovery, eventProblem, controlPort, runtime, stats);
-			} else if (eventProblem.kind === "drain") {
-				const result = beginDrain(drain, eventProblem, queue, batches, stats, cfg);
-				drain = result.drain;
-				queue = result.queue;
-			}
-		}
-
-		if (!maintenance && !drain && loopNow - lastOverdueCheck >= OVERDUE_CHECK_MS) {
-			lastOverdueCheck = loopNow;
-			const health = targetHealth(ns, target);
-			if (health.sec > health.minSec + 5) {
-				const result = beginDrain(null, {
-					kind: "drain", hard: true, afterKind: "resync", bumpGap: true,
-					reason: `security circuit breaker: ${health.sec.toFixed(3)} / ${health.minSec.toFixed(3)}`,
-				}, queue, batches, stats, cfg);
-				drain = result.drain;
-				queue = result.queue;
-				recovery = null;
-			} else if (!recovery && port.empty()) {
-				const overdue = findOverdueBatch(batches, cfg);
-				if (overdue) {
-					const batch = batches.get(overdue.batchId);
-					const chunk = batch.chunks.get(overdue.chunkId);
-					const pid = runningByChunk.get(chunk.chunkId);
-					if (pid == null || !ns.isRunning(pid)) {
-						untrackRunningByChunk(running, runningByChunk, chunk.chunkId);
-						settleChunk(batch, chunk, { type: "miss", finishedAt: loopNow }, stats);
-						recordPhaseMiss(stats, chunk.phase);
-						cancelPoisonedBatch(ns, batch, running, runningByChunk, stats);
-					}
-					recovery = beginSoftRecovery(recovery, overdue, controlPort, runtime, stats);
-				}
-			}
-		}
-
-		if (recovery && !drain && !maintenance) {
-			cancelHackWindow(ns, batches, running, runningByChunk, stats, recovery.pauseUntil);
-			const local = updateSoftRecovery(ns, target, recovery, controlPort, runtime, stats);
-			recovery = local.recovery;
-			if (local.problem) {
-				const result = beginDrain(drain, local.problem, queue, batches, stats, cfg);
-				drain = result.drain;
-				queue = result.queue;
-			} else if (!recovery) {
-				// Drop stale unplanned slots instead of generating past-due work after a pause.
-				nextHackLanding = Math.max(nextHackLanding,
-					Date.now() + runtime.plan.times.W + cfg.lead + STARTUP_BUFFER_MS);
-			}
-		}
-
-		if ((drain || recovery) && cfg.backgroundPrep.active) {
-			cancelBackgroundPrep(ns, cfg.backgroundPrep, "active pipeline recovery");
-		}
-
-		if (drain) {
-			recovery = null;
-			if (!drain.stopPublished) {
-				publishHackPause(controlPort, Number.MAX_SAFE_INTEGER, drain.reason);
-				drain.stopPublished = true;
-			}
-			serviceHardDrain(ns, drain, batches, running, runningByChunk, stats);
-		}
-
-		// Healthy launches still have priority over allocator/UI work, but never over
-		// a known safety fault. There is enough lead to consume a bounded event burst.
-		if (port.empty()) {
-			const launched = launchDueChunks(ns, queue, target, cfg, batches, stats, running, runningByChunk, drain);
-			queue = launched.queue;
-			drain = launched.drain;
-		}
-
-		const now =
-			Date.now();
-
-		/*
-		 * Cheap fleet snapshot only. Rooting, scp, and cloud economics live in
-		 * fleet-manager.js so they can never block a time-critical JIT launch.
-		 */
-		if (
-			!maintenance &&
-			now -
-			lastNetworkRefresh >=
-			NETWORK_REFRESH_MS
-		) {
-			lastNetworkRefresh =
-				now;
-
-			// The background fleet manager owns discovery/rooting/deployment and
-			// publishes a ready-to-use worker snapshot. Avoid ns.scan/file checks in
-			// the live JIT process entirely.
-			const refreshed =
-				networkFromFleetStatus(
-					fleetStatus,
-					minimumWorkerRam
-				) ?? network;
-
-			const fleetCapacity =
-				workerFleetCapacity(
-					refreshed.hosts,
-					cfg
-				);
-
-			const capacityLost =
-				fleetCapacity <
-				lastObservedFleetCapacity -
-				1;
-
-			const capacityGainRatio =
-				tunedFleetCapacity > 0
-					? fleetCapacity /
-					tunedFleetCapacity
-					: Infinity;
-
-			const timingFloor =
-				4 * cfg.gap +
-				minimumSpacing(cfg);
-
-			const capacityCanHelp =
-				runtime.plan.period >
-				timingFloor + 5;
-
-			const deferredRetuneReady =
-				!drain &&
-				!recovery &&
-				capacityCanHelp &&
-				stats.pipeline.completed * runtime.plan.period >= 10 * 60_000 &&
-				capacityGainRatio >=
-				CAPACITY_RETUNE_RATIO &&
-				now -
-				lastCapacityRetune >=
-				CAPACITY_RETUNE_COOLDOWN_MS;
-
-			network =
-				refreshed;
-
-			syncForeignUsageHosts(
-				network.hosts,
-				foreignUsedByHost
-			);
-
-			if (
-				capacityLost &&
-				!drain
-			) {
-				const result =
-					beginDrain(
-						drain,
-						{
-							reason:
-								`worker fleet RAM decreased ` +
-								`${lastObservedFleetCapacity.toFixed(1)}GB -> ` +
-								`${fleetCapacity.toFixed(1)}GB`,
-							kind:
-								"drain",
-							afterKind:
-								"network",
-							resetPeriod:
-								true,
-						},
-						queue,
-						batches,
-						stats,
-						cfg
-					);
-
-				drain =
-					result.drain;
-
-				queue =
-					result.queue;
-			} else if (
-				deferredRetuneReady
-			) {
-				const result =
-					beginDrain(
-						drain,
-						{
-							reason:
-								`deferred RAM-growth retune ` +
-								`${tunedFleetCapacity.toFixed(1)}GB -> ` +
-								`${fleetCapacity.toFixed(1)}GB ` +
-								`(+${((capacityGainRatio - 1) * 100).toFixed(1)}%)`,
-							kind:
-								"drain",
-							afterKind:
-								"network",
-							resetPeriod:
-								true,
-						},
-						queue,
-						batches,
-						stats,
-						cfg
-					);
-
-				drain =
-					result.drain;
-
-				queue =
-					result.queue;
-			}
-
-			lastObservedFleetCapacity =
-				fleetCapacity;
-		}
-
-		/*
-		 * Do not run full target ranking inside the live JIT loop. It is one of
-		 * the most CPU-heavy parts of the controller and can delay launches by
-		 * seconds. Auto-target analysis is refreshed after the pipeline has been
-		 * safely drained for maintenance instead.
-		 */
-
-		/*
-		 * Retune when hacking level has meaningfully increased, but drain the
-		 * current pipeline first so already-landed hacks still get their W/G/W
-		 * recovery phases.
-		 */
-		const hackingLevel =
-			ns.getHackingLevel();
-
-		const retuneAt =
-			Math.max(
-				lastTunedLevel +
-				10,
-
-				Math.ceil(
-					lastTunedLevel *
-					1.10
-				)
-			);
-
-		if (
-			!maintenance &&
-			!drain &&
-			!recovery &&
-			stats.pipeline.completed * runtime.plan.period >= 15 * 60_000 &&
-			hackingLevel >=
-			retuneAt
-		) {
-			const result =
-				beginDrain(
-					drain,
-					{
-						reason:
-							`hacking level ` +
-							`${lastTunedLevel} -> ${hackingLevel}`,
-						kind:
-							"drain",
-						afterKind:
-							"retune",
-						resetPeriod:
-							true,
-					},
-					queue,
-					batches,
-					stats,
-					cfg
-				);
-
-			drain =
-				result.drain;
-
-			queue =
-				result.queue;
-		}
-
-		/*
-		 * Once every queued/running recovery phase has drained, it is safe to
-		 * rebuild. No hack that already landed is abandoned mid-recovery.
-		 */
-		if (
-			drain && (
-				(queue.length === 0 && running.size === 0) ||
-				(drain.hard && drain.cancelDone && !hasHarmfulRunning(running) && port.empty() && targetHealth(ns, target).clean)
-			)
-		) {
-			cfg.gap = drain.nextGap;
-			cfg.lead = Math.max(cfg.lead, cfg.gap * 6);
-			maintenance = {
-				reason:
-					drain.reason,
-				kind:
-					drain.afterKind,
-				resetPeriod:
-					drain.resetPeriod,
-			};
-
-			drain = null;
-		}
-
-		/*
-		 * Reconfiguration / recovery.
-		 */
-		if (maintenance) {
-			cancelBackgroundPrep(ns, cfg.backgroundPrep, "active pipeline maintenance");
-			recovery = null;
-			publishHackPause(controlPort, Number.MAX_SAFE_INTEGER, "maintenance");
-
-			if (
-				maintenance.bumpGap
-			) {
-				cfg.gap =
-					Math.min(
-						100,
-						cfg.gap + 5
-					);
-			}
-
-			if (
-				maintenance.resetPeriod
-			) {
-				cfg.periodScale = 1;
-			}
-
-			stats.restarts++;
-
-			if (
-				maintenance.kind ===
-				"resync"
-			) {
-				stats.resyncs++;
-			}
-
-			stats.lastReason =
-				maintenance.reason;
-
-			ns.clearLog();
-
-			ns.print(
-				"JIT DAEMON :: RECONFIGURE"
-			);
-
-			ns.print(
-				`Reason  ${maintenance.reason}`
-			);
-
-			ns.print(
-				`Gap     ${cfg.gap}ms`
-			);
-
-			ns.print(
-				`Stopping ${running.size} running worker(s)...`
-			);
-
-			queue = [];
-			reservations = [];
-
-			batches.clear();
-
-			abortWorkers(
-				ns,
-				network.hosts
-			);
-
-			clearRunning(running);
-			runningByChunk.clear();
-
-			port.clear();
-
-			await ns.sleep(50);
-
-			network =
-				await refreshNetwork(
-					ns,
-					cfg,
-					deployed,
-					minimumWorkerRam,
-					true
-				);
-
-			if (
-				maintenance.target
-			) {
-				target =
-					maintenance.target;
-			}
-
-			if (
-				cfg.requestedTarget ===
-				"auto"
-			) {
-				targetAnalysis =
-					rankTargets(
-						ns,
-						network,
-						cfg,
-						new Map()
-					);
-
-				// Preparation does not promote its candidate into the money slot.
-				// A deliberate --target restart can select it after live validation.
-				const best = targetAnalysis.find(entry => entry.name !== cfg.backgroundPrep.target);
-
-				const current =
-					targetAnalysis.find(
-						entry =>
-							entry.name ===
-							target
-					);
-
-				if (
-					!maintenance.target &&
-					best &&
-					current &&
-					best.name !== target &&
-					best.score >
-					current.score *
-					cfg.switchThreshold
-				) {
-					maintenance.reason +=
-						` | better target ${target} -> ${best.name}`;
-
-					target =
-						best.name;
-				}
-
-				if (
-					!target ||
-					!ns.hasRootAccess(
-						target
-					) ||
-					ns.getServerRequiredHackingLevel(
-						target
-					) >
-					ns.getHackingLevel()
-				) {
-					target =
-						resolveTarget(
-							ns,
-							network,
-							cfg,
-							targetAnalysis
-						);
-				}
-			}
-
-			if (!target) {
-				ns.tprint(
-					"ERROR: no valid target after reconfiguration."
-				);
-
-				return;
-			}
-
-			await prepTarget(
-				ns,
-				target,
-				network,
-				cfg,
-				port,
-				stats,
-				targetAnalysis
-			);
-
-			runtime =
-				tuneTarget(
-					ns,
-					target,
-					network.hosts,
-					cfg,
-					new Map()
-				);
-
-			if (!runtime) {
-				ns.tprint(
-					`ERROR: no plan fits for ${target}`
-				);
-
-				return;
-			}
-
-			if (
-				cfg.requestedTarget ===
-				"auto"
-			) {
-				targetAnalysis =
-					rankTargets(
-						ns,
-						network,
-						cfg,
-						new Map()
-					);
-			}
-
-			lastObservedFleetCapacity =
-				workerFleetCapacity(
-					network.hosts,
-					cfg
-				);
-
-			tunedFleetCapacity =
-				lastObservedFleetCapacity;
-
-			lastCapacityRetune =
-				Date.now();
-
-			lastTunedLevel =
-				ns.getHackingLevel();
-
-			nextHackLanding =
-				Date.now() +
-				runtime.plan.times.W +
-				cfg.lead +
-				STARTUP_BUFFER_MS;
-
-			stats.nextHackLanding =
-				nextHackLanding;
-
-			stats.lastHackAt =
-				NaN;
-
-			resetPipelineStats(stats);
-			stats.lastW2 = NaN;
-			stats.lastHackLanding = NaN;
-			stats.finishedBatches.clear();
-			stats.batchTimes = [];
-			lastLoopAt = Date.now();
-			publishHackPause(controlPort, 0, "ready");
-
-			consecutiveAllocationFailures = 0;
-
-			maintenance = null;
-
-			continue;
-		}
-
-		/*
-		 * Remove finished temporal reservations.
-		 */
-		if (
-			loopNow -
-			lastReservationCleanup >=
-			RESERVATION_CLEANUP_MS
-		) {
-			lastReservationCleanup =
-				loopNow;
-
-			cleanupReservations(
-				reservations,
-				Date.now() - 20
-			);
-		}
-
-		/*
-		 * Plan far enough ahead for weaken to start JIT.
-		 */
-		const earliestNewLanding = Date.now() + runtime.plan.times.W + cfg.lead + STARTUP_BUFFER_MS;
-		if (!drain && !recovery && nextHackLanding < earliestNewLanding) {
-			const skipped = Math.ceil((earliestNewLanding - nextHackLanding) / runtime.plan.period);
-			nextHackLanding += skipped * runtime.plan.period;
-			stats.expiredSlots += skipped;
-		}
-		const horizon =
-			Date.now() +
-			runtime.plan.times.W +
-			Math.max(
-				2_000,
-				cfg.lead + STARTUP_BUFFER_MS + runtime.plan.period * 2
-			);
-
-		let schedulingGuard = 0;
-		const planningStarted = Date.now();
-
-		while (
-			!drain &&
-			!recovery &&
-			port.empty() &&
-			nextHackLanding <=
-			horizon &&
-			schedulingGuard <
-			MAX_BATCHES_PLANNED_PER_TICK &&
-			Date.now() - planningStarted <
-			PLANNING_BUDGET_MS &&
-			(
-				queue.length === 0 ||
-				queue[0].launchAt - Date.now() >
-				PLANNING_LAUNCH_GUARD_MS
-			)
-		) {
-			schedulingGuard++;
-
-			const id =
-				batchCounter++;
-
-			const result =
-				reserveIncomeBatch(
-					ns,
-					target,
-					id,
-					nextHackLanding,
-					runtime.plan,
-					network.hosts,
-					cfg,
-					reservations,
-					running,
-					foreignUsedByHost
-				);
-
-			if (result) {
-				enqueueChunks(
-					queue,
-					result.chunks
-				);
-
-				batches.set(
-					String(id),
-					makeBatchState(
-						id,
-						result.chunks
-					)
-				);
-
-				stats.scheduled++;
-
-				/*
-				 * A successful reservation proves that the allocator is
-				 * making forward progress. Any earlier misses were simply
-				 * temporary fragmentation/contention.
-				 */
-				consecutiveAllocationFailures = 0;
-			} else {
-				/*
-				 * This is intentionally NOT a maintenance event.
-				 *
-				 * A distributed temporal allocator will occasionally find
-				 * that a particular landing slot cannot fit across the
-				 * current per-host RAM layout. Skipping that whole batch
-				 * period preserves the timing lattice and lets the next
-				 * safe slot be tried without destroying a healthy pipeline.
-				 */
-				stats.allocationFails++;
-
-				consecutiveAllocationFailures++;
-
-				stats.maxConsecutiveAllocationFails =
-					Math.max(
-						stats.maxConsecutiveAllocationFails,
-						consecutiveAllocationFailures
-					);
-			}
-
-			nextHackLanding +=
-				runtime.plan.period;
-		}
-
-
-		/*
-		 * Launch again immediately after planning. A newly planned chunk may be
-		 * close to its JIT start, so no dashboard/bookkeeping work comes first.
-		 */
-		if (port.empty()) {
-			const launched = launchDueChunks(
-				ns,
-				queue,
-				target,
-				cfg,
-				batches,
-				stats,
-				running,
-				runningByChunk,
-				drain
-			);
-
-			queue = launched.queue;
-			drain = launched.drain;
-		}
-
-		if (maintenance) {
-			continue;
-		}
-
-		// Optional work runs only after JIT launches, with no due event backlog.
-		// The helper examines one candidate/host per tick and owns at most one PID.
-		if (port.empty() && (!queue.length || queue[0].launchAt - Date.now() > 50)) {
-			tickBackgroundPrep(ns, {
-				state: cfg.backgroundPrep, target, network, cfg, runtime, stats,
-				healthy: !drain && !recovery && !maintenance,
-				spareRam: host => availableRam(ns, host, cfg, running, reservations,
-					Date.now(), Infinity, foreignUsedByHost),
-			});
-		}
-
-		if (
-			Date.now() -
-			lastUi >=
-			UI_REFRESH_MS
-		) {
-			lastUi =
-				Date.now();
-
-			stats.income =
-				stats.income.filter(
-					sample =>
-						sample.time >=
-						lastUi -
-						60_000
-				);
-
-			stats.batchTimes =
-				stats.batchTimes.filter(
-					time =>
-						time >=
-						lastUi -
-						60_000
-				);
-
-			renderDashboard(
-				ns,
-				target,
-				runtime,
-				network,
-				cfg,
-				stats,
-				queue,
-				running,
-				reservations,
-				batches,
-				targetAnalysis,
-				cloudState,
-				drain,
-				recovery,
-				foreignUsedByHost
-			);
-		}
-
-		const sleepFor =
-			queue.length
-				? Math.max(
-					1,
-					Math.min(
-						5,
-						queue[0]
-							.launchAt -
-						Date.now()
-					)
-				)
-				: 5;
-
-		await ns.sleep(
-			sleepFor
-		);
-	}
+	await runTargetPipelines(ns, {
+		target, runtime, stats, cfg, network, port, fleetPort, controlPort, cloudState,
+		targetAnalysis, minimumWorkerRam,
+	}, {
+		createStats, resetPipelineStats, targetHealth, createPreppedModel, tuneTargetSteps,
+		seedForeignUsage, refreshOneForeignUsage, syncForeignUsageHosts, poolProfile,
+		networkFromFleetStatus, applyFleetStatus, workerFleetCapacity,
+		consumeEvents, findOverdueBatch, settleChunk, recordPhaseMiss, finishReadyBatches,
+		beginSoftRecovery, updateSoftRecovery, cancelHackWindow, cancelPoisonedBatch,
+		beginDrain, serviceHardDrain, cancelChunk, publishHackPause,
+		reconcileRunning, untrackRunningByChunk, isTerminalChunk,
+		reserveIncomeBatch, rollbackReservations, cleanupReservations, rebuildReservationIndex,
+		enqueueChunks, makeBatchState, launchDueChunks, availableRam, totalRunningRam,
+		incomeRate, countRate, renderSchedulerDashboard,
+	});
 }
 
 function validateDaemonPorts(cfg) {
@@ -2738,7 +1863,14 @@ async function launchPrepWave(
 	 BATCH TUNER
 	 ========================================================= */
 
-function tuneTarget(
+function tuneTarget(...args) {
+	const steps = tuneTargetSteps(...args);
+	let step;
+	do { step = steps.next(); } while (!step.done);
+	return step.value;
+}
+
+function* tuneTargetSteps(
 	ns,
 	target,
 	hosts,
@@ -2754,6 +1886,7 @@ function tuneTarget(
 			running
 		);
 
+	profile.capacity = Math.min(profile.capacity, cfg.ramBudget ?? Infinity);
 	if (
 		profile.capacity <= 0
 	) {
@@ -2842,6 +1975,7 @@ function tuneTarget(
 		requested +=
 		0.005
 	) {
+		yield; // bounded live tuning, never a full target search in one tick
 		const H =
 			Math.max(
 				1,
@@ -2971,6 +2105,7 @@ function tuneTarget(
 
 		const minimumPeriod =
 			Math.max(
+				cfg.minimumPeriod || 0,
 				4 *
 				cfg.gap +
 				minimumSpacing(
@@ -2982,7 +2117,7 @@ function tuneTarget(
 			);
 
 		const period =
-			chooseSafePeriod(
+			yield* chooseSafePeriodSteps(
 				times,
 				cfg.gap,
 				minimumPeriod
@@ -3053,7 +2188,14 @@ function tuneTarget(
 	};
 }
 
-function chooseSafePeriod(
+function chooseSafePeriod(...args) {
+	const steps = chooseSafePeriodSteps(...args);
+	let step;
+	do { step = steps.next(); } while (!step.done);
+	return step.value;
+}
+
+function* chooseSafePeriodSteps(
 	times,
 	gap,
 	minimum
@@ -3098,6 +2240,7 @@ function chooseSafePeriod(
 
 		period++
 	) {
+		if ((period - start) % 32 === 0) yield;
 		const phases = [
 			mod(
 				-times.H,
@@ -3186,10 +2329,20 @@ function isDirtyPhase(
 	 DISTRIBUTED BATCH RESERVATION
 	 ========================================================= */
 
+function reclaimPrepRam(ns, cfg, host = null) {
+	let released = false;
+	for (const prep of cfg.prepStates || [cfg.backgroundPrep]) {
+		if (prep?.active && (!host || prep.active.host === host)) {
+			released = cancelBackgroundPrep(ns, prep, "active hacking needs RAM") || released;
+		}
+	}
+	return released;
+}
+
 function reserveIncomeBatch(ns, target, id, landing, plan, hosts, cfg, reservations, running, foreign) {
 	const reserve = () => reserveBatch(ns, target, id, landing, plan, hosts, cfg, reservations, running, foreign);
 	let result = reserve();
-	if (!result && cfg.backgroundPrep?.active && cancelBackgroundPrep(ns, cfg.backgroundPrep)) result = reserve();
+	if (!result && reclaimPrepRam(ns, cfg)) result = reserve();
 	return result;
 }
 
@@ -3383,9 +2536,11 @@ function reserveBatch(
 		...W2.chunks
 	);
 
-	return {
-		chunks,
-	};
+	for (const chunk of chunks) {
+		chunk.target = target;
+		chunk.epoch = cfg.epoch || "";
+	}
+	return { chunks };
 }
 
 /* =========================================================
@@ -4016,6 +3171,8 @@ function reserveChunk(
 			chunk.batchId,
 		phase:
 			chunk.phase,
+		chunkId: chunk.chunkId,
+		chunk,
 	};
 
 	reservations.push(
@@ -4078,11 +3235,10 @@ function cleanupReservations(
 		const reservation =
 			reservations[read];
 
-		if (
-			reservation.end <=
-			cutoff
-		) {
-			continue;
+		if (reservation.end <= cutoff) {
+			if (!reservation.chunk || isTerminalChunk(reservation.chunk)) continue;
+			// A delayed callback must not turn an actual live PID into free RAM.
+			reservation.end = cutoff + RELEASE_MS;
 		}
 
 		reservations[write++] =
@@ -4119,10 +3275,11 @@ function trackRunning(
 	pid,
 	chunk
 ) {
-	running.set(
-		pid,
-		chunk
-	);
+	running.set(pid, chunk);
+	if (chunk.owner) {
+		chunk.owner.running.set(pid, chunk);
+		chunk.owner.runningRam += chunk.ram;
+	}
 
 	const index =
 		runningRamIndex(
@@ -4141,9 +3298,10 @@ function untrackRunning(
 	pid,
 	chunk
 ) {
-	running.delete(
-		pid
-	);
+	running.delete(pid);
+	if (chunk.owner?.running.delete(pid)) {
+		chunk.owner.runningRam = Math.max(0, chunk.owner.runningRam - chunk.ram);
+	}
 
 	const index =
 		runningRamIndex(
@@ -4253,7 +3411,7 @@ function baseHostCapacity(
 	running,
 	foreignUsedByHost = null
 ) {
-	const prepRam = backgroundPrepRam(cfg.backgroundPrep, host.name);
+	const prepRam = backgroundPrepRam(cfg.prepStates || cfg.backgroundPrep, host.name);
 	const ownRunning = runningRamForHost(running, host.name) + prepRam;
 
 	const staticUsed =
@@ -4943,9 +4101,9 @@ function enqueueChunks(
 	}
 }
 
-function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runningByChunk, drain) {
+function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runningByChunk, drain, limit = 32) {
 	let launched = 0;
-	while (queue.length && queue[0].launchAt <= Date.now() && launched++ < 32) {
+	while (queue.length && queue[0].launchAt <= Date.now() && launched++ < limit) {
 		const chunk = queue.shift();
 		const batch = batches.get(chunk.batchId);
 		if (!batch || isTerminalChunk(chunk)) continue;
@@ -4957,13 +4115,13 @@ function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runnin
 			settleChunk(batch, chunk, { type: "skip", finishedAt: Date.now() }, stats);
 			continue;
 		}
+		chunk.launchIssued = true;
 		const launch = () => ns.exec(chunk.script, chunk.host, chunk.threads,
 			target, chunk.landAt, chunk.batchId, cfg.port, chunk.phase, chunk.chunkId,
 			Math.max(20, cfg.gap), cfg.controlPort, chunk.duration, chunk.launchAt,
-			chunk.stealBudget ?? 0, chunk.threads);
+			chunk.stealBudget ?? 0, chunk.threads, chunk.epoch || "");
 		let pid = launch();
-		if (!pid && cfg.backgroundPrep?.active?.host === chunk.host &&
-			cancelBackgroundPrep(ns, cfg.backgroundPrep, "active launch needs RAM")) pid = launch();
+		if (!pid && reclaimPrepRam(ns, cfg, chunk.host)) pid = launch();
 		if (!pid) {
 			recordPhaseMiss(stats, chunk.phase, true);
 			settleChunk(batch, chunk, { type: "miss", finishedAt: Date.now() }, stats);
@@ -5280,7 +4438,7 @@ function renderDashboard(
 	const prepRam = backgroundPrepRam(cfg.backgroundPrep);
 	const usedRam = network.hosts.reduce((sum, host) => sum +
 		(foreignUsedByHost.get(host.name) ?? 0) + runningRamForHost(running, host.name) +
-		backgroundPrepRam(cfg.backgroundPrep, host.name), 0);
+		backgroundPrepRam(cfg.prepStates || cfg.backgroundPrep, host.name), 0);
 	const income60 = incomeRate(stats, 60_000, now);
 	const batch60 = countRate(stats.batchTimes, 60_000, stats.started, now);
 	const pending = nextPendingHackLanding(batches);
@@ -5369,6 +4527,93 @@ function renderDashboard(
 	} else {
 		ns.print("  More diagnostics: --dashboard-details true");
 	}
+}
+
+// Publish machine-readable status independently of the text layout. Only the
+// supervisor reads this reserved status channel; worker/control ports are separate.
+function renderSchedulerDashboard(ns, pool) {
+	const now = Date.now();
+	const all = [...pool.pipelines.values(), ...pool.history];
+	const elapsed = Math.max(1, Math.min(60_000, now - pool.started)) / 1000;
+	const rows = [...pool.pipelines.values()].map(p => {
+		const health = targetHealth(ns, p.name);
+		const mode = p.retiring ? "RETIRING" : p.drain ? "DRAINING" : p.recovery ? "RECOVERING" :
+			p.mode !== "RUNNING" ? p.mode : Number.isFinite(p.stats.lastHackAt) && now - p.stats.lastHackAt < 10_000 ? "LIVE" : "WARMUP";
+		return { target: p.name, mode, role: p.trial ? "TRIAL" : p.name === pool.anchor ? "PRIORITY" : "SUPPORT",
+			income60: incomeRate(p.stats, 60_000, now), model: p.runtime?.plan.expected || 0,
+			earned: p.stats.money, paid: p.stats.profitable, running: p.running.size, queued: p.queue.length,
+			batchRate: countRate(p.stats.batchTimes, 60_000, p.stats.started, now),
+			modelBatchRate: p.runtime?.plan.batchRate || 0, gap: p.cfg.gap,
+			period: p.runtime?.plan.period || 0, lead: p.cfg.lead,
+			money: health.money, maxMoney: health.maxMoney, security: health.sec, minSecurity: health.minSec,
+			eta: Math.max(0, p.firstLanding - now), misses: { ...p.stats.pipeline.misses },
+			drift: p.stats.pipeline.driftMax, spacing: Number.isFinite(p.stats.pipeline.minSpacing) ? p.stats.pipeline.minSpacing : null,
+			local: p.stats.pipeline.softRecoveries, fallback: p.stats.pipeline.recoveries,
+			restarts: p.stats.restarts, resyncs: p.stats.resyncs, admissionSkips: p.admissionSkips,
+			allocationFails: p.stats.allocationFails, note: p.recovery?.reason || p.drain?.reason || p.note,
+			workerRam: p.runningRam, epoch: p.epoch };
+	});
+	const totalRam = pool.network.hosts.reduce((n, host) => n + host.maxRam, 0);
+	const prepRam = backgroundPrepRam(pool.cfg.prepStates);
+	const usedRam = totalRunningRam(pool.running) + prepRam + [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
+	const snapshot = {
+		type: "jit-status", version: 2, pid: ns.pid, generatedAt: now,
+		mode: rows.length > 1 || pool.history.length || rows.some(p => !["LIVE", "WARMUP", "RECOVERING"].includes(p.mode)) ? "multi" : "running",
+		pipelines: rows, limit: pool.cfg.maxTargets, priority: pool.anchor,
+		income60: all.reduce((n, p) => n + p.stats.income.filter(s => s.time >= now - 60_000).reduce((sum, s) => sum + s.money, 0), 0) / elapsed,
+		earned: all.reduce((n, p) => n + p.stats.money, 0),
+		model: rows.reduce((n, p) => n + (["LIVE", "WARMUP"].includes(p.mode) ? p.model : 0), 0),
+		usedRam, totalRam, prepRam, note: pool.note, loopLag: pool.lagMax,
+		maxLaunches: pool.cfg.maxLaunches, maxWorkers: pool.cfg.maxWorkers, maxBatchRate: pool.cfg.maxBatchRate,
+		retired: pool.history.map(p => ({ target: p.name, earned: p.stats.money, reason: p.retireReason })),
+	};
+	const statusPort = ns.getPortHandle(PORTS.JIT_STATUS);
+	statusPort.clear(); statusPort.tryWrite(snapshot);
+	if (snapshot.mode === "running") {
+		const p = pool.pipelines.values().next().value;
+		renderDashboard(ns, p.name, p.runtime, pool.network, p.cfg, p.stats, p.queue,
+			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
+			p.drain, p.recovery, pool.foreign);
+		if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
+		return;
+	}
+	const row = (label, value) => dashboardRow(ns, label, value);
+	ns.clearLog();
+	ns.print(`JIT DAEMON :: MULTI :: hacking ${ns.getHackingLevel()}`);
+	row("Target slots", `${rows.length}/${pool.cfg.maxTargets} | priority ${pool.anchor}`);
+	dashboardSection(ns, "Combined income / measured");
+	row("Income 60s", `${cash(snapshot.income60)}/s`);
+	row("Model", `${cash(snapshot.model)}/s estimate; warmup is not income`);
+	row("Run total", `${cash(snapshot.earned)} earned across all target epochs`);
+	row("Admission", pool.note);
+	dashboardSection(ns, "Independent target pipelines");
+	for (const p of rows) {
+		row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s actual`);
+		row("Plan", `${cash(p.model)}/s estimate | ${p.batchRate.toFixed(3)}/${p.modelBatchRate.toFixed(3)} batches/s actual/model`);
+		if (p.mode === "WARMUP") row("First hack", `ETA ${dashboardTime(p.eta)}`);
+		row("Health", `money ${(100 * p.money / Math.max(1, p.maxMoney)).toFixed(1)}% | security +${(p.security - p.minSecurity).toFixed(3)}`);
+		row("Pipe misses", dashboardCounters(p.misses));
+		row("Pipe recovery", `${p.local} local | ${p.fallback} fallback | ${p.restarts} target rebuilds`);
+		row("Workers", `${p.running} running | ${p.queued} queued | ${formatRam(p.workerRam)}`);
+		if (["DRAINING", "RECOVERING", "RETIRING", "PREPARING", "TUNING"].includes(p.mode)) row("Reason", p.note);
+		if (pool.cfg.dashboardDetails) {
+			row("Timing", `gap ${p.gap}ms | period ${dashboardTime(p.period)} | lead ${p.lead}ms`);
+			row("Drift", `max ${p.drift.toFixed(2)}ms | spacing ${p.spacing === null ? "n/a" : `${p.spacing.toFixed(1)}ms`}`);
+			row("Admission skips", `${p.admissionSkips} load limited | ${p.allocationFails} RAM failures`);
+			row("Target earned", `${cash(p.earned)} | ${p.paid} paid batches`);
+		}
+	}
+	dashboardSection(ns, "Shared fleet & workload limits");
+	row("RAM online", `${formatRam(usedRam)} / ${formatRam(totalRam)} (${(100 * usedRam / Math.max(1, totalRam)).toFixed(1)}%)`);
+	row("Network", `${pool.network.rooted}/${pool.network.servers.length} rooted | ${pool.network.hosts.length} worker hosts`);
+	row("Cloud", `${pool.cloudState.count}/${pool.cloudState.limit} servers | ${formatRam(pool.cloudState.totalRam)}`);
+	const homeCores = pool.network.hosts.find(host => host.name === HOME)?.cores || 1;
+	row("Home cores", `${homeCores} (${coreBonus(homeCores).toFixed(3)}x growth/weaken bonus)`);
+	row("Budget", `${pool.cfg.maxBatchRate} batches/s | ${pool.cfg.maxLaunches} planned launches/s | ${pool.cfg.maxWorkers} worker slots`);
+	row("Loop lag", `max ${pool.lagMax.toFixed(1)}ms session`);
+	row("Repair RAM", `${formatRam(prepRam)} held separately`);
+	if (pool.history.length) row("Last retired", `${pool.history.at(-1).name}: ${pool.history.at(-1).retireReason}`);
+	if (!pool.cfg.dashboardDetails) ns.print("  More diagnostics: --dashboard-details true");
 }
 
 function renderPrep(

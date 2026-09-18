@@ -13,6 +13,7 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 	const plannedDuration = Number(ns.args[8] ?? getDuration(target));
 	const plannedLaunch = Number(ns.args[9] ?? Date.now());
 	const prep = phase.startsWith("PREP-");
+	const epoch = String(ns.args[12] ?? "");
 	const port = ns.getPortHandle(Number(portArg));
 	const controlPort = controlNumber > 0 ? ns.getPortHandle(controlNumber) : null;
 	const minSecurity = ns.getServerMinSecurityLevel(target);
@@ -23,10 +24,16 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 
 	while (true) {
 		const now = Date.now();
-		const control = controlPort?.peek();
+		const document = controlPort?.peek();
+		const control = document?.version === 2 ? document.targets?.[target] : document;
+		if (!prep && epoch && (document?.version !== 2 || control?.epoch !== epoch)) {
+			await report(ns, port, { type: "skip", phase, batchId, chunkId, target,
+				finishedAt: now, reason: "stale or missing target epoch" });
+			return;
+		}
 		// A call-time latch, not a comparison of a 2s pause with a landing 90s away.
 		// The controller separately cancels hacks which have already called ns.hack.
-		if (!prep && phase === "H" && control?.type === "jit-control" && control.paused) {
+		if (!prep && phase === "H" && (document?.type === "jit-control") && control?.paused) {
 			await report(ns, port, { type: "skip", phase, batchId, chunkId, target,
 				finishedAt: now, reason: "H call suppressed during recovery" });
 			return;

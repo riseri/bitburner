@@ -18,7 +18,7 @@ class NetscriptSimulation {
         for (const [name, spec] of Object.entries(options.backgroundTargets || {})) {
             this.servers.set(name, { ...this.server, ...spec });
         }
-        this.exitHandlers = []; this.peakRam = new Map();
+        this.exitHandlers = []; this.exitCallbacks = new Map(); this.peakRam = new Map(); this.snapshots = []; this.completions = [];
         this.baseLevel = 450;
         this.baseW = options.weakenTime ?? 354_000;
         this.seed = 42;
@@ -40,6 +40,8 @@ class NetscriptSimulation {
             port.tryWrite = value => {
                 const accepted = write(value);
                 if (accepted && value?.type === 'miss') this.misses.push(value);
+                if (accepted && value?.type === 'done') this.completions.push(value);
+                if (accepted && value?.type === 'jit-status') this.snapshots.push(value);
                 return accepted;
             };
             this.ports.set(n, port);
@@ -80,7 +82,12 @@ class NetscriptSimulation {
         const sim = this;
         const ns = {
             pid: process.pid, args: process.args || [],
-            atExit: fn => { if (process.pid === 1) sim.exitHandlers.push(fn); },
+            atExit: (fn, id = 'default') => {
+                if (process.pid === 1) {
+                    sim.exitCallbacks.set(id, fn);
+                    sim.exitHandlers = [...sim.exitCallbacks.values()];
+                }
+            },
             ps: host => [...sim.processes.values()].filter(p => p.host === host).map(p => ({pid:p.pid, filename:p.script, args:p.args})),
             disableLog() {}, print: (...args) => sim.logs.push(args.join(' ')), tprint: (...args) => sim.logs.push(args.join(' ')),
             clearLog: () => { sim.logs = []; },
@@ -120,6 +127,7 @@ class NetscriptSimulation {
             brutessh() {}, ftpcrack() {}, relaysmtp() {}, httpworm() {}, sqlinject() {}, nuke() {},
         };
         ns.exec = (file, host, threads, ...args) => {
+            if (sim.options.refuseTarget === args[0] && args[4] === 'H') return 0;
             const fn = sim.workers.get(file);
             if (!fn) throw new Error(`Unknown worker: ${file}`);
             const ram = ns.getScriptRam(file) * threads;
@@ -128,10 +136,12 @@ class NetscriptSimulation {
             sim.processes.set(p.pid, p); sim.used.set(host, (sim.used.get(host) || 0) + ram);
             sim.peakRam.set(host, Math.max(sim.peakRam.get(host) || 0, sim.used.get(host)));
             let startDelay = 1 + sim.random() * 3;
-            if (sim.options.delayOneW2 && !sim.dropped && args[4] === 'W2' && sim.clock.now - sim.start > 500_000) {
+            if (sim.options.delayOneW2 && !sim.dropped && args[4] === 'W2' &&
+                (!sim.options.delayTarget || args[0] === sim.options.delayTarget) &&
+                sim.clock.now - sim.start > (sim.options.delayAt ?? 500_000)) {
                 sim.dropped = true;
                 sim.delayedChunk = args[5];
-                startDelay = Math.max(1000, args[1] - sim.clock.now - sim.duration('W') + 5000);
+                startDelay = Math.max(1000, args[1] - sim.clock.now - sim.duration('W', args[0]) + 5000);
             }
             sim.launches.push({ at: sim.clock.now, phase: args[4] || file, target: args[0], pid: p.pid, host, threads, ram, landAt: args[1] });
             sim.clock.timer(startDelay, () => {
