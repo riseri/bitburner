@@ -106,10 +106,11 @@ test('second supervisor exits before starting services', async () => {
 test('contract manager emits heartbeats during a scan longer than the old stale timeout', async () => {
     const clock = new Clock(), status = new Port(), fleet = new Port();
     fleet.write({network:{servers:['home']}});
-    const api = loadScript('contract-manager.js', clock, {SOLVERS:{}});
+    const api = loadScript('contract-manager.js', clock, {SOLVERS:{}, ...loadScript('lib/contract-safety.js', clock)});
     const publications = []; const write = status.write.bind(status);
     status.write = value => { publications.push(value.generatedAt); write(value); };
     api.main({pid:8, flags:pairs=>Object.fromEntries(pairs), disableLog(){}, fileExists:()=>false,
+        getHostname:()=> 'home', ps:()=>[], read:()=> 'test solver source', clearLog(){}, print(){},
         getPortHandle:n=>n===18?status:fleet, ls:()=>Array.from({length:100},(_,i)=>`${i}.cct`),
         codingcontract:{getContractType:()=> 'not implemented'}, sleep:()=>clock.sleep(1000)});
     await clock.runUntil(clock.now + 40000);
