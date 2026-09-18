@@ -20,9 +20,7 @@ jobs:
           import base64, gzip, hashlib, json
           from pathlib import Path
           encoded = Path('.github/dashboard-update.b64').read_text().strip()
-          # Correct three transfer differences found by byte-comparing the
-          # downloaded artifact with the locally tested payload. The original
-          # SHA-256 and every before/after source hash still must match.
+          # Correct the verified transfer differences; preserve all source hashes.
           assert len(encoded) == 16274
           for start, end, text in [(12389, 12390, ''), (10762, 10764, 'VOr'), (8729, 8729, '9N')]:
               encoded = encoded[:start] + text + encoded[end:]
@@ -48,6 +46,29 @@ jobs:
               path.parent.mkdir(parents=True, exist_ok=True)
               path.write_text(text)
               print(f'Exact source verified: {path} {change["after"]}')
+
+          # Simulations still assert all original income/recovery invariants.
+          # Request session diagnostics explicitly, normalize display indentation,
+          # and match the new scope label instead of the old raw log layout.
+          for filename, expected in [
+              ('test/jit-simulation.test.cjs', '6341c1d1fd9f3a9b53403bb4611768ef83aa39bd'),
+              ('test/background-prep-simulation.test.cjs', '24ac50cbe9551803dd3886247e737f1bce91a146'),
+          ]:
+              path = Path(filename)
+              text = path.read_text()
+              assert blob(text) == expected, f'Simulation baseline changed: {path}'
+              old = 'const summary = sim.summary();'
+              assert old in text
+              text = text.replace(old, old + '\n    summary.logs = summary.logs.map(line => line.trimStart());')
+              text = text.replace(r'/Restarts\s+0\s+\| safety resyncs 0/', r'/Restarts\s+0 session\s+\| 0 safety resyncs/')
+              text = text.replace(r'/Restarts\s+1\s+\| safety resyncs 1/', r'/Restarts\s+1 session\s+\| 1 safety resyncs/')
+              if filename == 'test/jit-simulation.test.cjs':
+                  text = text.replace('new NetscriptSimulation(scenario)', "new NetscriptSimulation({ ...scenario, flags: { ...scenario.flags, 'dashboard-details': true } })")
+              else:
+                  text = text.replace("flags: { target: 'auto' }", "flags: { target: 'auto', 'dashboard-details': true }")
+                  text = text.replace("flags: { target: 'auto', 'background-prep': false }", "flags: { target: 'auto', 'background-prep': false, 'dashboard-details': true }")
+              path.write_text(text)
+              print(f'Updated simulation log reader: {path}')
           PY
       - name: Full regression and simulation suite
         run: npm test
@@ -56,7 +77,7 @@ jobs:
           git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/daemon.js src/supervisor.js src/lib/dashboard.js test/helpers.cjs test/jit-recovery.test.cjs docs/dashboard.md
+          git add src/daemon.js src/supervisor.js src/lib/dashboard.js test/helpers.cjs test/jit-recovery.test.cjs test/jit-simulation.test.cjs test/background-prep-simulation.test.cjs docs/dashboard.md
           git commit -m 'Improve daemon and supervisor dashboard readability'
           git push origin HEAD:feature/protected-background-prep
       - name: Preserve transport for checksum diagnosis
