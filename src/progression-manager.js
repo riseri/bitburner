@@ -1,22 +1,11 @@
 import { PORTS } from "lib/ports.js";
+import { progressionPrograms, progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
 
 const HOME = "home";
 const DEFAULT_INTERVAL_MS = 5_000;
 
-const PORT_PROGRAMS = Object.freeze([
-	{ name: "BruteSSH.exe", ports: 1 },
-	{ name: "FTPCrack.exe", ports: 2 },
-	{ name: "relaySMTP.exe", ports: 3 },
-	{ name: "HTTPWorm.exe", ports: 4 },
-	{ name: "SQLInject.exe", ports: 5 },
-]);
-
-const BACKDOOR_TARGETS = Object.freeze([
-	{ host: "CSEC", faction: "CyberSec" },
-	{ host: "avmnite-02h", faction: "NiteSec" },
-	{ host: "I.I.I.I", faction: "The Black Hand" },
-	{ host: "run4theh111z", faction: "BitRunners" },
-]);
+const PORT_PROGRAMS = progressionPrograms();
+const BACKDOOR_TARGETS = progressionBackdoors();
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -51,8 +40,13 @@ export async function main(ns) {
 		}
 
 		statusPort.clear();
-		statusPort.write(status);
-		await ns.sleep(cfg.interval);
+		statusPort.write({ ...status, producerPid: ns.pid, heartbeatIntervalMs: 5_000 });
+		const wakeAt = Date.now() + cfg.interval;
+		while (Date.now() < wakeAt) {
+			await ns.sleep(Math.min(5_000, wakeAt - Date.now()));
+			statusPort.clear();
+			statusPort.write({ ...status, producerPid: ns.pid, heartbeatIntervalMs: 5_000, generatedAt: Date.now() });
+		}
 	}
 }
 
@@ -71,7 +65,7 @@ function buildStatus(ns, fleetStatus) {
 		owned: ns.fileExists(program.name, HOME),
 	}));
 
-	const network = fleetStatus?.type === "fleet-status"
+	const network = freshStatus(fleetStatus, "fleet-status")
 		? fleetStatus.network ?? {}
 		: {};
 	const discovered = new Set(
@@ -85,9 +79,14 @@ function buildStatus(ns, fleetStatus) {
 		analyzeBackdoor(ns, target, discovered, parents, hackingLevel)
 	);
 
+	const objectives = planObjectives({ torOwned, programs, backdoors, money });
 	return {
 		type: "progression-status",
 		generatedAt: Date.now(),
+		plannedAt: Date.now(),
+		planRevision: `${ns.pid}:${Date.now()}`,
+		resetEpoch: resetEpoch(reset),
+		objectives,
 		automationMode: "planner",
 		currentNode,
 		sourceFiles,
@@ -109,11 +108,8 @@ function buildStatus(ns, fleetStatus) {
 		backdoors,
 		backdoorsInstalled: backdoors.filter(target => target.installed).length,
 		backdoorsTotal: backdoors.length,
-		nextObjective: chooseNextObjective({
-			torOwned,
-			programs,
-			backdoors,
-		}),
+		nextObjective: objectives.find(objective => objective.ready && objective.affordable !== false) ||
+			objectives[0] || { kind: "faction-progress", label: "Faction backdoors complete; continue faction and augmentation progression" },
 		error: "",
 	};
 }
@@ -137,7 +133,7 @@ function analyzeBackdoor(ns, target, discovered, parents, hackingLevel) {
 	const installed = Boolean(server.backdoorInstalled);
 	const requiredHacking = ns.getServerRequiredHackingLevel(target.host);
 	const skillReady = hackingLevel >= requiredHacking;
-	const path = buildPath(parents, target.host);
+	const path = pathFromHome(parents, target.host);
 
 	return {
 		...target,
@@ -155,102 +151,24 @@ function analyzeBackdoor(ns, target, discovered, parents, hackingLevel) {
 	};
 }
 
-function buildPath(parents, target) {
-	const path = [];
-	const seen = new Set();
-	let current = target;
-
-	while (current != null && !seen.has(current)) {
-		seen.add(current);
-		path.push(current);
-		if (current === HOME) break;
-		current = parents[current];
+// Independent backdoors do not sit behind an unaffordable shopping cart.
+export function planObjectives({ torOwned, programs, backdoors, money }) {
+	const objectives = [];
+	if (!torOwned) objectives.push({ kind: "tor", target: "TOR", label: "Get a TOR router",
+		ready: true, costEstimate: 200_000, affordable: money >= 200_000, blocker: money >= 200_000 ? "" : "insufficient-cash" });
+	const missing = programs.find(program => !program.owned);
+	if (missing) objectives.push({ kind: "program", target: missing.name, program: missing.name,
+		label: `Acquire ${missing.name}`, ready: torOwned, costEstimate: missing.cost,
+		affordable: money >= missing.cost, blocker: !torOwned ? "tor-required" : money >= missing.cost ? "" : "insufficient-cash" });
+	for (const target of backdoors) {
+		if (target.installed) continue;
+		const blocker = !target.discovered ? "not-discovered" : !target.rooted ? "root-required"
+			: !target.skillReady ? `hacking-level-${target.requiredHacking}-required` : !target.path.length ? "route-required" : "";
+		objectives.push({ kind: "backdoor", target: target.host, host: target.host, faction: target.faction,
+			label: `Backdoor ${target.host} for ${target.faction}`, ready: !blocker, blocker,
+			affordable: true, costEstimate: 0, path: target.path });
 	}
-
-	if (path[path.length - 1] !== HOME) return [];
-	return path.reverse();
-}
-
-function chooseNextObjective({ torOwned, programs, backdoors }) {
-	if (!torOwned) {
-		return {
-			kind: "tor",
-			label: "Get a TOR router",
-		};
-	}
-
-	const missingProgram = programs.find(program => !program.owned);
-	if (missingProgram) {
-		return {
-			kind: "program",
-			program: missingProgram.name,
-			label: `Acquire ${missingProgram.name}`,
-		};
-	}
-
-	const readyBackdoor = backdoors.find(target => target.ready);
-	if (readyBackdoor) {
-		return {
-			kind: "backdoor",
-			host: readyBackdoor.host,
-			faction: readyBackdoor.faction,
-			path: readyBackdoor.path,
-			label: `Backdoor ${readyBackdoor.host} for ${readyBackdoor.faction}`,
-		};
-	}
-
-	const hackingBlocked = backdoors
-		.filter(target => target.discovered && target.rooted && !target.installed && !target.skillReady)
-		.sort((a, b) => a.requiredHacking - b.requiredHacking)[0];
-	if (hackingBlocked) {
-		return {
-			kind: "hacking-level",
-			host: hackingBlocked.host,
-			requiredHacking: hackingBlocked.requiredHacking,
-			label: `Raise hacking to ${hackingBlocked.requiredHacking} for ${hackingBlocked.host}`,
-		};
-	}
-
-	const rootingBlocked = backdoors.find(
-		target => target.discovered && !target.rooted && !target.installed
-	);
-	if (rootingBlocked) {
-		return {
-			kind: "root",
-			host: rootingBlocked.host,
-			label: `Wait for fleet rooting on ${rootingBlocked.host}`,
-		};
-	}
-
-	const routeBlocked = backdoors.find(
-		target =>
-			target.discovered &&
-			target.rooted &&
-			target.skillReady &&
-			!target.installed &&
-			target.path.length === 0
-	);
-	if (routeBlocked) {
-		return {
-			kind: "route",
-			host: routeBlocked.host,
-			label: `Waiting for network route data for ${routeBlocked.host}`,
-		};
-	}
-
-	const undiscovered = backdoors.find(target => !target.discovered);
-	if (undiscovered) {
-		return {
-			kind: "discover",
-			host: undiscovered.host,
-			label: `Keep expanding the network until ${undiscovered.host} is discovered`,
-		};
-	}
-
-	return {
-		kind: "faction-progress",
-		label: "Faction backdoors are complete; continue faction and augmentation progression",
-	};
+	return objectives;
 }
 
 function sourceFileEntries(ownedSF) {

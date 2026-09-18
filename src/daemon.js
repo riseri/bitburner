@@ -1164,7 +1164,7 @@ function validateDaemonPorts(cfg) {
 	if (selected.some(port => !Number.isSafeInteger(port) || port <= 0) || new Set(selected).size !== 3) {
 		throw new Error("Worker events, fleet status and JIT control need distinct positive integer ports");
 	}
-	const reserved = [PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS, PORTS.PROGRESSION_STATUS];
+	const reserved = [PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS, PORTS.PROGRESSION_STATUS, PORTS.PROGRESSION_ACTION];
 	if (selected.some(port => reserved.includes(port))) {
 		throw new Error("Daemon port conflicts with a reserved supervisor/contract/progression channel");
 	}
@@ -1207,13 +1207,9 @@ function startFleetManager(
 		return;
 	}
 
-	// Exactly one background fleet manager should own rooting, deployment, and
-	// cloud purchasing. Restarting the daemon restarts the manager with the same
-	// configuration, but none of this work happens in the JIT launch loop.
-	ns.scriptKill(
-		FLEET_MANAGER,
-		HOME
-	);
+	// Adopt an existing fleet, including its cloud budget flags. A daemon restart
+	// must not reset another service's configuration or create a second owner.
+	if (ns.ps(HOME).some(process => process.filename === FLEET_MANAGER)) return;
 
 	const pid =
 		ns.run(

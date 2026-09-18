@@ -31,6 +31,8 @@ export async function main(ns) {
 	const statusPort = ns.getPortHandle(cfg.port);
 	const fleetPort = ns.getPortHandle(cfg.fleetPort);
 	const state = {
+		producerPid: ns.pid,
+		heartbeatIntervalMs: HEARTBEAT_MS,
 		scans: 0,
 		found: 0,
 		solved: 0,
@@ -42,6 +44,14 @@ export async function main(ns) {
 		error: "",
 	};
 
+	let lastHeartbeatAt = 0;
+	const pulse = () => {
+		if (Date.now() - lastHeartbeatAt >= HEARTBEAT_MS) {
+			publish(statusPort, state);
+			lastHeartbeatAt = Date.now();
+		}
+	};
+	publish(statusPort, state);
 	while (true) {
 		try {
 			const fleet = fleetPort.peek();
@@ -50,7 +60,7 @@ export async function main(ns) {
 				: [];
 
 			if (servers.length > 0) {
-				await scanContracts(ns, servers, cfg, quarantine, state);
+				await scanContracts(ns, servers, cfg, quarantine, state, pulse);
 			} else {
 				state.lastAction = "waiting for fleet snapshot";
 			}
@@ -66,13 +76,16 @@ export async function main(ns) {
 	}
 }
 
-async function scanContracts(ns, servers, cfg, quarantine, state) {
+async function scanContracts(ns, servers, cfg, quarantine, state, pulse = () => {}) {
 	state.scans++;
 	let foundThisPass = 0;
 
 	for (const host of servers) {
+		pulse();
 		const files = ns.ls(host, ".cct");
 		for (const file of files) {
+			pulse();
+			await ns.sleep(1); // Skipped/unsupported files also yield to supervision.
 			foundThisPass++;
 			state.found++;
 			const type = ns.codingcontract.getContractType(file, host);

@@ -17,7 +17,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Regression tests
-        run: node --test test/jit-recovery.test.cjs test/background-prep.test.cjs
-      - name: Full daemon simulations
-        run: node --test test/jit-simulation.test.cjs test/background-prep-simulation.test.cjs
+      - name: All regression tests and full daemon simulations
+        run: npm test

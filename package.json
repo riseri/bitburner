@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "bitburner-filesync",
-    "test": "node --test test/jit-recovery.test.cjs test/background-prep.test.cjs && node --test test/jit-simulation.test.cjs test/background-prep-simulation.test.cjs"
+    "test": "node --test test/*.test.cjs"
   },
   "repository": {
     "type": "git",
