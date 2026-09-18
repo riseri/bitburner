@@ -214,6 +214,9 @@ function servicePipelineSafety(ns, pool, p, now) {
 		else if (!p.recovery) p.nextLanding = Math.max(p.nextLanding,
 			now + p.runtime.plan.times.W + p.cfg.lead + 250);
 	}
+	if ((p.recovery || p.drain) && pool.cfg.backgroundPrep?.active) {
+		cancelBackgroundPrep(ns, pool.cfg.backgroundPrep, "earning target recovery has priority");
+	}
 	if (p.drain) {
 		if (p.repair?.active) cancelBackgroundPrep(ns, p.repair, "target is draining");
 		api.serviceHardDrain(ns, p.drain, p.batches, pool.running, pool.runningByChunk, p.stats);
