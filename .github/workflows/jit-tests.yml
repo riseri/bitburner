@@ -1,58 +1,21 @@
-name: Hardening port validation
+name: JIT regression tests
 on:
+  push:
+    branches: [main, fix/jit-recovery-invariants, feature/protected-background-prep]
   pull_request:
     branches: [main]
 permissions:
   contents: read
 jobs:
-  apply-tested-patch:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.number == 13 &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'fix/supervision-progression-hardening'
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Verify and apply reviewed port followup
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import base64, gzip, hashlib, os, pathlib
-          encoded = pathlib.Path('.github/hardening-patch/ports.b64').read_text().strip()
-          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '9577fad16d8bca55b387747fe65054a0dc21b366aeecb0dabc9a3d9116a9319d', 'patch checksum mismatch'
-          pathlib.Path(os.environ['RUNNER_TEMP'], 'ports.patch').write_bytes(patch)
-          PY
-          git apply --check "$RUNNER_TEMP/ports.patch"
-          git apply "$RUNNER_TEMP/ports.patch"
-          rm -r .github/hardening-patch
-          git diff --check
       - name: All regression tests and full daemon simulations
-        shell: bash
-        run: |
-          set -o pipefail
-          npm test 2>&1 | tee "$RUNNER_TEMP/hardening-tests.txt"
-      - name: Commit validated source to this PR branch only
-        shell: bash
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src test docs/supervision.md .github/hardening-patch
-          git commit -m 'Preserve custom fleet wiring and reserve the action channel'
-          git push origin HEAD:refs/heads/fix/supervision-progression-hardening
-      - name: Validation report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hardening-test-report
-          retention-days: 7
-          path: ${{ runner.temp }}/hardening-tests.txt
+        run: npm test
