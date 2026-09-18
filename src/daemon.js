@@ -1,3 +1,4 @@
+import { dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary } from "lib/background-prep.js";
 
@@ -43,6 +44,7 @@ const SERVER_MAX_GROWTH_LOG = 0.00349388925425578;
 export async function main(ns) {
 	const flags = ns.flags([
 		["target", "auto"],
+		["dashboard-details", false],
 		["background-prep", true],
 		["prep-max-ram", 16_384],
 		["prep-ram-fraction", 0.01],
@@ -66,6 +68,7 @@ export async function main(ns) {
 
 	const cfg = {
 		requestedTarget: String(flags.target ?? "auto"),
+		dashboardDetails: asBoolean(flags["dashboard-details"]),
 		gap: Math.max(15, Number(flags.gap)),
 		lead: Math.max(10, Number(flags.lead)),
 		homeReserve: Math.max(
@@ -5223,56 +5226,12 @@ function resetPipelineStats(stats) {
 	stats.pipeline = createPipelineStats();
 }
 
-function renderTargetAnalysis(
-	ns,
-	target,
-	targetAnalysis,
-	limit = 6
-) {
-	if (
-		!targetAnalysis.length
-	) {
-		return;
-	}
-
-	ns.print("");
-
-	ns.print(
-		"TARGET ANALYSIS :: 10m horizon"
-	);
-
-	for (
-		const entry
-		of targetAnalysis.slice(
-			0,
-			limit
-		)
-	) {
-		const selected =
-			entry.name ===
-				target
-				? ">"
-				: " ";
-
-		ns.print(
-			`${selected} ` +
-			`${entry.name.padEnd(18)} ` +
-			`${cash(entry.score).padStart(9)}/s ` +
-			`steady:${cash(entry.steady).padStart(9)}/s ` +
-			`S:${(
-				entry.steal *
-				100
-			)
-				.toFixed(1)
-				.padStart(4)}% ` +
-			`P:${formatTime(
-				entry.period
-			).padStart(6)} ` +
-			`prep:${formatTime(
-				entry.prepMs
-			).padStart(6)}`
-		);
-	}
+function renderTargetAnalysis(ns, target, targetAnalysis, limit = 4) {
+	dashboardTargets(ns, targetAnalysis.map(entry => ({
+		name: entry.name, selected: entry.name === target,
+		effective: cash(entry.score), steady: cash(entry.steady),
+		prep: entry.prepMs === 0 ? "0ms" : dashboardTime(entry.prepMs),
+	})), limit);
 }
 
 function nextPendingHackLanding(batches) {
@@ -5310,628 +5269,143 @@ function nextPendingHackLanding(batches) {
 }
 
 function renderDashboard(
-	ns,
-	target,
-	runtime,
-	network,
-	cfg,
-	stats,
-	queue,
-	running,
-	reservations,
-	batches,
-	targetAnalysis,
-	cloudState,
-	drain,
-	recovery,
-	foreignUsedByHost
+	ns, target, runtime, network, cfg, stats, queue, running, reservations,
+	batches, targetAnalysis, cloudState, drain, recovery, foreignUsedByHost
 ) {
-	const now =
-		Date.now();
-
-	const maxMoney =
-		ns.getServerMaxMoney(
-			target
-		);
-
-	const money =
-		ns.getServerMoneyAvailable(
-			target
-		);
-
-	const minSec =
-		ns.getServerMinSecurityLevel(
-			target
-		);
-
-	const sec =
-		ns.getServerSecurityLevel(
-			target
-		);
-
-	const totalRam =
-		network.hosts.reduce(
-			(sum, host) =>
-				sum +
-				host.maxRam,
-			0
-		);
-
-	const workerRam =
-		totalRunningRam(
-			running
-		);
-
-	const usedRam =
-		network.hosts.reduce(
-			(sum, host) =>
-				sum +
-				(foreignUsedByHost.get(
-					host.name
-				) ?? 0) +
-				runningRamForHost(
-					running,
-					host.name
-				) + backgroundPrepRam(cfg.backgroundPrep, host.name),
-			0
-		);
-
-	const income10 =
-		incomeRate(
-			stats,
-			10_000,
-			now
-		);
-
-	const income60 =
-		incomeRate(
-			stats,
-			60_000,
-			now
-		);
-
-	const batch60 =
-		countRate(
-			stats.batchTimes,
-			60_000,
-			stats.started,
-			now
-		);
-
-	const avgDrift =
-		stats.driftCount
-			? stats.driftSum /
-			stats.driftCount
-			: 0;
-
-	const minSpacing =
-		Number.isFinite(
-			stats.minSpacing
-		)
-			? `${stats.minSpacing.toFixed(1)}ms`
-			: "n/a";
-
-	const pipelineDriftAvg =
-		stats.pipeline.driftCount
-			? stats.pipeline.driftSum /
-			stats.pipeline.driftCount
-			: 0;
-
-	const pipelineSpacing =
-		Number.isFinite(
-			stats.pipeline.minSpacing
-		)
-			? `${stats.pipeline.minSpacing.toFixed(1)}ms`
-			: "n/a";
-
-	const currentProfile =
-		poolProfile(
-			ns,
-			network.hosts,
-			cfg,
-			running
-		);
-
-	const p =
-		runtime.plan;
-
-	const pendingHackLanding =
-		nextPendingHackLanding(
-			batches
-		);
-
+	const now = Date.now();
+	const p = runtime.plan;
+	const pipe = stats.pipeline;
+	const maxMoney = ns.getServerMaxMoney(target);
+	const money = ns.getServerMoneyAvailable(target);
+	const minSec = ns.getServerMinSecurityLevel(target);
+	const sec = ns.getServerSecurityLevel(target);
+	const totalRam = network.hosts.reduce((sum, host) => sum + host.maxRam, 0);
+	const workerRam = totalRunningRam(running);
+	const prepRam = backgroundPrepRam(cfg.backgroundPrep);
+	const usedRam = network.hosts.reduce((sum, host) => sum +
+		(foreignUsedByHost.get(host.name) ?? 0) + runningRamForHost(running, host.name) +
+		backgroundPrepRam(cfg.backgroundPrep, host.name), 0);
+	const income60 = incomeRate(stats, 60_000, now);
+	const batch60 = countRate(stats.batchTimes, 60_000, stats.started, now);
+	const pending = nextPendingHackLanding(batches);
 	const hackStatus = drain ? `DRAINING | ${running.size} workers left`
-		: recovery ? `PAUSED | deadline ${formatTime(Math.max(0, recovery.deadline - now))}`
+		: recovery ? `PAUSED | deadline ${dashboardTime(Math.max(0, recovery.deadline - now))}`
 		: Number.isFinite(stats.lastHackAt) && now - stats.lastHackAt < 10_000 ? "LIVE"
-		: Number.isFinite(pendingHackLanding)
-			? pendingHackLanding > now ? `ETA ${formatTime(pendingHackLanding - now)}`
-				: `DUE +${formatTime(now - pendingHackLanding)}`
+		: Number.isFinite(pending)
+			? pending > now ? `ETA ${dashboardTime(pending - now)}` : `DUE +${dashboardTime(now - pending)}`
 			: "WAITING";
+	const row = (label, value) => dashboardRow(ns, label, value);
 
 	ns.clearLog();
+	ns.print(`JIT DAEMON :: ${target} :: hacking ${ns.getHackingLevel()}`);
+	row("Target", cfg.requestedTarget === "auto" ? "AUTO" : "LOCKED");
+	row("State", drain ? "DRAINING" : recovery ? "RECOVERING" : "RUNNING");
+	row("Hack status", hackStatus);
+	if (drain || recovery) row("Reason", (drain || recovery).reason);
 
-	ns.print(
-		`JIT DAEMON :: ${target} :: hacking ${ns.getHackingLevel()}`
-	);
+	dashboardSection(ns, "Income");
+	row("Income 60s", `${cash(income60)}/s`);
+	row("Model", `${cash(p.expected)}/s (estimate)`);
+	row("Run total", `${cash(stats.money)} earned | ${stats.profitable} paid batches`);
+	row("Batch rate", `${batch60.toFixed(3)}/s actual | ${p.batchRate.toFixed(3)}/s model`);
 
-	ns.print(
-		`Target      ` +
-		`${cfg.requestedTarget ===
-			"auto"
-			? "AUTO"
-			: "LOCKED"
-		}`
-	);
+	dashboardSection(ns, "Target & current pipeline");
+	row("Money", `${bar(money / Math.max(1, maxMoney), 12)} ${cash(money)} / ${cash(maxMoney)}`);
+	row("Security", `${sec.toFixed(3)} / ${minSec.toFixed(3)} (+${Math.max(0, sec - minSec).toFixed(3)})`);
+	row("Pipeline", `${running.size} running | ${queue.length} queued`);
+	row("Pipe misses", dashboardCounters(pipe.misses));
+	row("Pipe drift", `avg ${(pipe.driftCount ? pipe.driftSum / pipe.driftCount : 0).toFixed(2)}ms` +
+		` | max ${pipe.driftMax.toFixed(2)}ms | spacing ${Number.isFinite(pipe.minSpacing) ? `${pipe.minSpacing.toFixed(1)}ms` : "n/a"}`);
+	row("Pipe recovery", `${pipe.softRecoveries} local | ${pipe.recoveries} fallback`);
+	row("Restarts", `${stats.restarts} session | ${stats.resyncs} safety resyncs`);
 
-	ns.print(
-		`State       ` +
-		`${drain
-			? `DRAINING :: ${drain.reason}`
-			: recovery
-				? `RECOVERING :: ${recovery.reason}`
-				: "RUNNING"}`
-	);
+	dashboardSection(ns, "Fleet");
+	row("RAM online", `${formatRam(usedRam)} / ${formatRam(totalRam)} (${(100 * usedRam / Math.max(1, totalRam)).toFixed(1)}%)`);
+	row("Network", `${network.rooted}/${network.servers.length} rooted | ${network.hosts.length} worker hosts`);
+	row("Cloud", `${cloudState.count}/${cloudState.limit} servers | ${formatRam(cloudState.totalRam)}` +
+		`${cloudState.nextAction === "fleet maxed" ? " | MAXED" : ""}`);
+	const home = network.hosts.find(host => host.name === HOME);
+	row("Core bonus", `${home ? `home ${home.cores} (${coreBonus(home.cores).toFixed(3)}x)` : "home n/a"}` +
+		` | fleet ${runtime.averageCoreBonus.toFixed(3)}x RAM-weighted`);
+	if (cloudState.error) row("Cloud error", cloudState.error);
+	else if (cloudState.nextAction && cloudState.nextAction !== "fleet maxed") row("Cloud next", cloudState.nextAction);
 
-	if (
-		cfg.requestedTarget ===
-		"auto"
-	) {
-		renderTargetAnalysis(
-			ns,
-			target,
-			targetAnalysis,
-			6
-		);
+	dashboardSection(ns, "Background prep / separate target");
+	const prep = cfg.backgroundPrep;
+	const eta = prep?.active ? ` | ETA ${dashboardTime(Math.max(0, prep.active.finishAt - now))}` : "";
+	row("Background", `${prep?.target || "none"} | ${prep?.status || "DISABLED"}${eta}`);
+	if (prep?.health) row("Prep health", `money ${(100 * prep.health.money / Math.max(1, prep.health.max)).toFixed(1)}%` +
+		` | security +${Math.max(0, prep.health.sec - prep.health.min).toFixed(3)}`);
+	if (prep?.candidate) row("Prep model", `${cash(prep.candidate.potential)}/s ${prep.candidate.upperBound ? "UPPER BOUND" : "potential estimate"}`);
+	if (prep?.target || prepRam) row("Prep RAM", `${formatRam(prepRam)} held | ${prep.preemptions} preemptions | ${prep.failures} failures`);
+	if (prep?.error || prep?.reason) row("Prep note", prep.error || prep.reason);
+
+	if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, cfg.dashboardDetails ? 6 : 4);
+	if (stats.lastReason && stats.lastReason !== "none") {
+		dashboardSection(ns, "Last event / session history");
+		row("Last", stats.lastReason);
 	}
 
-	ns.print("");
-
-	ns.print(
-		`Money       ${bar(
-			money /
-			Math.max(
-				1,
-				maxMoney
-			)
-		)} ` +
-		`${cash(money)} / ${cash(maxMoney)}`
-	);
-
-	ns.print(
-		`Security    ` +
-		`${sec.toFixed(3)} / ` +
-		`${minSec.toFixed(3)} ` +
-		`(+${Math.max(
-			0,
-			sec -
-			minSec
-		).toFixed(3)})`
-	);
-
-	ns.print("");
-
-	ns.print(
-		`Network     ` +
-		`${network.rooted}/${network.servers.length} rooted ` +
-		`| ${network.hosts.length} worker hosts`
-	);
-
-	ns.print(
-		`Cloud       ` +
-		`${cloudState.count}/${cloudState.limit} servers ` +
-		`| ${formatRam(cloudState.totalRam)} ` +
-		`| ${cloudState.enabled ? "AUTO" : "MANUAL"}`
-	);
-
-	if (cloudState.count > 0) {
-		ns.print(
-			`Cloud RAM   ` +
-			`min ${formatRam(cloudState.minRam)} ` +
-			`| max ${formatRam(cloudState.maxRam)} ` +
-			`| cap ${formatRam(cloudState.ramLimit)}`
-		);
+	if (cfg.dashboardDetails) {
+		dashboardSection(ns, "Details / session totals unless marked current");
+		row("Income 10s", `${cash(incomeRate(stats, 10_000, now))}/s`);
+		row("Batches", `${stats.scheduled} scheduled | ${stats.completed} completed | ${stats.recovered} recovered`);
+		row("Paid batches", stats.profitable);
+		row("Allocator", `${stats.allocationFails} skipped slots | worst streak ${stats.maxConsecutiveAllocationFails} | expired slots ${stats.expiredSlots}`);
+		row("Misses", dashboardCounters(stats.misses));
+		row("Exec failures", dashboardCounters(stats.execFails));
+		row("Recovery", `${stats.softRecoveries} local | ${stats.softRecoverySuccesses} restored | H skips ${stats.suppressedHackChunks}`);
+		row("Fallback", `${stats.recoveries} drain(s) | cancelled H chunks ${stats.cancelledHackChunks}`);
+		row("Drift", `avg ${(stats.driftCount ? stats.driftSum / stats.driftCount : 0).toFixed(2)}ms | max ${stats.driftMax.toFixed(2)}ms`);
+		row("Loop lag", `max ${pipe.loopLagMax.toFixed(1)}ms current | ${stats.loopLagMax.toFixed(1)}ms session`);
+		row("Spacing", `min ${Number.isFinite(stats.minSpacing) ? `${stats.minSpacing.toFixed(1)}ms` : "n/a"} | required ${minimumSpacing(cfg)}ms`);
+		row("Timing", `gap ${cfg.gap}ms | period ${dashboardTime(p.period)} | lead ${dashboardTime(cfg.lead)}`);
+		row("Steal", `${(p.steal * 100).toFixed(2)}% planned | chance ${(p.chance * 100).toFixed(1)}%`);
+		row("Threads", `H:${p.H} G~:${p.estimatedG} W1~:${p.estimatedW1} W2~:${p.estimatedW2}`);
+		row("Grow eq", `${p.gEffective} one-core equivalent threads`);
+		row("Times", `H:${dashboardTime(p.times.H)} G:${dashboardTime(p.times.G)} W:${dashboardTime(p.times.W)}`);
+		row("Worker RAM", `${formatRam(workerRam)} JIT | ${formatRam(prepRam)} prep`);
+		row("Capacity", `${formatRam(poolProfile(ns, network.hosts, cfg, running).capacity)} now | ${formatRam(runtime.capacity)} tuned`);
+		row("Reservations", reservations.length);
+		row("Cloud RAM", `${formatRam(cloudState.minRam)} min | ${formatRam(cloudState.maxRam)} max | ${formatRam(cloudState.ramLimit)} cap`);
+		row("Cloud spend", `${cash(cloudState.spent)} | ${cloudState.purchases} buys | ${cloudState.upgrades} upgrades | ${(cfg.cloud.cashReserve * 100).toFixed(0)}% reserve`);
+		if (prep?.candidate) row("Prep estimate", `${dashboardTime(prep.candidate.prepMs)} initial prep | ${dashboardTime(prep.horizon)} horizon`);
+	} else {
+		ns.print("  More diagnostics: --dashboard-details true");
 	}
-
-	ns.print(
-		`Cloud spend ` +
-		`${cash(cloudState.spent)} ` +
-		`| buy ${cloudState.purchases} ` +
-		`| up ${cloudState.upgrades} ` +
-		`| reserve ${(cfg.cloud.cashReserve * 100).toFixed(0)}%`
-	);
-
-	ns.print(
-		`Cloud next  ${cloudState.nextAction}`
-	);
-
-	if (
-		cloudState.error
-	) {
-		ns.print(
-			`Cloud error ${cloudState.error}`
-		);
-	}
-
-	ns.print(
-		`RAM online  ` +
-		`${formatRam(usedRam)} / ${formatRam(totalRam)} ` +
-		`(${(
-			usedRam /
-			Math.max(1, totalRam) *
-			100
-		).toFixed(1)}%)`
-	);
-
-	ns.print(
-		`Worker RAM  ${formatRam(workerRam)} running`
-	);
-
-	ns.print(
-		`Capacity    ` +
-		`${formatRam(currentProfile.capacity)} now | ` +
-		`${formatRam(runtime.capacity)} tuned`
-	);
-
-	ns.print(
-		`Core bonus  ${runtime.averageCoreBonus.toFixed(3)}x avg`
-	);
-
-	ns.print(`Background  ${backgroundPrepSummary(cfg.backgroundPrep)}`);
-	if (cfg.backgroundPrep?.candidate) {
-		const candidate = cfg.backgroundPrep.candidate;
-		ns.print(`Prep model  ${cash(candidate.potential)}/s ${candidate.upperBound ? "upper bound" : "potential estimate"}` +
-			` | horizon ${cfg.backgroundPrep.horizon / 60_000}m | initial prep est ${formatTime(candidate.prepMs)}`);
-	}
-	ns.print(`Prep RAM    ${formatRam(backgroundPrepRam(cfg.backgroundPrep))} held` +
-		` | preemptions ${cfg.backgroundPrep?.preemptions ?? 0} | failures ${cfg.backgroundPrep?.failures ?? 0}`);
-
-	ns.print("");
-
-	ns.print(
-		`Income 10s  ${cash(income10)}/s`
-	);
-
-	ns.print(
-		`Income 60s  ${cash(income60)}/s`
-	);
-
-	ns.print(
-		`Run total   ${cash(stats.money)}`
-	);
-
-	ns.print(
-		`Model       ${cash(p.expected)}/s`
-	);
-
-	ns.print("");
-
-	ns.print(
-		`Steal       ` +
-		`${(
-			p.steal *
-			100
-		).toFixed(2)}% ` +
-		`| chance ${(
-			p.chance *
-			100
-		).toFixed(1)}%`
-	);
-
-	ns.print(
-		`Threads     ` +
-		`H:${p.H} ` +
-		`G~:${p.estimatedG} ` +
-		`W1~:${p.estimatedW1} ` +
-		`W2~:${p.estimatedW2}`
-	);
-
-	ns.print(
-		`Grow eq     ${p.gEffective} one-core equivalent thread(s)`
-	);
-
-	ns.print(
-		`Times       ` +
-		`H:${formatTime(p.times.H)} ` +
-		`G:${formatTime(p.times.G)} ` +
-		`W:${formatTime(p.times.W)}`
-	);
-
-	ns.print(
-		`Timing      ` +
-		`gap ${cfg.gap}ms ` +
-		`| period ${formatTime(p.period)}`
-	);
-
-	ns.print(
-		`Batch rate  ` +
-		`${batch60.toFixed(3)}/s actual ` +
-		`| ${p.batchRate.toFixed(3)}/s model`
-	);
-
-	ns.print("");
-
-	ns.print(
-		`Pipeline    ` +
-		`${running.size} running ` +
-		`| ${queue.length} queued ` +
-		`| ${reservations.length} reservations`
-	);
-
-	ns.print(
-		`Batches     ` +
-		`${stats.scheduled} scheduled ` +
-		`| ${stats.completed} completed ` +
-		`| ${stats.recovered} recovered`
-	);
-
-	ns.print(
-		`Hack status ${hackStatus} ` +
-		`| ${stats.profitable} paid batch(es)`
-	);
-
-	ns.print(
-		`Allocator   ` +
-		`${stats.allocationFails} skipped slots ` +
-		`| worst streak ${stats.maxConsecutiveAllocationFails} ` +
-		`| expired slots ${stats.expiredSlots}`
-	);
-
-	ns.print(
-		`Pipe misses ` +
-		`H:${stats.pipeline.misses.H} ` +
-		`W1:${stats.pipeline.misses.W1} ` +
-		`G:${stats.pipeline.misses.G} ` +
-		`W2:${stats.pipeline.misses.W2} ` +
-		`| recoveries ${stats.pipeline.recoveries}`
-	);
-
-	ns.print(
-		`Pipe drift  ` +
-		`avg ${pipelineDriftAvg.toFixed(2)}ms ` +
-		`| max ${stats.pipeline.driftMax.toFixed(2)}ms ` +
-		`| spacing ${pipelineSpacing}`
-	);
-
-	ns.print(
-		`Loop lag    ` +
-		`max ${stats.pipeline.loopLagMax.toFixed(1)}ms current ` +
-		`| ${stats.loopLagMax.toFixed(1)}ms lifetime`
-	);
-
-	ns.print(
-		`Misses      ` +
-		`H:${stats.misses.H} ` +
-		`W1:${stats.misses.W1} ` +
-		`G:${stats.misses.G} ` +
-		`W2:${stats.misses.W2} ` +
-		`| exec H:${stats.execFails.H} ` +
-		`W1:${stats.execFails.W1} ` +
-		`G:${stats.execFails.G} ` +
-		`W2:${stats.execFails.W2}`
-	);
-
-	ns.print(
-		`Recovery    ` +
-		`${stats.softRecoveries} local ` +
-		`| ${stats.softRecoverySuccesses} restored ` +
-		`| H skips ${stats.suppressedHackChunks}`
-	);
-
-	ns.print(
-		`Fallback    ` +
-		`${stats.recoveries} drain(s) ` +
-		`| cancelled H chunks ${stats.cancelledHackChunks}`
-	);
-
-	ns.print(
-		`Drift       ` +
-		`avg ${avgDrift.toFixed(2)}ms ` +
-		`| max ${stats.driftMax.toFixed(2)}ms`
-	);
-
-	ns.print(
-		`Spacing     ` +
-		`min ${minSpacing} ` +
-		`| required ${minimumSpacing(cfg)}ms`
-	);
-
-	ns.print(
-		`Restarts    ` +
-		`${stats.restarts} ` +
-		`| safety resyncs ${stats.resyncs}`
-	);
-
-	ns.print(
-		`Last        ${stats.lastReason}`
-	);
 }
 
 function renderPrep(
-	ns,
-	target,
-	network,
-	cfg,
-	wave,
-	stage,
-	chunks,
-	end = 0,
-	requiredEffective = 0,
-	waveEffective = 0,
-	wavesLeft = 0,
-	projectedMultiplier = 1,
-	targetAnalysis = []
+	ns, target, network, cfg, wave, stage, chunks, end = 0,
+	requiredEffective = 0, waveEffective = 0, wavesLeft = 0,
+	projectedMultiplier = 1, targetAnalysis = []
 ) {
-	const maxMoney =
-		ns.getServerMaxMoney(
-			target
-		);
-
-	const money =
-		ns.getServerMoneyAvailable(
-			target
-		);
-
-	const minSec =
-		ns.getServerMinSecurityLevel(
-			target
-		);
-
-	const sec =
-		ns.getServerSecurityLevel(
-			target
-		);
-
-	const totalRam =
-		network.hosts.reduce(
-			(sum, host) =>
-				sum +
-				host.maxRam,
-			0
-		);
-
-	const usedRam =
-		network.hosts.reduce(
-			(sum, host) =>
-				sum +
-				ns.getServerUsedRam(
-					host.name
-				),
-			0
-		);
-
-	const byPhase =
-		new Map();
-
-	for (
-		const chunk
-		of chunks
-	) {
-		byPhase.set(
-			chunk.phase,
-
-			(
-				byPhase.get(
-					chunk.phase
-				) ??
-				0
-			) +
-			chunk.threads
-		);
-	}
-
+	const money = ns.getServerMoneyAvailable(target);
+	const maxMoney = ns.getServerMaxMoney(target);
+	const sec = ns.getServerSecurityLevel(target);
+	const minSec = ns.getServerMinSecurityLevel(target);
+	const totalRam = network.hosts.reduce((sum, host) => sum + host.maxRam, 0);
+	const usedRam = network.hosts.reduce((sum, host) => sum + ns.getServerUsedRam(host.name), 0);
+	const byPhase = new Map();
+	for (const chunk of chunks) byPhase.set(chunk.phase, (byPhase.get(chunk.phase) ?? 0) + chunk.threads);
+	const row = (label, value) => dashboardRow(ns, label, value);
 	ns.clearLog();
-
-	ns.print(
-		`JIT DAEMON :: PREP :: ${target}`
-	);
-
-	ns.print(
-		`Stage       ${stage}`
-	);
-
-	if (
-		cfg.requestedTarget ===
-		"auto"
-	) {
-		renderTargetAnalysis(
-			ns,
-			target,
-			targetAnalysis,
-			6
-		);
+	ns.print(`JIT DAEMON :: PREP :: ${target}`);
+	dashboardSection(ns, "Active target preparation");
+	row("Stage", stage);
+	row("Wave", `#${wave} | ETA ${dashboardTime(end ? Math.max(0, end - Date.now()) : 0)}`);
+	row("Income", stage === "READY" ? "Prepared; initial pipeline warmup is next" : "Active target is preparing; no hacking income yet");
+	row("Money", `${bar(money / Math.max(1, maxMoney), 12)} ${cash(money)} / ${cash(maxMoney)}`);
+	row("Security", `${sec.toFixed(3)} / ${minSec.toFixed(3)} (+${Math.max(0, sec - minSec).toFixed(3)})`);
+	if (byPhase.size) row("Threads", [...byPhase].map(([phase, threads]) => `${phase.replace("PREP-", "")}:${threads}`).join("  "));
+	if (requiredEffective > 0) {
+		row("Grow need", `${Math.ceil(requiredEffective)} eq threads | ${Math.ceil(waveEffective)} this wave`);
+		row("Waves left", `~${wavesLeft} | ~${projectedMultiplier.toFixed(2)}x growth this wave`);
 	}
-
-	ns.print("");
-
-	ns.print(
-		`Money       ${bar(
-			money /
-			Math.max(
-				1,
-				maxMoney
-			)
-		)} ` +
-		`${cash(money)} / ${cash(maxMoney)}`
-	);
-
-	ns.print(
-		`Security    ` +
-		`${sec.toFixed(3)} / ` +
-		`${minSec.toFixed(3)} ` +
-		`(+${Math.max(
-			0,
-			sec -
-			minSec
-		).toFixed(3)})`
-	);
-
-	ns.print(
-		`Network     ` +
-		`${network.rooted}/${network.servers.length} rooted ` +
-		`| ${network.hosts.length} hosts`
-	);
-
-	ns.print(
-		`RAM         ` +
-		`${formatRam(usedRam)} / ${formatRam(totalRam)}`
-	);
-
-	ns.print(
-		`Wave        #${wave} ` +
-		`| ETA ${end
-			? formatTime(
-				Math.max(
-					0,
-					end -
-					Date.now()
-				)
-			)
-			: "0ms"
-		}`
-	);
-
-	if (
-		byPhase.size
-	) {
-		ns.print(
-			`Threads     ` +
-			[...byPhase.entries()]
-				.map(
-					([
-						phase,
-						threads,
-					]) =>
-						`${phase.replace(
-							"PREP-",
-							""
-						)}:${threads}`
-				)
-				.join(
-					"  "
-				)
-		);
-	}
-
-	if (
-		requiredEffective >
-		0
-	) {
-		ns.print(
-			`Grow need   ${Math.ceil(requiredEffective)} eq threads`
-		);
-
-		ns.print(
-			`This wave   ${Math.ceil(waveEffective)} eq threads`
-		);
-
-		ns.print(
-			`Wave grow   ~${projectedMultiplier.toFixed(2)}x`
-		);
-
-		ns.print(
-			`Waves left  ~${wavesLeft}`
-		);
-	}
+	dashboardSection(ns, "Fleet");
+	row("RAM", `${formatRam(usedRam)} / ${formatRam(totalRam)}`);
+	row("Network", `${network.rooted}/${network.servers.length} rooted | ${network.hosts.length} hosts`);
+	if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, cfg.dashboardDetails ? 6 : 4);
 }
 
 /* =========================================================

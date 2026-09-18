@@ -4,9 +4,10 @@ const { NetscriptSimulation } = require('./simulator.cjs');
 
 function assertHealthy(sim) {
     const summary = sim.summary();
+    summary.logs = summary.logs.map(line => line.trimStart());
     assert.deepEqual(summary.errors, [], JSON.stringify(summary));
     assert.ok(summary.income60 > 1e8, JSON.stringify(summary));
-    assert.match(summary.logs.find(l => l.startsWith('Restarts')), /Restarts\s+0\s+\| safety resyncs 0/);
+    assert.match(summary.logs.find(l => l.startsWith('Restarts')), /Restarts\s+0 session\s+\| 0 safety resyncs/);
     assert.match(summary.logs.find(l => l.startsWith('Fallback')), /0 drain/);
     for (const [host, ram] of sim.peakRam) assert.ok(ram <= sim.hosts.get(host).ram + 1e-6, host);
     assert.ok(sim.actions.filter(a => a.phase === 'H').every(a => a.target === 'phantasy'));
@@ -16,12 +17,12 @@ function assertHealthy(sim) {
 const profile = {
     target: 'phantasy', weakenTime: 78_000, levelPerMinute: 0,
     mainServer: { max: 600e6, money: 600e6, sec: 7, min: 7, required: 30 },
-    flags: { target: 'auto' },
+    flags: { target: 'auto', 'dashboard-details': true },
     backgroundTargets: { 'the-hub': { max: 4.96e9, money: 198.4e6, sec: 24, min: 12, required: 300, weakenTime: 180_000 } },
 };
 
 test('18-minute concurrent prep reaches READY while active income matches prep-disabled baseline', { timeout: 120_000 }, async () => {
-    const baseline = new NetscriptSimulation({ ...profile, flags: { target: 'auto', 'background-prep': false } });
+    const baseline = new NetscriptSimulation({ ...profile, flags: { target: 'auto', 'background-prep': false, 'dashboard-details': true } });
     baseline.run(); await baseline.clock.runUntil(baseline.start + 18 * 60_000);
     const before = assertHealthy(baseline);
     const sim = new NetscriptSimulation(profile);

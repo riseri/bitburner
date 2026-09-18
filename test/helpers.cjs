@@ -61,6 +61,9 @@ class Port {
 }
 
 function loadScript(file, clock, extra = {}) {
+    if (file === 'daemon.js' || file === 'supervisor.js') {
+        extra = { ...loadScript('lib/dashboard.js', clock), ...extra };
+    }
     if (file === 'daemon.js' && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
         extra = { ...loadScript('lib/background-prep.js', clock), ...extra };
     }
