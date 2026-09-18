@@ -4,7 +4,7 @@ const HOME = "home";
 const HACK = "jit-hack.js";
 const GROW = "jit-grow.js";
 const WEAKEN = "jit-weaken.js";
-const WORKERS = [HACK, GROW, WEAKEN];
+const WORKERS = [HACK, GROW, WEAKEN, "lib/jit-worker.js"];
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -248,7 +248,7 @@ async function rootAndDeploy(ns) {
 			continue;
 		}
 
-		if (host !== HOME && !ns.fileExists(HACK, host)) {
+		if (host !== HOME && WORKERS.some(file => !ns.fileExists(file, host))) {
 			const copied = await ns.scp(WORKERS, host, HOME);
 			if (!copied) {
 				await ns.sleep(1);

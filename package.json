@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "dev": "bitburner-filesync"
+    "dev": "bitburner-filesync",
+    "test": "node --test test/jit-recovery.test.cjs && node --test test/jit-simulation.test.cjs"
   },
   "repository": {
     "type": "git",

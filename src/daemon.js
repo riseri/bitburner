@@ -7,9 +7,10 @@ const GROW = "jit-grow.js";
 const WEAKEN = "jit-weaken.js";
 
 const WORKERS = [HACK, GROW, WEAKEN];
+const WORKER_FILES = [...WORKERS, "lib/jit-worker.js"];
 const FLEET_MANAGER = "fleet-manager.js";
 
-const RELEASE_MS = 5;
+const RELEASE_MS = 1_000; // reserve space for callback/reporting jitter
 const STARTUP_BUFFER_MS = 250;
 const PREP_BUFFER_MS = 150;
 
@@ -30,7 +31,7 @@ const SOFT_RECOVERY_MAX_MS = 15_000;
 const CAPACITY_RETUNE_COOLDOWN_MS = 10 * 60 * 1000;
 const CAPACITY_RETUNE_RATIO = 1.25;
 
-// Target ranking amortizes prep cost over this much future runtime.
+// Target ranking estimates earning time inside this horizon, including prep and warmup.
 const TARGET_HORIZON_MS = 10 * 60 * 1000;
 
 // Bitburner server growth constants.
@@ -41,8 +42,8 @@ const SERVER_MAX_GROWTH_LOG = 0.00349388925425578;
 export async function main(ns) {
 	const flags = ns.flags([
 		["target", "auto"],
-		["gap", 30],
-		["lead", 25],
+		["gap", 100],
+		["lead", 600],
 		["home-reserve", 8],
 		["min-steal", 0.01],
 		["max-steal", 0.50],
@@ -104,6 +105,9 @@ export async function main(ns) {
 		},
 	};
 
+	validateDaemonPorts(cfg);
+	cfg.lead = Math.max(cfg.lead, cfg.gap * 6);
+
 	if (
 		!(cfg.minSteal > 0) ||
 		cfg.maxSteal < cfg.minSteal ||
@@ -115,7 +119,7 @@ export async function main(ns) {
 		return;
 	}
 
-	for (const script of WORKERS) {
+	for (const script of WORKER_FILES) {
 		if (!ns.fileExists(script, HOME)) {
 			ns.tprint(`ERROR: missing ${script}`);
 			return;
@@ -333,25 +337,6 @@ export async function main(ns) {
 
 		lastLoopAt = loopNow;
 
-		// Launches are the highest-priority work in the controller. Never do
-		// allocator/network/bookkeeping work while a chunk is already due.
-		{
-			const launched = launchDueChunks(
-				ns,
-				queue,
-				target,
-				cfg,
-				batches,
-				stats,
-				running,
-				runningByChunk,
-				drain
-			);
-
-			queue = launched.queue;
-			drain = launched.drain;
-		}
-
 		// Refresh only one host's non-daemon RAM usage per loop. This keeps the
 		// allocator's base-capacity view fresh without issuing dozens of RAM API
 		// calls in one latency-sensitive burst.
@@ -410,75 +395,74 @@ export async function main(ns) {
 				runningByChunk
 			);
 
-		if (eventProblem) {
-			if (eventProblem.kind === "recover" && !drain && !maintenance) {
-				recovery = beginSoftRecovery(
-					recovery, eventProblem, controlPort, runtime, stats
-				);
+		if (eventProblem && !maintenance) {
+			if (eventProblem.kind === "recover") {
+				if (!drain) recovery = beginSoftRecovery(recovery, eventProblem, controlPort, runtime, stats);
 			} else if (eventProblem.kind === "drain") {
-				const result = beginDrain(
-					drain, eventProblem, queue, batches, stats, cfg
-				);
+				const result = beginDrain(drain, eventProblem, queue, batches, stats, cfg);
 				drain = result.drain;
 				queue = result.queue;
-			} else if (!maintenance) {
-				maintenance = eventProblem;
+			}
+		}
+
+		if (!maintenance && !drain && loopNow - lastOverdueCheck >= OVERDUE_CHECK_MS) {
+			lastOverdueCheck = loopNow;
+			const health = targetHealth(ns, target);
+			if (health.sec > health.minSec + 5) {
+				const result = beginDrain(null, {
+					kind: "drain", hard: true, afterKind: "resync", bumpGap: true,
+					reason: `security circuit breaker: ${health.sec.toFixed(3)} / ${health.minSec.toFixed(3)}`,
+				}, queue, batches, stats, cfg);
+				drain = result.drain;
+				queue = result.queue;
+				recovery = null;
+			} else if (!recovery && port.empty()) {
+				const overdue = findOverdueBatch(batches, cfg);
+				if (overdue) {
+					const batch = batches.get(overdue.batchId);
+					const chunk = batch.chunks.get(overdue.chunkId);
+					const pid = runningByChunk.get(chunk.chunkId);
+					if (pid == null || !ns.isRunning(pid)) {
+						untrackRunningByChunk(running, runningByChunk, chunk.chunkId);
+						settleChunk(batch, chunk, { type: "miss", finishedAt: loopNow }, stats);
+						recordPhaseMiss(stats, chunk.phase);
+						cancelPoisonedBatch(ns, batch, running, runningByChunk, stats);
+					}
+					recovery = beginSoftRecovery(recovery, overdue, controlPort, runtime, stats);
+				}
 			}
 		}
 
 		if (recovery && !drain && !maintenance) {
-			const local = updateSoftRecovery(
-				ns, target, recovery, controlPort, runtime, stats
-			);
+			cancelHackWindow(ns, batches, running, runningByChunk, stats, recovery.pauseUntil);
+			const local = updateSoftRecovery(ns, target, recovery, controlPort, runtime, stats);
 			recovery = local.recovery;
 			if (local.problem) {
-				const result = beginDrain(
-					drain, local.problem, queue, batches, stats, cfg
-				);
+				const result = beginDrain(drain, local.problem, queue, batches, stats, cfg);
 				drain = result.drain;
 				queue = result.queue;
+			} else if (!recovery) {
+				// Drop stale unplanned slots instead of generating past-due work after a pause.
+				nextHackLanding = Math.max(nextHackLanding,
+					Date.now() + runtime.plan.times.W + cfg.lead + STARTUP_BUFFER_MS);
 			}
 		}
 
-		if (
-			!maintenance &&
-			!drain &&
-			!recovery &&
-			loopNow -
-			lastOverdueCheck >=
-			OVERDUE_CHECK_MS
-		) {
-			lastOverdueCheck =
-				loopNow;
-
-			const overdue =
-				findOverdueBatch(
-					batches,
-					cfg
-				);
-
-			if (overdue) {
-				const result =
-					beginDrain(
-						drain,
-						{
-							reason:
-								overdue,
-							kind:
-								"recover",
-						},
-						queue,
-						batches,
-						stats,
-						cfg
-					);
-
-				drain =
-					result.drain;
-
-				queue =
-					result.queue;
+		if (drain) {
+			recovery = null;
+			if (!drain.stopPublished) {
+				publishHackPause(controlPort, Number.MAX_SAFE_INTEGER, drain.reason);
+				drain.stopPublished = true;
 			}
+			serviceHardDrain(ns, drain, batches, running, runningByChunk, stats);
+		}
+
+		// Healthy launches still have priority over allocator/UI work, but never over
+		// a known safety fault. There is enough lead to consume a bounded event burst.
+		if (port.empty()) {
+			const launched = launchDueChunks(ns, queue, target, cfg, batches, stats, running, runningByChunk, drain);
+			queue = launched.queue;
+			drain = launched.drain;
 		}
 
 		const now =
@@ -535,6 +519,7 @@ export async function main(ns) {
 				!drain &&
 				!recovery &&
 				capacityCanHelp &&
+				stats.pipeline.completed * runtime.plan.period >= 10 * 60_000 &&
 				capacityGainRatio >=
 				CAPACITY_RETUNE_RATIO &&
 				now -
@@ -645,6 +630,7 @@ export async function main(ns) {
 			!maintenance &&
 			!drain &&
 			!recovery &&
+			stats.pipeline.completed * runtime.plan.period >= 15 * 60_000 &&
 			hackingLevel >=
 			retuneAt
 		) {
@@ -680,10 +666,13 @@ export async function main(ns) {
 		 * rebuild. No hack that already landed is abandoned mid-recovery.
 		 */
 		if (
-			drain &&
-			queue.length === 0 &&
-			running.size === 0
+			drain && (
+				(queue.length === 0 && running.size === 0) ||
+				(drain.hard && drain.cancelDone && !hasHarmfulRunning(running) && port.empty() && targetHealth(ns, target).clean)
+			)
 		) {
+			cfg.gap = drain.nextGap;
+			cfg.lead = Math.max(cfg.lead, cfg.gap * 6);
 			maintenance = {
 				reason:
 					drain.reason,
@@ -701,7 +690,7 @@ export async function main(ns) {
 		 */
 		if (maintenance) {
 			recovery = null;
-			publishHackPause(controlPort, 0, "maintenance");
+			publishHackPause(controlPort, Number.MAX_SAFE_INTEGER, "maintenance");
 
 			if (
 				maintenance.bumpGap
@@ -916,6 +905,12 @@ export async function main(ns) {
 				NaN;
 
 			resetPipelineStats(stats);
+			stats.lastW2 = NaN;
+			stats.lastHackLanding = NaN;
+			stats.finishedBatches.clear();
+			stats.batchTimes = [];
+			lastLoopAt = Date.now();
+			publishHackPause(controlPort, 0, "ready");
 
 			consecutiveAllocationFailures = 0;
 
@@ -944,13 +939,18 @@ export async function main(ns) {
 		/*
 		 * Plan far enough ahead for weaken to start JIT.
 		 */
+		const earliestNewLanding = Date.now() + runtime.plan.times.W + cfg.lead + STARTUP_BUFFER_MS;
+		if (!drain && !recovery && nextHackLanding < earliestNewLanding) {
+			const skipped = Math.ceil((earliestNewLanding - nextHackLanding) / runtime.plan.period);
+			nextHackLanding += skipped * runtime.plan.period;
+			stats.expiredSlots += skipped;
+		}
 		const horizon =
 			Date.now() +
 			runtime.plan.times.W +
 			Math.max(
 				2_000,
-				runtime.plan.period *
-				2
+				cfg.lead + STARTUP_BUFFER_MS + runtime.plan.period * 2
 			);
 
 		let schedulingGuard = 0;
@@ -958,6 +958,8 @@ export async function main(ns) {
 
 		while (
 			!drain &&
+			!recovery &&
+			port.empty() &&
 			nextHackLanding <=
 			horizon &&
 			schedulingGuard <
@@ -1041,7 +1043,7 @@ export async function main(ns) {
 		 * Launch again immediately after planning. A newly planned chunk may be
 		 * close to its JIT start, so no dashboard/bookkeeping work comes first.
 		 */
-		{
+		if (port.empty()) {
 			const launched = launchDueChunks(
 				ns,
 				queue,
@@ -1121,6 +1123,17 @@ export async function main(ns) {
 		await ns.sleep(
 			sleepFor
 		);
+	}
+}
+
+function validateDaemonPorts(cfg) {
+	const selected = [cfg.port, cfg.fleetPort, cfg.controlPort];
+	if (selected.some(port => !Number.isSafeInteger(port) || port <= 0) || new Set(selected).size !== 3) {
+		throw new Error("Worker events, fleet status and JIT control need distinct positive integer ports");
+	}
+	const reserved = [PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS, PORTS.PROGRESSION_STATUS];
+	if (selected.some(port => reserved.includes(port))) {
+		throw new Error("Daemon port conflicts with a reserved supervisor/contract/progression channel");
 	}
 }
 
@@ -1468,7 +1481,7 @@ async function refreshNetwork(
 			) {
 				const copied =
 					await ns.scp(
-						WORKERS,
+						WORKER_FILES,
 						name,
 						HOME
 					);
@@ -1783,12 +1796,8 @@ function rankTargets(
 				runtime
 			);
 
-		const amortization =
-			TARGET_HORIZON_MS /
-			(
-				TARGET_HORIZON_MS +
-				prepMs
-			);
+		const warmupMs = runtime.plan.times.W + cfg.lead + STARTUP_BUFFER_MS;
+		const amortization = Math.max(0, TARGET_HORIZON_MS - prepMs - warmupMs) / TARGET_HORIZON_MS;
 
 		const steady =
 			runtime.plan.expected;
@@ -2838,7 +2847,7 @@ function tuneTarget(
 			1 /
 			(
 				1 -
-				steal
+				Math.min(0.89, steal * 1.10)
 			);
 
 		const gEffective =
@@ -2960,7 +2969,7 @@ function tuneTarget(
 
 		const expected =
 			maxMoney *
-			steal *
+			steal * 0.95 *
 			chance *
 			batchRate;
 
@@ -3286,6 +3295,9 @@ function reserveBatch(
 		return null;
 	}
 
+	for (const chunk of hack.chunks) {
+		chunk.stealBudget = plan.steal * chunk.threads / plan.H;
+	}
 	chunks.push(
 		...hack.chunks
 	);
@@ -3879,6 +3891,7 @@ function createChunk(
 		threads,
 
 		landAt,
+		duration,
 
 		launchAt:
 			landAt -
@@ -4512,142 +4525,106 @@ function coreBonus(
 	 WORKER EVENTS / SAFETY
 	 ========================================================= */
 
-function makeBatchState(
-	id,
-	chunks
-) {
-	const expected = {
-		H: 0,
-		W1: 0,
-		G: 0,
-		W2: 0,
-	};
-
+function makeBatchState(id, chunks) {
+	const expected = { H: 0, W1: 0, G: 0, W2: 0 };
 	const landing = {};
-
-	for (
-		const chunk
-		of chunks
-	) {
-		expected[
-			chunk.phase
-		]++;
-
-		landing[
-			chunk.phase
-		] =
-			chunk.landAt;
+	for (const chunk of chunks) {
+		expected[chunk.phase]++;
+		landing[chunk.phase] = chunk.landAt;
+		chunk.status = "queued";
 	}
-
-	return {
-		id:
-			String(id),
-
-		expected,
-		landing,
-
-		moneyEarned: 0,
-		poisoned: false,
-
-		phases: {
-			H:
-				phaseState(),
-
-			W1:
-				phaseState(),
-
-			G:
-				phaseState(),
-
-			W2:
-				phaseState(),
-		},
-	};
+	return { id: String(id), expected, landing,
+		chunks: new Map(chunks.map(chunk => [chunk.chunkId, chunk])),
+		moneyEarned: 0, poisoned: false, paidCounted: false,
+		phases: { H: phaseState(), W1: phaseState(), G: phaseState(), W2: phaseState() } };
 }
 
 function phaseState() {
-	return {
-		count: 0,
-
-		min:
-			Infinity,
-
-		max:
-			-Infinity,
-
-		complete:
-			false,
-
-		skipped:
-			false,
-	};
+	return { count: 0, min: Infinity, max: -Infinity, complete: false, skipped: false };
 }
 
-function recordPhaseMiss(
-	stats,
-	phase,
-	execFailure = false
-) {
-	if (
-		Object.prototype.hasOwnProperty.call(
-			stats.misses,
-			phase
-		)
-	) {
-		stats.misses[phase]++;
-		stats.pipeline.misses[phase]++;
+function isTerminalChunk(chunk) {
+	return ["done", "miss", "skip", "error"].includes(chunk.status);
+}
 
-		if (execFailure) {
-			stats.execFails[phase]++;
+function recordPhaseMiss(stats, phase, execFailure = false) {
+	if (!Object.hasOwn(stats.misses, phase)) return;
+	stats.misses[phase]++;
+	stats.pipeline.misses[phase]++;
+	if (execFailure) stats.execFails[phase]++;
+}
+
+// Each chunk can become terminal exactly once, including cancellations and split phases.
+function settleChunk(batch, chunk, event, stats) {
+	if (isTerminalChunk(chunk)) return false;
+	chunk.status = event.type;
+	const state = batch.phases[chunk.phase];
+	state.count++;
+	if (event.type === "done") {
+		const finished = Number(event.finishedAt);
+		state.min = Math.min(state.min, finished);
+		state.max = Math.max(state.max, finished);
+		if (chunk.phase === "H") {
+			const earned = Math.max(0, Number(event.result) || 0);
+			stats.money += earned;
+			batch.moneyEarned += earned;
+			stats.lastHackAt = finished;
+			stats.lastHackLanding = chunk.landAt;
+			stats.income.push({ time: finished, money: earned });
 		}
+	} else {
+		state.skipped = true;
+		if (chunk.phase !== "H") batch.poisoned = true;
 	}
+	state.complete = state.count === batch.expected[chunk.phase];
+	if (batch.phases.H.complete && batch.moneyEarned > 0 && !batch.paidCounted) {
+		stats.profitable++;
+		batch.paidCounted = true;
+	}
+	if (Object.values(batch.phases).every(p => p.complete)) stats.finishedBatches.add(batch.id);
+	return true;
 }
 
-function markBatchPhaseSkipped(
-	batches,
-	batchId,
-	phase
-) {
-	const batch =
-		batches.get(
-			String(batchId)
-		);
-
-	if (!batch) {
-		return;
+function finishReadyBatches(batches, stats, cfg) {
+	let problem = null;
+	for (const id of stats.finishedBatches) {
+		const batch = batches.get(id);
+		if (!batch) continue;
+		const order = ["H", "W1", "G", "W2"];
+		for (let i = 1; i < order.length; i++) {
+			const a = batch.phases[order[i - 1]];
+			const b = batch.phases[order[i]];
+			if (a.skipped || b.skipped) continue;
+			const spacing = b.min - a.max;
+			stats.minSpacing = Math.min(stats.minSpacing, spacing);
+			stats.pipeline.minSpacing = Math.min(stats.pipeline.minSpacing, spacing);
+			if (spacing < minimumSpacing(cfg)) {
+				batch.poisoned = true;
+				problem ??= { kind: "recover", reason: `unsafe ${order[i - 1]} -> ${order[i]} spacing ${spacing.toFixed(1)}ms` };
+			}
+		}
+		if (batch.poisoned || batch.phases.H.skipped) {
+			stats.recovered++;
+		} else {
+			stats.completed++;
+			stats.pipeline.completed++;
+			stats.batchTimes.push(batch.phases.W2.max);
+		}
+		// Finalize even when a safety check fails. No early-return orphan batch.
+		batches.delete(id);
 	}
-
-	const state =
-		batch.phases[phase];
-
-	if (phase !== "H") {
-		batch.poisoned = true;
-	}
-
-	if (!state) {
-		return;
-	}
-
-	state.skipped = true;
-	state.complete = true;
-	state.count =
-		batch.expected[phase];
-
-	const landing =
-		Number(
-			batch.landing[phase] ??
-			Date.now()
-		);
-
-	state.min = landing;
-	state.max = landing;
+	stats.finishedBatches.clear();
+	return problem;
 }
+
+
 
 function publishHackPause(port, pauseUntil, reason) {
 	port.clear();
 	port.tryWrite({
 		type: "jit-control",
-		hackPauseUntil: Math.max(0, Number(pauseUntil) || 0),
+		paused: pauseUntil > 0,
+		hackPauseUntil: pauseUntil,
 		reason: String(reason ?? ""),
 		generatedAt: Date.now(),
 	});
@@ -4655,640 +4632,239 @@ function publishHackPause(port, pauseUntil, reason) {
 
 function beginSoftRecovery(current, issue, controlPort, runtime, stats) {
 	const now = Date.now();
-	const windowMs = Math.max(SOFT_RECOVERY_MS, Math.ceil(runtime.plan.period * 12));
-	const checkLead = Math.min(500, Math.max(100, Math.ceil(runtime.plan.period * 2)));
-
 	if (!current) {
 		current = {
 			reason: issue.reason,
 			started: now,
-			pauseUntil: now + windowMs,
-			checkAt: now + windowMs - checkLead,
+			deadline: now + SOFT_RECOVERY_MAX_MS,
+			pauseUntil: now + Math.max(SOFT_RECOVERY_MS, runtime.plan.period * 4),
+			checkAt: now,
+			cleanSince: null,
 		};
 		stats.softRecoveries++;
 		stats.pipeline.softRecoveries++;
 	} else {
 		current.reason = issue.reason;
-		current.pauseUntil = Math.max(current.pauseUntil, now + windowMs);
-		current.checkAt = current.pauseUntil - checkLead;
 		stats.softRecoveryExtensions++;
+		// A stream of faults must NOT move the hard deadline or defer health checks.
+		current.pauseUntil = Math.min(current.deadline, Math.max(current.pauseUntil, now + SOFT_RECOVERY_MS));
 	}
-
-	stats.lastReason = `recovering: ${issue.reason}`;
-	publishHackPause(controlPort, current.pauseUntil, current.reason);
+	stats.lastReason = `recovering: ${current.reason}`;
+	publishHackPause(controlPort, current.deadline, current.reason);
 	return current;
 }
 
-function updateSoftRecovery(ns, target, current, controlPort, runtime, stats) {
-	if (!current) return { recovery: null, problem: null };
-
-	const now = Date.now();
-	if (now < current.checkAt) return { recovery: current, problem: null };
-
+function targetHealth(ns, target) {
 	const maxMoney = ns.getServerMaxMoney(target);
 	const money = ns.getServerMoneyAvailable(target);
 	const minSec = ns.getServerMinSecurityLevel(target);
 	const sec = ns.getServerSecurityLevel(target);
-	const healthy = money >= maxMoney * 0.995 && sec <= minSec + 0.02;
+	return { money, maxMoney, sec, minSec,
+		clean: money >= maxMoney * 0.9999 && sec <= minSec + 0.001 };
+}
 
-	if (healthy && now >= current.pauseUntil) {
-		publishHackPause(controlPort, 0, "recovered");
-		stats.softRecoverySuccesses++;
-		stats.lastReason = `recovered locally: ${current.reason}`;
-		return { recovery: null, problem: null };
+function updateSoftRecovery(ns, target, current, controlPort, runtime, stats) {
+	if (!current) return { recovery: null, problem: null };
+	const now = Date.now();
+	// Check the immutable deadline BEFORE checkAt and independently of incoming faults.
+	if (now >= current.deadline) {
+		return { recovery: null, problem: {
+			kind: "drain", afterKind: "resync", hard: true, bumpGap: true,
+			reason: `local recovery exceeded ${SOFT_RECOVERY_MAX_MS / 1000}s: ${current.reason}`,
+		} };
 	}
-
-	if (healthy) {
-		current.checkAt = current.pauseUntil;
+	if (now < current.checkAt) return { recovery: current, problem: null };
+	current.checkAt = now + 25;
+	const health = targetHealth(ns, target);
+	if (health.sec > health.minSec + 5) {
+		return { recovery: null, problem: {
+			kind: "drain", afterKind: "resync", hard: true, bumpGap: true,
+			reason: `security circuit breaker: ${health.sec.toFixed(3)} / ${health.minSec.toFixed(3)}`,
+		} };
+	}
+	if (!health.clean) {
+		current.cleanSince = null;
+		current.pauseUntil = Math.min(current.deadline, Math.max(current.pauseUntil, now + SOFT_RECOVERY_MS));
 		return { recovery: current, problem: null };
 	}
-
-	if (now - current.started >= SOFT_RECOVERY_MAX_MS) {
-		publishHackPause(controlPort, 0, "recovery timeout");
-		return {
-			recovery: null,
-			problem: {
-				reason: `local recovery timed out: ${current.reason}`,
-				kind: "drain",
-				afterKind: "resync",
-				resetPeriod: false,
-			},
-		};
+	current.cleanSince ??= now;
+	if (now - current.cleanSince < 100 || now < current.started + 500) {
+		return { recovery: current, problem: null };
 	}
-
-	const windowMs = Math.max(SOFT_RECOVERY_MS, Math.ceil(runtime.plan.period * 12));
-	const checkLead = Math.min(500, Math.max(100, Math.ceil(runtime.plan.period * 2)));
-	current.pauseUntil = now + windowMs;
-	current.checkAt = current.pauseUntil - checkLead;
-	stats.softRecoveryExtensions++;
-	publishHackPause(controlPort, current.pauseUntil, current.reason);
-	return { recovery: current, problem: null };
+	publishHackPause(controlPort, 0, "recovered");
+	stats.softRecoverySuccesses++;
+	stats.lastReason = `recovered locally: ${current.reason}`;
+	return { recovery: null, problem: null };
 }
 
-function beginDrain(
-	current,
-	issue,
-	queue,
-	batches,
-	stats,
-	cfg
-) {
+// Stop only imminent in-flight hacks during a local repair. Calling ns.hack already
+// committed a timer; updating a port cannot retract it. Keep G/W repair tails alive.
+function cancelHackWindow(ns, batches, running, runningByChunk, stats, through) {
+	for (const batch of batches.values()) {
+		if (batch.landing.H > through) break; // batches are inserted in landing order
+		for (const chunk of batch.chunks.values()) {
+			if (chunk.phase !== "H" || isTerminalChunk(chunk)) continue;
+			cancelChunk(ns, batch, chunk, running, runningByChunk, stats);
+		}
+	}
+}
+
+function cancelChunk(ns, batch, chunk, running, runningByChunk, stats) {
+	if (isTerminalChunk(chunk)) return true;
+	const pid = runningByChunk.get(chunk.chunkId);
+	// A failed kill may mean completion is already in the event port. Do not invent
+	// a skipped completion or lose the earned money; consume the real event first.
+	if (pid != null && !ns.kill(pid)) return false;
+	if (pid != null) untrackRunningByChunk(running, runningByChunk, chunk.chunkId);
+	settleChunk(batch, chunk, { type: "skip", finishedAt: Date.now() }, stats);
+	if (chunk.phase === "H") {
+		stats.suppressedHackChunks++;
+		stats.pipeline.suppressedHackChunks++;
+	}
+	return true;
+}
+
+function cancelPoisonedBatch(ns, batch, running, runningByChunk, stats) {
+	for (const chunk of batch.chunks.values()) {
+		if (chunk.phase === "H") cancelChunk(ns, batch, chunk, running, runningByChunk, stats);
+	}
+	// If any hack already landed, retain grows to restore its money. Otherwise
+	// cancel grows too: growing a batch without W2 causes the security avalanche.
+	if (batch.moneyEarned === 0 && batch.phases.H.complete) {
+		for (const chunk of batch.chunks.values()) {
+			if (chunk.phase === "G") cancelChunk(ns, batch, chunk, running, runningByChunk, stats);
+		}
+	}
+}
+
+function beginDrain(current, issue, queue, batches, stats, cfg) {
 	if (current) {
-		return {
-			drain: current,
-			queue,
-		};
+		current.hard ||= Boolean(issue.hard);
+		return { drain: current, queue };
 	}
-
-	if (issue.bumpGap) {
-		cfg.gap =
-			Math.min(
-				100,
-				cfg.gap + 5
-			);
-	}
-
+	// Never mutate the gap of already-reserved batches. Apply it at reconfiguration.
+	const nextGap = issue.bumpGap ? Math.min(500, Math.max(cfg.gap + 25,
+		Math.ceil(Math.max(stats.pipeline.loopLagMax, stats.pipeline.driftMax) * 2 + 25))) : cfg.gap;
 	stats.recoveries++;
 	stats.pipeline.recoveries++;
-	stats.lastReason =
-		`draining: ${issue.reason}`;
-
-	const kept = [];
-
-	for (const chunk of queue) {
-		if (chunk.phase === "H") {
-			markBatchPhaseSkipped(
-				batches,
-				chunk.batchId,
-				"H"
-			);
-
-			stats.cancelledHackChunks++;
-			continue;
-		}
-
-		kept.push(chunk);
-	}
-
-	return {
-		drain: {
-			reason:
-				issue.reason,
-			afterKind:
-				issue.afterKind ??
-				"resync",
-			resetPeriod:
-				Boolean(
-					issue.resetPeriod
-				),
-			started:
-				Date.now(),
-		},
-		queue: kept,
+	stats.lastReason = `draining: ${issue.reason}`;
+	const drain = {
+		reason: issue.reason, afterKind: issue.afterKind ?? "resync",
+		resetPeriod: Boolean(issue.resetPeriod), started: Date.now(), nextGap,
+		hard: Boolean(issue.hard), cancelIterator: null, cancelDone: false,
 	};
+	for (const chunk of queue) {
+		if (chunk.phase !== "H" && !(drain.hard && chunk.phase === "G")) continue;
+		const batch = batches.get(chunk.batchId);
+		if (batch && !isTerminalChunk(chunk)) {
+			settleChunk(batch, chunk, { type: "skip", finishedAt: Date.now() }, stats);
+			if (chunk.phase === "H") stats.cancelledHackChunks++;
+		}
+	}
+	return { drain, queue: queue.filter(chunk => !isTerminalChunk(chunk)) };
 }
 
-function consumeEvents(
-	ns,
-	port,
-	batches,
-	stats,
-	target,
-	runtime,
-	cfg,
-	running,
-	runningByChunk
-) {
-	while (
-		!port.empty()
-	) {
-		const event =
-			port.read();
+// A catastrophic repair is not allowed to keep growing at security 100. Cancel
+// damaging in-flight actions in bounded slices, preserving already-started W tails.
+function serviceHardDrain(ns, drain, batches, running, runningByChunk, stats) {
+	if (!drain.hard || drain.cancelDone) return;
+	drain.cancelIterator ??= running.entries();
+	for (let checked = 0; checked < 32; checked++) {
+		const item = drain.cancelIterator.next();
+		if (item.done) { drain.cancelDone = true; break; }
+		const [, chunk] = item.value;
+		if (chunk.phase !== "H" && chunk.phase !== "G") continue;
+		const batch = batches.get(chunk.batchId);
+		if (batch) cancelChunk(ns, batch, chunk, running, runningByChunk, stats);
+	}
+}
 
-		if (
-			!event ||
-			typeof event !==
-			"object"
-		) {
-			continue;
+
+function consumeEvents(ns, port, batches, stats, target, runtime, cfg, running, runningByChunk) {
+	let problem = null;
+	let processed = 0;
+	while (!port.empty() && processed++ < 512) {
+		const event = port.read();
+		if (!event || typeof event !== "object" || event.target !== target) continue;
+		const batch = batches.get(String(event.batchId));
+		const chunk = batch?.chunks.get(String(event.chunkId));
+		if (!chunk || chunk.phase !== event.phase || isTerminalChunk(chunk)) continue;
+		if (event.type === "started") {
+			chunk.status = "called";
+			chunk.startedAt = Number(event.startedAt);
+			continue; // a start notification must never release RAM/PID ownership
 		}
-
-		untrackRunningByChunk(
-			running,
-			runningByChunk,
-			String(event.chunkId ?? "")
-		);
-
-		if (
-			String(
-				event.phase ??
-				""
-			).startsWith(
-				"PREP"
-			)
-		) {
-			continue;
-		}
+		if (!["done", "miss", "skip", "error"].includes(event.type)) continue;
+		if (event.type === "done" && !Number.isFinite(Number(event.finishedAt))) continue;
+		untrackRunningByChunk(running, runningByChunk, chunk.chunkId);
+		if (!settleChunk(batch, chunk, event, stats)) continue;
 
 		if (event.type === "skip") {
-			markBatchPhaseSkipped(batches, event.batchId, String(event.phase ?? "H"));
-			stats.suppressedHackChunks++;
-			stats.pipeline.suppressedHackChunks++;
-			stats.lastReason = String(event.reason ?? "H suppressed for local recovery");
-			continue;
-		}
-
-		if (
-			event.type ===
-			"miss"
-		) {
-			const missedPhase =
-				String(
-					event.phase ??
-					""
-				);
-
-			recordPhaseMiss(
-				stats,
-				missedPhase
-			);
-
-			markBatchPhaseSkipped(
-				batches,
-				event.batchId,
-				missedPhase
-			);
-
-			const reason =
-				`${missedPhase} missed by ` +
-				`${Number(
-					event.lateBy
-				).toFixed(1)}ms`;
-
-			if (missedPhase === "H") {
-				// A skipped hack leaves the target cleaner than planned. Let the
-				// corresponding W/G/W phases finish; they safely over-recover.
-				stats.lastReason = reason;
-				continue;
+			if (chunk.phase === "H") {
+				stats.suppressedHackChunks++;
+				stats.pipeline.suppressedHackChunks++;
 			}
-
-			if (missedPhase === "W2") {
-				stats.recovered++;
-				stats.lastW2 = NaN;
-				batches.delete(String(event.batchId));
+		} else if (event.type === "miss" || event.type === "error") {
+			recordPhaseMiss(stats, chunk.phase);
+			const reason = `${chunk.phase} ${event.code ?? event.type}: ` +
+				`launch +${(Number(event.launchLag) || 0).toFixed(1)}ms; ` +
+				`duration delta ${(Number(event.durationDelta) || 0).toFixed(1)}ms`;
+			stats.lastReason = reason;
+			if (chunk.phase !== "H") {
+				batch.poisoned = true;
+				cancelPoisonedBatch(ns, batch, running, runningByChunk, stats);
+				problem ??= { kind: "recover", reason };
 			}
-
-			return {
-				reason,
-				kind: "recover",
-			};
-		}
-
-		if (
-			event.type !==
-			"done"
-		) {
-			continue;
-		}
-
-		const batch =
-			batches.get(
-				String(
-					event.batchId
-				)
-			);
-
-		if (!batch) {
-			continue;
-		}
-
-		const phase =
-			String(
-				event.phase
-			);
-
-		const state =
-			batch.phases[
-			phase
-			];
-
-		if (!state) {
-			continue;
-		}
-
-		const finished =
-			Number(
-				event.finishedAt
-			);
-
-		state.count++;
-
-		state.min =
-			Math.min(
-				state.min,
-				finished
-			);
-
-		state.max =
-			Math.max(
-				state.max,
-				finished
-			);
-
-		const drift =
-			Math.abs(
-				Number(
-					event.drift ??
-					0
-				)
-			);
-
-		stats.driftSum +=
-			drift;
-
-		stats.driftCount++;
-
-		stats.driftMax =
-			Math.max(
-				stats.driftMax,
-				drift
-			);
-
-		stats.pipeline.driftSum += drift;
-		stats.pipeline.driftCount++;
-		stats.pipeline.driftMax =
-			Math.max(
-				stats.pipeline.driftMax,
-				drift
-			);
-
-		if (
-			phase ===
-			"H"
-		) {
-			const earned =
-				Math.max(
-					0,
-					Number(
-						event.result ??
-						0
-					)
-				);
-
-			stats.money +=
-				earned;
-
-			batch.moneyEarned +=
-				earned;
-
-			stats.lastHackAt =
-				finished;
-
-			stats.income.push({
-				time:
-					finished,
-
-				money:
-					earned,
-			});
-		}
-
-		if (state.skipped) {
-			continue;
-		}
-
-		if (
-			state.count <
-			batch.expected[
-			phase
-			]
-		) {
-			continue;
-		}
-
-		state.complete =
-			true;
-
-		const order = [
-			"H",
-			"W1",
-			"G",
-			"W2",
-		];
-
-		const index =
-			order.indexOf(
-				phase
-			);
-
-		const requiredSpacing =
-			minimumSpacing(
-				cfg
-			);
-
-		/*
-		 * Previous batch W2 -> next H.
-		 */
-		if (
-			phase ===
-			"H" &&
-			Number.isFinite(
-				stats.lastW2
-			)
-		) {
-			const spacing =
-				state.min -
-				stats.lastW2;
-
-			stats.minSpacing =
-				Math.min(
-					stats.minSpacing,
-					spacing
-				);
-			stats.pipeline.minSpacing =
-				Math.min(
-					stats.pipeline.minSpacing,
-					spacing
-				);
-
-			if (
-				spacing <
-				requiredSpacing
-			) {
-				return {
-					reason:
-						`unsafe W2 -> H spacing ` +
-						`${spacing.toFixed(1)}ms`,
-
-					kind:
-						"recover",
-
-					bumpGap:
-						true,
-				};
+		} else {
+			const drift = Math.abs(Number(event.drift) || 0);
+			stats.driftSum += drift;
+			stats.driftCount++;
+			stats.driftMax = Math.max(stats.driftMax, drift);
+			stats.pipeline.driftSum += drift;
+			stats.pipeline.driftCount++;
+			stats.pipeline.driftMax = Math.max(stats.pipeline.driftMax, drift);
+			if (drift >= cfg.gap - minimumSpacing(cfg)) {
+				problem ??= { kind: "recover", reason: `${chunk.phase} completion drift ${drift.toFixed(1)}ms` };
 			}
-		}
-
-		/*
-		 * H -> W1 -> G -> W2 ordering.
-		 */
-		if (
-			index > 0
-		) {
-			const previous =
-				batch.phases[
-				order[
-				index -
-				1
-				]
-				];
-
-			if (!previous.skipped) {
-				if (
-					!previous.complete
-				) {
-					return {
-						reason:
-							`${phase} completed before ` +
-							`${order[index - 1]}`,
-
-						kind:
-							"recover",
-
-						bumpGap:
-							true,
-					};
-				}
-
-				const spacing =
-					state.min -
-					previous.max;
-
-				stats.minSpacing =
-					Math.min(
-						stats.minSpacing,
-						spacing
-					);
-				stats.pipeline.minSpacing =
-					Math.min(
-						stats.pipeline.minSpacing,
-						spacing
-					);
-
-				if (
-					spacing <
-					requiredSpacing
-				) {
-					return {
-						reason:
-							`unsafe ` +
-							`${order[index - 1]} -> ${phase} ` +
-							`${spacing.toFixed(1)}ms`,
-
-						kind:
-							"recover",
-
-						bumpGap:
-							true,
-					};
+			if (chunk.phase === "H" && Number.isFinite(stats.lastW2)) {
+				const spacing = Number(event.finishedAt) - stats.lastW2;
+				stats.minSpacing = Math.min(stats.minSpacing, spacing);
+				stats.pipeline.minSpacing = Math.min(stats.pipeline.minSpacing, spacing);
+				if (spacing < minimumSpacing(cfg)) {
+					problem ??= { kind: "recover", reason: `unsafe W2 -> H spacing ${spacing.toFixed(1)}ms` };
 				}
 			}
-		}
-
-		if (
-			phase ===
-			"W2"
-		) {
-			if (
-				batch.phases.H.skipped ||
-				batch.poisoned
-			) {
-				stats.recovered++;
-			} else {
-				stats.completed++;
-
-				if (
-					batch.moneyEarned >
-					0
-				) {
-					stats.profitable++;
+			if (chunk.phase === "W2") {
+				stats.lastW2 = Number(event.finishedAt);
+				// Use the worker's completion snapshot, not potentially newer dirty
+				// state sampled by a controller consuming a delayed event.
+				if (Number.isFinite(event.moneyAfter) && Number.isFinite(event.securityAfter)) {
+					if (event.moneyAfter < ns.getServerMaxMoney(target) * 0.995 ||
+						event.securityAfter > ns.getServerMinSecurityLevel(target) + 0.02) {
+						problem ??= { kind: "recover", reason: "target not restored at W2 completion" };
+					}
 				}
-
-				stats.batchTimes.push(
-					state.max
-				);
-			}
-
-			stats.lastW2 =
-				state.max;
-
-			const cleanWindow =
-				runtime.plan.period -
-				3 *
-				cfg.gap -
-				requiredSpacing;
-
-			if (
-				Date.now() -
-				state.max <
-				cleanWindow
-			) {
-				const maxMoney =
-					ns.getServerMaxMoney(
-						target
-					);
-
-				const money =
-					ns.getServerMoneyAvailable(
-						target
-					);
-
-				const minSec =
-					ns.getServerMinSecurityLevel(
-						target
-					);
-
-				const sec =
-					ns.getServerSecurityLevel(
-						target
-					);
-
-				if (
-					money <
-					maxMoney *
-					0.995
-				) {
-					return {
-						reason:
-							`money recovery failed ` +
-							`${(
-								money /
-								maxMoney *
-								100
-							).toFixed(2)}%`,
-
-						kind:
-							"recover",
-					};
-				}
-
-				if (
-					sec >
-					minSec +
-					0.02
-				) {
-					return {
-						reason:
-							`security recovery failed ` +
-							`${sec.toFixed(3)} / ` +
-							`${minSec.toFixed(3)}`,
-
-						kind:
-							"recover",
-					};
-				}
-			}
-
-			batches.delete(
-				batch.id
-			);
-		}
-	}
-
-	return null;
-}
-
-function findOverdueBatch(
-	batches,
-	cfg
-) {
-	const now =
-		Date.now();
-
-	const grace =
-		Math.max(
-			250,
-			cfg.gap *
-			3
-		);
-
-	for (
-		const batch
-		of batches.values()
-	) {
-		for (
-			const phase
-			of [
-				"H",
-				"W1",
-				"G",
-				"W2",
-			]
-		) {
-			if (
-				batch.phases[
-					phase
-				].complete
-			) {
-				continue;
-			}
-
-			if (
-				now >
-				batch.landing[
-				phase
-				] +
-				grace
-			) {
-				return (
-					`${phase} completion event overdue`
-				);
 			}
 		}
 	}
+	const completionProblem = finishReadyBatches(batches, stats, cfg);
+	return problem ?? completionProblem;
+}
 
+function findOverdueBatch(batches, cfg) {
+	const now = Date.now();
+	const grace = Math.max(500, cfg.gap * 3);
+	for (const batch of batches.values()) {
+		if (batch.landing.H > now) break;
+		for (const chunk of batch.chunks.values()) {
+			if (isTerminalChunk(chunk) || now <= chunk.landAt + grace) continue;
+			return { kind: "recover", reason: `${chunk.phase} completion overdue`,
+				batchId: batch.id, chunkId: chunk.chunkId };
+		}
+	}
 	return null;
 }
+
 
 function minimumSpacing(
 	cfg
@@ -5336,111 +4912,40 @@ function enqueueChunks(
 	}
 }
 
-function launchDueChunks(
-	ns,
-	queue,
-	target,
-	cfg,
-	batches,
-	stats,
-	running,
-	runningByChunk,
-	drain
-) {
-	while (
-		queue.length &&
-		queue[0].launchAt <=
-		Date.now()
-	) {
-		const chunk =
-			queue.shift();
-
-		const maxLate =
-			Math.max(
-				20,
-				cfg.gap
-			);
-
-		const pid =
-			ns.exec(
-				chunk.script,
-				chunk.host,
-				chunk.threads,
-				target,
-				chunk.landAt,
-				chunk.batchId,
-				cfg.port,
-				chunk.phase,
-				chunk.chunkId,
-				maxLate,
-				cfg.controlPort
-			);
-
-		if (!pid) {
-			recordPhaseMiss(
-				stats,
-				chunk.phase,
-				true
-			);
-
-			markBatchPhaseSkipped(
-				batches,
-				chunk.batchId,
-				chunk.phase
-			);
-
-			if (
-				chunk.phase ===
-				"H"
-			) {
-				stats.lastReason =
-					`H exec skipped on ${chunk.host}`;
-				continue;
-			}
-
-			const result =
-				beginDrain(
-					drain,
-					{
-						reason:
-							`exec failed: ${chunk.phase} on ${chunk.host}`,
-						kind:
-							"drain",
-						afterKind:
-							"resync",
-						bumpGap:
-							true,
-					},
-					queue,
-					batches,
-					stats,
-					cfg
-				);
-
-			drain =
-				result.drain;
-			queue =
-				result.queue;
-			break;
+function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runningByChunk, drain) {
+	let launched = 0;
+	while (queue.length && queue[0].launchAt <= Date.now() && launched++ < 32) {
+		const chunk = queue.shift();
+		const batch = batches.get(chunk.batchId);
+		if (!batch || isTerminalChunk(chunk)) continue;
+		if (batch.poisoned && (chunk.phase === "H" || (chunk.phase === "G" && batch.moneyEarned === 0))) {
+			settleChunk(batch, chunk, { type: "skip", finishedAt: Date.now() }, stats);
+			continue;
 		}
-
-		trackRunning(
-			running,
-			pid,
-			chunk
-		);
-
-		runningByChunk.set(
-			chunk.chunkId,
-			pid
-		);
+		if (drain && (chunk.phase === "H" || (drain.hard && chunk.phase === "G"))) {
+			settleChunk(batch, chunk, { type: "skip", finishedAt: Date.now() }, stats);
+			continue;
+		}
+		const pid = ns.exec(chunk.script, chunk.host, chunk.threads,
+			target, chunk.landAt, chunk.batchId, cfg.port, chunk.phase, chunk.chunkId,
+			Math.max(20, cfg.gap), cfg.controlPort, chunk.duration, chunk.launchAt,
+			chunk.stealBudget ?? 0, chunk.threads);
+		if (!pid) {
+			recordPhaseMiss(stats, chunk.phase, true);
+			settleChunk(batch, chunk, { type: "miss", finishedAt: Date.now() }, stats);
+			batch.poisoned = true;
+			cancelPoisonedBatch(ns, batch, running, runningByChunk, stats);
+			// This batch is unusable, but a single exec failure need not erase other batches.
+			stats.lastReason = `exec failed: ${chunk.phase} on ${chunk.host}`;
+			continue;
+		}
+		chunk.status = "running";
+		trackRunning(running, pid, chunk);
+		runningByChunk.set(chunk.chunkId, pid);
 	}
-
-	return {
-		queue,
-		drain,
-	};
+	return { queue, drain };
 }
+
 
 function networkFromFleetStatus(
 	status,
@@ -5545,35 +5050,31 @@ function reapRunning(
 	}
 }
 
-function reconcileRunning(
-	ns,
-	running,
-	runningByChunk,
-	limit
-) {
-	let checked = 0;
+function hasHarmfulRunning(running) {
+	for (const chunk of running.values()) {
+		if (chunk.phase === "H" || chunk.phase === "G") return true;
+	}
+	return false;
+}
 
-	for (
-		const [pid, chunk]
-		of running
-	) {
-		if (checked++ >= limit) {
+const reconcileCursors = new WeakMap();
+
+function reconcileRunning(ns, running, runningByChunk, limit) {
+	let cursor = reconcileCursors.get(running);
+	if (!cursor) {
+		cursor = running.entries();
+		reconcileCursors.set(running, cursor);
+	}
+	for (let checked = 0; checked < limit; checked++) {
+		const next = cursor.next();
+		if (next.done) {
+			reconcileCursors.delete(running);
 			break;
 		}
-
-		if (ns.isRunning(pid)) {
-			continue;
-		}
-
-		untrackRunning(
-			running,
-			pid,
-			chunk
-		);
-
-		runningByChunk.delete(
-			chunk.chunkId
-		);
+		const [pid, chunk] = next.value;
+		if (!running.has(pid) || ns.isRunning(pid)) continue;
+		untrackRunning(running, pid, chunk);
+		runningByChunk.delete(chunk.chunkId);
 	}
 }
 
@@ -5591,6 +5092,9 @@ function createStats() {
 		income: [],
 
 		batchTimes: [],
+		expiredSlots: 0,
+		finishedBatches: new Set(),
+		lastHackLanding: NaN,
 
 		scheduled: 0,
 
@@ -5667,6 +5171,7 @@ function createStats() {
 function createPipelineStats() {
 	return {
 		started: Date.now(),
+		completed: 0,
 		recoveries: 0,
 		softRecoveries: 0,
 		suppressedHackChunks: 0,
@@ -5900,22 +5405,13 @@ function renderDashboard(
 			batches
 		);
 
-	const hackStatus =
-		Number.isFinite(
-			stats.lastHackAt
-		)
-			? "LIVE"
-			: Number.isFinite(
-				pendingHackLanding
-			)
-				? pendingHackLanding > now
-					? `ETA ${formatTime(
-						pendingHackLanding - now
-					)}`
-					: `DUE +${formatTime(
-						now - pendingHackLanding
-					)}`
-				: "WAITING";
+	const hackStatus = drain ? `DRAINING | ${running.size} workers left`
+		: recovery ? `PAUSED | deadline ${formatTime(Math.max(0, recovery.deadline - now))}`
+		: Number.isFinite(stats.lastHackAt) && now - stats.lastHackAt < 10_000 ? "LIVE"
+		: Number.isFinite(pendingHackLanding)
+			? pendingHackLanding > now ? `ETA ${formatTime(pendingHackLanding - now)}`
+				: `DUE +${formatTime(now - pendingHackLanding)}`
+			: "WAITING";
 
 	ns.clearLog();
 
@@ -6132,7 +5628,8 @@ function renderDashboard(
 	ns.print(
 		`Allocator   ` +
 		`${stats.allocationFails} skipped slots ` +
-		`| worst streak ${stats.maxConsecutiveAllocationFails}`
+		`| worst streak ${stats.maxConsecutiveAllocationFails} ` +
+		`| expired slots ${stats.expiredSlots}`
 	);
 
 	ns.print(
