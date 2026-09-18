@@ -19,7 +19,14 @@ jobs:
           python3 - <<'PY'
           import base64, gzip, hashlib, json
           from pathlib import Path
-          raw = gzip.decompress(base64.b64decode(Path('.github/dashboard-update.b64').read_text()))
+          encoded = Path('.github/dashboard-update.b64').read_text().strip()
+          # Correct three transfer differences found by byte-comparing the
+          # downloaded artifact with the locally tested payload. The original
+          # SHA-256 and every before/after source hash still must match.
+          assert len(encoded) == 16274
+          for start, end, text in [(12389, 12390, ''), (10762, 10764, 'VOr'), (8729, 8729, '9N')]:
+              encoded = encoded[:start] + text + encoded[end:]
+          raw = gzip.decompress(base64.b64decode(encoded))
           assert hashlib.sha256(raw).hexdigest() == 'e544c882d781ad19c1e161517e506775d21b78c354726fbe4dd1e2fa95029fb2'
           changes = json.loads(raw)
           allowed = {'src/daemon.js', 'src/supervisor.js', 'src/lib/dashboard.js', 'test/helpers.cjs', 'test/jit-recovery.test.cjs', 'docs/dashboard.md'}
