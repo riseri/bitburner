@@ -1,60 +1,21 @@
-name: Hardening patch validation
+name: JIT regression tests
 on:
+  push:
+    branches: [main, fix/jit-recovery-invariants, feature/protected-background-prep]
   pull_request:
     branches: [main]
 permissions:
   contents: read
 jobs:
-  apply-tested-patch:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.number == 13 &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'fix/supervision-progression-hardening'
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Verify and apply reviewed patch
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import base64, gzip, hashlib, os, pathlib
-          parts = sorted(pathlib.Path('.github/hardening-patch').glob('*.b64'))
-          assert len(parts) == 4, 'expected four patch parts'
-          encoded = ''.join(p.read_text().strip() for p in parts)
-          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == 'c8e849cc82cf350924ccf34943944355896485aa8d84e549a295bfeb9109ddfd', 'patch checksum mismatch'
-          pathlib.Path(os.environ['RUNNER_TEMP'], 'hardening.patch').write_bytes(patch)
-          PY
-          git apply --check "$RUNNER_TEMP/hardening.patch"
-          git apply "$RUNNER_TEMP/hardening.patch"
-          rm -r .github/hardening-patch
-          git diff --check
       - name: All regression tests and full daemon simulations
-        shell: bash
-        run: |
-          set -o pipefail
-          npm test 2>&1 | tee "$RUNNER_TEMP/hardening-tests.txt"
-      - name: Commit validated source to this PR branch only
-        shell: bash
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src test docs/supervision.md package.json .github/hardening-patch
-          git commit -m 'Harden supervision and progression execution with regression coverage'
-          git push origin HEAD:refs/heads/fix/supervision-progression-hardening
-      - name: Validation report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hardening-test-report
-          retention-days: 7
-          path: ${{ runner.temp }}/hardening-tests.txt
+        run: npm test
