@@ -1,3 +1,4 @@
+// Worker dependency revision: ram-safe-control-v1. Refreshes cached entry RAM after helper changes.
 import { runJitWorker } from "lib/jit-worker.js";
 
 /** @param {NS} ns */
