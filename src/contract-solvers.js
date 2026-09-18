@@ -1,3 +1,6 @@
+// Bump on algorithm changes; certificates also bind to the exact source bytes.
+export const SOLVER_VERSION = "contracts-v2";
+
 export const SOLVERS = Object.freeze({
 	"Find Largest Prime Factor": largestPrimeFactor,
 	"Subarray with Maximum Sum": maximumSubarray,
@@ -20,10 +23,19 @@ export const SOLVERS = Object.freeze({
 	"Encryption I: Caesar Cipher": caesarCipher,
 	"Encryption II: Vigenère Cipher": vigenereCipher,
 	"Square Root": squareRoot,
+	"Shortest Path in a Grid": shortestPath,
+	"Sanitize Parentheses in Expression": sanitizeParentheses,
+	"Find All Valid Math Expressions": mathExpressions,
+	"HammingCodes: Integer to Encoded Binary": hammingEncode,
+	"HammingCodes: Encoded Binary to Integer": hammingDecode,
+	"Compression II: LZ Decompression": lzDecompress,
+	"Compression III: LZ Compression": lzCompress,
+	"Total Number of Primes": totalPrimes,
+	"Largest Rectangle in a Matrix": largestRectangle,
 });
 
 export function solveContract(type, data) {
-	const solver = SOLVERS[type];
+	const solver = Object.hasOwn(SOLVERS, type) ? SOLVERS[type] : null;
 	if (!solver) {
 		return { supported: false, answer: null };
 	}
@@ -35,15 +47,16 @@ export function solveContract(type, data) {
 }
 
 function largestPrimeFactor(value) {
+	return finish(largestPrimeFactorSteps(value));
+}
+
+function* largestPrimeFactorSteps(value) {
 	let n = Number(value);
-	let factor = 2;
-	let largest = 1;
-	while (factor * factor <= n) {
-		while (n % factor === 0) {
-			largest = factor;
-			n /= factor;
-		}
-		factor += factor === 2 ? 1 : 2;
+	if (!Number.isSafeInteger(n) || n < 2) throw new Error("Expected an integer >= 2");
+	let largest = 1, work = 0;
+	for (let factor = 2; factor * factor <= n; factor += factor === 2 ? 1 : 2) {
+		while (n % factor === 0) { largest = factor; n /= factor; }
+		if (++work % 512 === 0) yield;
 	}
 	return Math.max(largest, n);
 }
@@ -286,20 +299,240 @@ function caesarCipher([text, shift]) {
 }
 
 function vigenereCipher([text, key]) {
-	let index = 0;
-	return text.replace(/[A-Z]/g, char => {
-		const shift = key.charCodeAt(index++ % key.length) - 65;
-		return String.fromCharCode(65 + (char.charCodeAt(0) - 65 + shift) % 26);
-	});
+	if (!/^[A-Z]+$/.test(key)) throw new Error("Expected an uppercase keyword");
+	// Upstream indexes the keyword by character position, including spaces.
+	return [...text].map((char, i) => char === " " ? char :
+		String.fromCharCode(65 + (char.charCodeAt(0) + key.charCodeAt(i % key.length) - 130) % 26)).join("");
 }
 
 function squareRoot(value) {
 	const n = BigInt(value);
+	if (n < 0n) throw new Error("Square Root requires a nonnegative integer");
 	if (n < 2n) return n.toString();
-	let x = 1n << (BigInt(n.toString(2).length) + 1n >> 1n);
+	let x = 1n << ((BigInt(n.toString(2).length) + 1n) >> 1n);
 	while (true) {
 		const y = (x + n / x) >> 1n;
-		if (y >= x) return x.toString();
+		if (y >= x) break;
 		x = y;
 	}
+	// x is floor(sqrt(n)). Compare against the half-integer boundary without floats.
+	return (n - x * x > x ? x + 1n : x).toString();
+}
+
+function finish(iterator) {
+	let step;
+	do { step = iterator.next(); } while (!step.done);
+	return step.value;
+}
+
+// Heavy searches yield in bounded work slices. Heartbeats cannot help if a
+// synchronous solver monopolizes the same JavaScript event loop as the JIT.
+export async function solveContractAsync(type, data, yieldControl = async () => {}) {
+	const steps = {
+		"Find Largest Prime Factor": largestPrimeFactorSteps,
+		"Find All Valid Math Expressions": mathExpressionSteps,
+		"Sanitize Parentheses in Expression": sanitizeSteps,
+		"Total Number of Primes": primeSteps,
+		"Compression III: LZ Compression": lzSteps,
+	};
+	if (!Object.hasOwn(SOLVERS, type)) return { supported: false, answer: null };
+	await yieldControl();
+	if (!Object.hasOwn(steps, type)) return solveContract(type, data);
+	const iterator = steps[type](structuredClone(data));
+	while (true) {
+		const step = iterator.next();
+		if (step.done) return { supported: true, answer: step.value };
+		await yieldControl();
+	}
+}
+
+function shortestPath(grid) {
+	const rows = grid.length, cols = grid[0].length;
+	if (grid[0][0] || grid[rows - 1][cols - 1]) return "";
+	const queue = [0], parent = Array(rows * cols).fill(-1), moves = [];
+	parent[0] = 0;
+	for (let head = 0; head < queue.length; head++) {
+		const at = queue[head], r = Math.floor(at / cols), c = at % cols;
+		if (at === rows * cols - 1) {
+			let path = "", end = at;
+			while (end !== 0) { path = moves[end] + path; end = parent[end]; }
+			return path;
+		}
+		for (const [dr, dc, move] of [[1, 0, "D"], [0, 1, "R"], [-1, 0, "U"], [0, -1, "L"]]) {
+			const nr = r + dr, nc = c + dc, next = nr * cols + nc;
+			if (nr < 0 || nc < 0 || nr >= rows || nc >= cols || grid[nr][nc] || parent[next] !== -1) continue;
+			parent[next] = at; moves[next] = move; queue.push(next);
+		}
+	}
+	return "";
+}
+
+function sanitizeParentheses(text) { return finish(sanitizeSteps(text)); }
+
+function* sanitizeSteps(text) {
+	let left = 0, right = 0, work = 0;
+	for (const char of text) {
+		if (char === "(") left++;
+		if (char === ")") { if (left) left--; else right++; }
+	}
+	const answers = new Set();
+	function* visit(i, balance, removeLeft, removeRight, path) {
+		if (++work % 512 === 0) yield;
+		if (removeLeft + removeRight > text.length - i) return;
+		if (i === text.length) {
+			if (!balance && !removeLeft && !removeRight) answers.add(path);
+			return;
+		}
+		const char = text[i];
+		if (char === "(") {
+			if (removeLeft) yield* visit(i + 1, balance, removeLeft - 1, removeRight, path);
+			yield* visit(i + 1, balance + 1, removeLeft, removeRight, path + char);
+		} else if (char === ")") {
+			if (removeRight) yield* visit(i + 1, balance, removeLeft, removeRight - 1, path);
+			if (balance) yield* visit(i + 1, balance - 1, removeLeft, removeRight, path + char);
+		} else yield* visit(i + 1, balance, removeLeft, removeRight, path + char);
+	}
+	yield* visit(0, 0, left, right, "");
+	return [...answers].sort();
+}
+
+function mathExpressions(data) { return finish(mathExpressionSteps(data)); }
+
+function* mathExpressionSteps([digits, target]) {
+	if (!/^\d{1,12}$/.test(digits)) throw new Error("Expected 1..12 digits");
+	const answers = [];
+	let work = 0;
+	function* visit(pos, value, last, path) {
+		if (++work % 512 === 0) yield;
+		if (pos === digits.length) { if (value === target) answers.push(path); return; }
+		for (let end = pos + 1; end <= digits.length; end++) {
+			if (end > pos + 1 && digits[pos] === "0") break;
+			const token = digits.slice(pos, end), n = Number(token);
+			if (!pos) yield* visit(end, n, n, token);
+			else {
+				yield* visit(end, value + n, n, path + "+" + token);
+				yield* visit(end, value - n, -n, path + "-" + token);
+				// Replace the previous term, preserving multiplication precedence.
+				yield* visit(end, value - last + last * n, last * n, path + "*" + token);
+			}
+		}
+	}
+	yield* visit(0, 0, 0, "");
+	return answers;
+}
+
+function hammingEncode(value) {
+	if (!Number.isInteger(value) || value < 0 || !Number.isFinite(value)) throw new Error("Expected a nonnegative integer");
+	const data = value.toString(2), bits = [0];
+	for (let i = 1, j = 0; j < data.length; i++) bits[i] = (i & (i - 1)) === 0 ? 0 : Number(data[j++]);
+	for (let parity = 1; parity < bits.length; parity *= 2) {
+		let bit = 0;
+		for (let i = 1; i < bits.length; i++) if (i & parity) bit ^= bits[i];
+		bits[parity] = bit;
+	}
+	bits[0] = bits.reduce((a, b) => a ^ b, 0);
+	return bits.join("");
+}
+
+function hammingDecode(encoded) {
+	if (!/^[01]+$/.test(encoded)) throw new Error("Expected a binary string");
+	const bits = [...encoded].map(Number);
+	let syndrome = 0, parity = 0;
+	for (let i = 0; i < bits.length; i++) { if (bits[i]) syndrome ^= i; parity ^= bits[i]; }
+	if (syndrome >= bits.length || (syndrome && !parity)) throw new Error("Uncorrectable Hamming code");
+	if (parity) bits[syndrome] ^= 1;
+	let data = "";
+	for (let i = 1; i < bits.length; i++) if (i & (i - 1)) data += bits[i];
+	return parseInt(data || "0", 2);
+}
+
+function lzDecompress(encoded) {
+	let plain = "", literal = true;
+	for (let i = 0; i < encoded.length; literal = !literal) {
+		if (!/[0-9]/.test(encoded[i])) throw new Error("Invalid LZ length");
+		const length = Number(encoded[i++]);
+		if (!length) continue;
+		if (literal) {
+			if (i + length > encoded.length) throw new Error("Truncated LZ literal");
+			plain += encoded.slice(i, i + length); i += length;
+		} else {
+			const offset = Number(encoded[i++]);
+			if (!(offset >= 1 && offset <= 9 && offset <= plain.length)) throw new Error("Invalid LZ offset");
+			for (let j = 0; j < length; j++) plain += plain[plain.length - offset];
+		}
+	}
+	return plain;
+}
+
+function lzCompress(plain) { return finish(lzSteps(plain)); }
+
+function* lzSteps(plain) {
+	// Suffix DP: only (position, next chunk type) matters. A zero chunk switches
+	// type; two consecutive zero chunks can never improve a shortest encoding.
+	const dp = Array.from({ length: plain.length + 1 }, () => ["", ""]);
+	const better = (a, b) => b !== null && (a === null || b.length < a.length || (b.length === a.length && b < a)) ? b : a;
+	for (let i = plain.length - 1; i >= 0; i--) {
+		let literal = null, reference = null;
+		for (let n = 1; n <= 9 && i + n <= plain.length; n++) {
+			literal = better(literal, n + plain.slice(i, i + n) + dp[i + n][1]);
+		}
+		for (let offset = 1; offset <= 9 && offset <= i; offset++) {
+			for (let n = 1; n <= 9 && i + n <= plain.length; n++) {
+				if (plain[i + n - 1] !== plain[i + n - 1 - offset]) break;
+				reference = better(reference, `${n}${offset}` + dp[i + n][0]);
+			}
+		}
+		dp[i][0] = better(literal, reference === null ? null : "0" + reference);
+		dp[i][1] = better(reference, "0" + literal);
+		yield;
+	}
+	return dp[0][0];
+}
+
+function totalPrimes(range) { return finish(primeSteps(range)); }
+
+function* primeSteps([low, high]) {
+	if (!Number.isSafeInteger(low) || !Number.isSafeInteger(high) || low < 0 || high < low || high > 6_000_000) {
+		throw new Error("Prime range outside supported game bounds");
+	}
+	low = Math.max(2, low);
+	if (high < low) return 0;
+	const limit = Math.floor(Math.sqrt(high)), base = new Uint8Array(limit + 1);
+	const composite = new Uint8Array(high - low + 1);
+	let work = 0, count = 0;
+	for (let p = 2; p <= limit; p++) {
+		if (base[p]) continue;
+		for (let n = p * p; n <= limit; n += p) base[n] = 1;
+		for (let n = Math.max(p * p, Math.ceil(low / p) * p); n <= high; n += p) {
+			composite[n - low] = 1;
+			if (++work % 2048 === 0) yield;
+		}
+	}
+	for (let i = 0; i < composite.length; i++) {
+		if (!composite[i]) count++;
+		if (++work % 2048 === 0) yield;
+	}
+	return count;
+}
+
+function largestRectangle(grid) {
+	const heights = Array(grid[0].length).fill(0);
+	let bestArea = 0, corners = null;
+	for (let r = 0; r < grid.length; r++) {
+		for (let c = 0; c < heights.length; c++) heights[c] = grid[r][c] === 0 ? heights[c] + 1 : 0;
+		const stack = [];
+		for (let c = 0; c <= heights.length; c++) {
+			const height = c === heights.length ? 0 : heights[c];
+			let left = c;
+			while (stack.length && stack[stack.length - 1][1] > height) {
+				const [start, h] = stack.pop(); left = start;
+				if (h * (c - start) > bestArea) {
+					bestArea = h * (c - start); corners = [[r - h + 1, start], [r, c - 1]];
+				}
+			}
+			if (height && (!stack.length || stack[stack.length - 1][1] < height)) stack.push([left, height]);
+		}
+	}
+	if (!corners) throw new Error("Matrix has no zero rectangle");
+	return corners;
 }
