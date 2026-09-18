@@ -1,4 +1,5 @@
 import { PORTS } from "lib/ports.js";
+import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary } from "lib/background-prep.js";
 
 const HOME = "home";
 
@@ -7,7 +8,7 @@ const GROW = "jit-grow.js";
 const WEAKEN = "jit-weaken.js";
 
 const WORKERS = [HACK, GROW, WEAKEN];
-const WORKER_FILES = [...WORKERS, "lib/jit-worker.js"];
+const WORKER_FILES = [...WORKERS, "lib/jit-worker.js", ...backgroundPrepFiles()];
 const FLEET_MANAGER = "fleet-manager.js";
 
 const RELEASE_MS = 1_000; // reserve space for callback/reporting jitter
@@ -42,6 +43,10 @@ const SERVER_MAX_GROWTH_LOG = 0.00349388925425578;
 export async function main(ns) {
 	const flags = ns.flags([
 		["target", "auto"],
+		["background-prep", true],
+		["prep-max-ram", 16_384],
+		["prep-ram-fraction", 0.01],
+		["prep-horizon", 120],
 		["gap", 100],
 		["lead", 600],
 		["home-reserve", 8],
@@ -105,6 +110,12 @@ export async function main(ns) {
 		},
 	};
 
+	cfg.backgroundPrep = createBackgroundPrep({
+		enabled: asBoolean(flags["background-prep"]),
+		maxRam: flags["prep-max-ram"], fraction: flags["prep-ram-fraction"],
+		horizonMinutes: flags["prep-horizon"],
+	});
+	ns.atExit(() => cancelBackgroundPrep(ns, cfg.backgroundPrep, "daemon stopped"));
 	validateDaemonPorts(cfg);
 	cfg.lead = Math.max(cfg.lead, cfg.gap * 6);
 
@@ -185,6 +196,7 @@ export async function main(ns) {
 
 	// Kill orphan workers left from a previous daemon run.
 	killWorkerScripts(ns, network.hosts);
+	cleanupBackgroundOrphans(ns, network.hosts);
 
 	await ns.sleep(50);
 
@@ -345,7 +357,8 @@ export async function main(ns) {
 			network.hosts,
 			running,
 			foreignUsedByHost,
-			foreignUsageCursor
+			foreignUsageCursor,
+			cfg.backgroundPrep
 		);
 
 		if (
@@ -446,6 +459,10 @@ export async function main(ns) {
 				nextHackLanding = Math.max(nextHackLanding,
 					Date.now() + runtime.plan.times.W + cfg.lead + STARTUP_BUFFER_MS);
 			}
+		}
+
+		if ((drain || recovery) && cfg.backgroundPrep.active) {
+			cancelBackgroundPrep(ns, cfg.backgroundPrep, "active pipeline recovery");
 		}
 
 		if (drain) {
@@ -689,6 +706,7 @@ export async function main(ns) {
 		 * Reconfiguration / recovery.
 		 */
 		if (maintenance) {
+			cancelBackgroundPrep(ns, cfg.backgroundPrep, "active pipeline maintenance");
 			recovery = null;
 			publishHackPause(controlPort, Number.MAX_SAFE_INTEGER, "maintenance");
 
@@ -783,8 +801,9 @@ export async function main(ns) {
 						new Map()
 					);
 
-				const best =
-					targetAnalysis[0];
+				// Preparation does not promote its candidate into the money slot.
+				// A deliberate --target restart can select it after live validation.
+				const best = targetAnalysis.find(entry => entry.name !== cfg.backgroundPrep.target);
 
 				const current =
 					targetAnalysis.find(
@@ -978,7 +997,7 @@ export async function main(ns) {
 				batchCounter++;
 
 			const result =
-				reserveBatch(
+				reserveIncomeBatch(
 					ns,
 					target,
 					id,
@@ -1062,6 +1081,17 @@ export async function main(ns) {
 
 		if (maintenance) {
 			continue;
+		}
+
+		// Optional work runs only after JIT launches, with no due event backlog.
+		// The helper examines one candidate/host per tick and owns at most one PID.
+		if (port.empty() && (!queue.length || queue[0].launchAt - Date.now() > 50)) {
+			tickBackgroundPrep(ns, {
+				state: cfg.backgroundPrep, target, network, cfg, runtime, stats,
+				healthy: !drain && !recovery && !maintenance,
+				spareRam: host => availableRam(ns, host, cfg, running, reservations,
+					Date.now(), Infinity, foreignUsedByHost),
+			});
 		}
 
 		if (
@@ -3157,6 +3187,13 @@ function isDirtyPhase(
 	 DISTRIBUTED BATCH RESERVATION
 	 ========================================================= */
 
+function reserveIncomeBatch(ns, target, id, landing, plan, hosts, cfg, reservations, running, foreign) {
+	const reserve = () => reserveBatch(ns, target, id, landing, plan, hosts, cfg, reservations, running, foreign);
+	let result = reserve();
+	if (!result && cfg.backgroundPrep?.active && cancelBackgroundPrep(ns, cfg.backgroundPrep)) result = reserve();
+	return result;
+}
+
 function reserveBatch(
 	ns,
 	target,
@@ -4217,11 +4254,8 @@ function baseHostCapacity(
 	running,
 	foreignUsedByHost = null
 ) {
-	const ownRunning =
-		runningRamForHost(
-			running,
-			host.name
-		);
+	const prepRam = backgroundPrepRam(cfg.backgroundPrep, host.name);
+	const ownRunning = runningRamForHost(running, host.name) + prepRam;
 
 	const staticUsed =
 		foreignUsedByHost &&
@@ -4251,7 +4285,8 @@ function baseHostCapacity(
 		0,
 		host.maxRam -
 		reserve -
-		staticUsed
+		staticUsed -
+		prepRam
 	);
 }
 
@@ -4393,7 +4428,8 @@ function refreshOneForeignUsage(
 	hosts,
 	running,
 	foreignUsedByHost,
-	cursor
+	cursor,
+	backgroundPrep = null
 ) {
 	if (!hosts.length) {
 		return 0;
@@ -4407,11 +4443,7 @@ function refreshOneForeignUsage(
 	const host =
 		hosts[index];
 
-	const own =
-		runningRamForHost(
-			running,
-			host.name
-		);
+	const own = runningRamForHost(running, host.name) + backgroundPrepRam(backgroundPrep, host.name);
 
 	const actual =
 		ns.getServerUsedRam(
@@ -4926,10 +4958,13 @@ function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runnin
 			settleChunk(batch, chunk, { type: "skip", finishedAt: Date.now() }, stats);
 			continue;
 		}
-		const pid = ns.exec(chunk.script, chunk.host, chunk.threads,
+		const launch = () => ns.exec(chunk.script, chunk.host, chunk.threads,
 			target, chunk.landAt, chunk.batchId, cfg.port, chunk.phase, chunk.chunkId,
 			Math.max(20, cfg.gap), cfg.controlPort, chunk.duration, chunk.launchAt,
 			chunk.stealBudget ?? 0, chunk.threads);
+		let pid = launch();
+		if (!pid && cfg.backgroundPrep?.active?.host === chunk.host &&
+			cancelBackgroundPrep(ns, cfg.backgroundPrep, "active launch needs RAM")) pid = launch();
 		if (!pid) {
 			recordPhaseMiss(stats, chunk.phase, true);
 			settleChunk(batch, chunk, { type: "miss", finishedAt: Date.now() }, stats);
@@ -5337,7 +5372,7 @@ function renderDashboard(
 				runningRamForHost(
 					running,
 					host.name
-				),
+				) + backgroundPrepRam(cfg.backgroundPrep, host.name),
 			0
 		);
 
@@ -5540,6 +5575,15 @@ function renderDashboard(
 	ns.print(
 		`Core bonus  ${runtime.averageCoreBonus.toFixed(3)}x avg`
 	);
+
+	ns.print(`Background  ${backgroundPrepSummary(cfg.backgroundPrep)}`);
+	if (cfg.backgroundPrep?.candidate) {
+		const candidate = cfg.backgroundPrep.candidate;
+		ns.print(`Prep model  ${cash(candidate.potential)}/s ${candidate.upperBound ? "upper bound" : "potential estimate"}` +
+			` | horizon ${cfg.backgroundPrep.horizon / 60_000}m | initial prep est ${formatTime(candidate.prepMs)}`);
+	}
+	ns.print(`Prep RAM    ${formatRam(backgroundPrepRam(cfg.backgroundPrep))} held` +
+		` | preemptions ${cfg.backgroundPrep?.preemptions ?? 0} | failures ${cfg.backgroundPrep?.failures ?? 0}`);
 
 	ns.print("");
 

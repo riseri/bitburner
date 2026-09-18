@@ -61,6 +61,9 @@ class Port {
 }
 
 function loadScript(file, clock, extra = {}) {
+    if (file === 'daemon.js' && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
+        extra = { ...loadScript('lib/background-prep.js', clock), ...extra };
+    }
     const source = fs.readFileSync(path.join(root, 'src', file), 'utf8')
         .replace(/^import .*;\s*$/gm, '')
         .replace(/\bexport (?=(?:async )?function|const )/g, '');

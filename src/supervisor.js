@@ -14,6 +14,7 @@ const PROGRESSION_ACTION_RETRY_MS = 30_000;
 /** @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([
+		["background-prep", true],
 		["contracts", true],
 		["progression", true],
 		["progression-actions", false],
@@ -51,7 +52,7 @@ export async function main(ns) {
 		await runOnce(ns, CONTRACT_SELFTEST);
 	}
 
-	ensureRunning(ns, DAEMON);
+	ensureRunning(ns, DAEMON, asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false]);
 
 	let lastProgressionActionAt = 0;
 
@@ -111,9 +112,9 @@ export async function main(ns) {
 	}
 }
 
-function ensureRunning(ns, script) {
+function ensureRunning(ns, script, args = []) {
 	if (isRunning(ns, script)) return;
-	const pid = ns.run(script, 1);
+	const pid = ns.run(script, 1, ...args);
 	if (!pid) ns.print(`WARN: supervisor could not start ${script}`);
 }
 
@@ -292,6 +293,8 @@ function renderMoneyEngine(ns, daemon) {
 	if (daemon.security) ns.print(`  Security         ${daemon.security}`);
 	if (daemon.steal) ns.print(`  Batch strategy   ${humanSteal(daemon.steal)}`);
 	if (daemon.batchRate) ns.print(`  Batch pace       ${humanBatchRate(daemon.batchRate)}`);
+	if (daemon.background) ns.print(`  Background prep  ${daemon.background}`);
+	if (daemon.prepRam) ns.print(`  Prep capacity    ${daemon.prepRam}`);
 	ns.print("");
 }
 
@@ -495,6 +498,8 @@ function readDaemonDashboard(ns) {
 		runTotal: field(logs, "Run total"),
 		model: field(logs, "Model"),
 		steal: field(logs, "Steal"),
+		background: field(logs, "Background"),
+		prepRam: field(logs, "Prep RAM"),
 		batchRate: field(logs, "Batch rate"),
 		pipeline: field(logs, "Pipeline"),
 		batches: field(logs, "Batches"),
