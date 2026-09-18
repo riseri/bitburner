@@ -47,7 +47,9 @@ export async function main(ns) {
 	const state = createState(cfg);
 	let lastCloudAction = 0;
 	let lastRootPass = 0;
-	let networkState = emptyNetwork();
+	// A heartbeat is not a usable network snapshot. Publish null until discovery
+	// completes so the JIT reader retains its previous fleet during startup.
+	let networkState = null;
 	let lastHeartbeatAt = 0;
 	const pulse = (force = false) => {
 		if (!force && Date.now() - lastHeartbeatAt < 5_000) return;
@@ -76,7 +78,7 @@ export async function main(ns) {
 			try {
 				const actionsBefore = state.purchases + state.upgrades;
 				await manageOneCloudAction(ns, cfg, state);
-				if (state.purchases + state.upgrades > actionsBefore) {
+				if (networkState && state.purchases + state.upgrades > actionsBefore) {
 					networkState = refreshCloudHostsInNetwork(ns, networkState);
 				}
 			} catch (error) {
@@ -95,16 +97,6 @@ export async function main(ns) {
 
 		await ns.sleep(1_000);
 	}
-}
-
-function emptyNetwork() {
-	return {
-		servers: [],
-		hosts: [],
-		parents: {},
-		rooted: 0,
-		updatedAt: 0,
-	};
 }
 
 function createState(cfg) {
