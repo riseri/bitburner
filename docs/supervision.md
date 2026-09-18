@@ -4,7 +4,9 @@ The supervisor owns service lifecycle records, not the JIT scheduler. It adopts
 one existing process per service on `home`, retaining its actual arguments and
 thread count. An existing daemon is not replaced just to apply new CLI flags.
 Duplicate services are shown as `CONFLICT`; they are not broadly killed.
-Only one supervisor may run on `home`.
+Only one supervisor may run on `home`. Newly launched dependents inherit the
+adopted fleet status port. Conflicting existing daemon/fleet port settings fail
+startup rather than silently rewriting either process.
 
 ## Service lifecycle
 
@@ -22,8 +24,8 @@ recovery remain visible after the dashboard clears its log.
 
 The daemon is checked for process existence only. Preparation, recovery and slow
 log refreshes are not heartbeat failures. Its bootstrap now leaves an existing
-fleet manager and its budget flags alone. This is the only daemon code change;
-allocation, timing, event consumption and background preparation are unchanged.
+fleet manager and its budget flags alone. Its startup port validation also reserves the new action channel.
+Allocation, timing, event consumption and background preparation are unchanged.
 
 Fleet discovery and contract scanning publish lightweight heartbeats while yielding
 through their work, not just between passes. This is cooperative liveness reporting;

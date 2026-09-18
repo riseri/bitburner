@@ -61,18 +61,7 @@ export async function main(ns) {
 
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
 	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
-	const existingDaemon = ns.ps(HOME).find(process => process.filename === DAEMON);
-	const managedDaemonArgs = existingDaemon?.args ?? daemonArgs;
-	const fleetArgs = ["--port", readArgument(managedDaemonArgs, "--fleet-port", PORTS.FLEET_STATUS),
-		"--cloud", readArgument(managedDaemonArgs, "--cloud", true),
-		"--cloud-reserve", readArgument(managedDaemonArgs, "--cloud-reserve", 0.10),
-		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", 32),
-		"--cloud-prefix", readArgument(managedDaemonArgs, "--cloud-prefix", "cloud")];
-	// Start/adopt fleet first. The daemon bootstrap now leaves an existing fleet alone.
-	const services = [createService(FLEET, fleetArgs, "fleet-status", PORTS.FLEET_STATUS),
-		createService(DAEMON, daemonArgs)];
-	if (cfg.contracts) services.push(createService(CONTRACTS, [], "contract-status", PORTS.CONTRACT_STATUS));
-	if (cfg.progression) services.push(createService(PROGRESSION, [], "progression-status", PORTS.PROGRESSION_STATUS));
+	const services = createManagedServices(ns, cfg, daemonArgs);
 	const actions = createActionState();
 
 	while (true) {
@@ -87,6 +76,35 @@ export async function main(ns) {
 		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus });
 		await ns.sleep(cfg.interval);
 	}
+}
+
+// Resolve dependencies once at startup; adopting a process never rewrites its arguments.
+function createManagedServices(ns, cfg, daemonArgs) {
+	const processes = ns.ps(HOME);
+	const existingDaemon = processes.find(process => process.filename === DAEMON);
+	const existingFleet = processes.find(process => process.filename === FLEET);
+	const managedDaemonArgs = existingDaemon?.args ?? daemonArgs;
+	const fleetArgs = ["--port", readArgument(managedDaemonArgs, "--fleet-port", PORTS.FLEET_STATUS),
+		"--cloud", readArgument(managedDaemonArgs, "--cloud", true),
+		"--cloud-reserve", readArgument(managedDaemonArgs, "--cloud-reserve", 0.10),
+		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", 32),
+		"--cloud-prefix", readArgument(managedDaemonArgs, "--cloud-prefix", "cloud")];
+	const fleetPort = Number(readArgument(existingFleet?.args ?? fleetArgs, "--port", PORTS.FLEET_STATUS));
+	const reserved = [PORTS.WORKER_EVENTS, PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS,
+		PORTS.PROGRESSION_STATUS, PORTS.JIT_CONTROL, PORTS.PROGRESSION_ACTION];
+	if (!Number.isSafeInteger(fleetPort) || fleetPort <= 0 || reserved.includes(fleetPort)) {
+		throw new Error("Fleet status port must not collide with a reserved automation channel");
+	}
+	if (existingDaemon && Number(readArgument(existingDaemon.args, "--fleet-port", PORTS.FLEET_STATUS)) !== fleetPort) {
+		throw new Error("Existing daemon and fleet use different fleet ports; align their arguments explicitly");
+	}
+	// New dependents follow the adopted fleet; existing dependents retain their own args.
+	const launchDaemonArgs = existingDaemon ? daemonArgs : [...daemonArgs, "--fleet-port", fleetPort];
+	const services = [createService(FLEET, fleetArgs, "fleet-status", fleetPort),
+		createService(DAEMON, launchDaemonArgs)];
+	if (cfg.contracts) services.push(createService(CONTRACTS, ["--fleet-port", fleetPort], "contract-status", PORTS.CONTRACT_STATUS));
+	if (cfg.progression) services.push(createService(PROGRESSION, ["--fleet-port", fleetPort], "progression-status", PORTS.PROGRESSION_STATUS));
+	return services;
 }
 
 function isRunning(ns, script) {

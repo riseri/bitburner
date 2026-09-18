@@ -136,3 +136,30 @@ test('custom service heartbeat interval is respected independently of scan caden
     f.port.write({type:'fleet-status',producerPid:f.service.pid,generatedAt:f.clock.now,heartbeatIntervalMs:30000});
     f.tick(60000);assert.equal(f.service.state,'RUNNING');assert.equal(f.killed.length,0);
 });
+
+
+test('new dependent managers and daemon follow an adopted custom fleet port', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    const services=api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',12,'--cloud',false]}]},
+        {contracts:true,progression:true},['--background-prep',false]);
+    for(const name of ['daemon.js','contract-manager.js','progression-manager.js']) {
+        const args=services.find(s=>s.name===name).args;
+        assert.equal(args[args.indexOf('--fleet-port')+1],12,name);
+    }
+});
+
+test('an inconsistent existing daemon/fleet pair fails before starting dependents', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    assert.throws(()=>api.createManagedServices({ps:()=>[
+        {filename:'fleet-manager.js',pid:9,args:['--port',12]},
+        {filename:'daemon.js',pid:10,args:[]},
+    ]},{contracts:true,progression:true},[]),/different fleet ports/);
+});
+
+test('action channel is reserved from fleet and daemon configuration', () => {
+    const clock=new Clock(),api=loadScript('supervisor.js',clock),daemon=loadScript('daemon.js',clock);
+    assert.throws(()=>api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',14]}]}, {}, []),/reserved/);
+    for(const config of [{port:14,fleetPort:19,controlPort:15},{port:20,fleetPort:14,controlPort:15},{port:20,fleetPort:19,controlPort:14}]) {
+        assert.throws(()=>daemon.validateDaemonPorts(config),/reserved/);
+    }
+});
