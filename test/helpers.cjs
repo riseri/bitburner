@@ -67,6 +67,13 @@ function loadScript(file, clock, extra = {}) {
     if (file === 'daemon.js' && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
         extra = { ...loadScript('lib/background-prep.js', clock), ...extra };
     }
+    if (['supervisor.js', 'progression-manager.js', 'progression-purchase.js',
+        'progression-backdoor.js', 'lib/progression-dispatch.js'].includes(file)) {
+        extra = { ...loadScript('lib/progression-protocol.js', clock), ...extra };
+    }
+    if (file === 'supervisor.js') {
+        extra = { ...loadScript('lib/service-lifecycle.js', clock), ...loadScript('lib/progression-dispatch.js', clock), ...extra };
+    }
     const source = fs.readFileSync(path.join(root, 'src', file), 'utf8')
         .replace(/^import .*;\s*$/gm, '')
         .replace(/\bexport (?=(?:async )?function|const )/g, '');
@@ -74,7 +81,7 @@ function loadScript(file, clock, extra = {}) {
     const sandbox = {
         console, Date: class extends Date { static now() { return clock.now; } },
         setTimeout: (fn, ms) => clock.timer(ms, fn),
-        PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15 },
+        PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15, PROGRESSION_ACTION: 14 },
         ...extra,
     };
     vm.createContext(sandbox);

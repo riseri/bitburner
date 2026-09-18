@@ -1,5 +1,7 @@
 import { dashboardSection, dashboardRow, dashboardTargets } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
+import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
+import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
 
 const HOME = "home";
 const DAEMON = "daemon.js";
@@ -9,8 +11,6 @@ const PROGRESSION = "progression-manager.js";
 const PROGRESSION_PURCHASE = "progression-purchase.js";
 const PROGRESSION_BACKDOOR = "progression-backdoor.js";
 const CONTRACT_SELFTEST = "contract-selftest.js";
-const HEARTBEAT_STALE_MS = 15_000;
-const PROGRESSION_ACTION_RETRY_MS = 30_000;
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -26,6 +26,10 @@ export async function main(ns) {
 	]);
 
 	ns.disableLog("ALL");
+	if (ns.getHostname() !== HOME || ns.ps(HOME).some(process => process.filename === "supervisor.js" && process.pid !== ns.pid)) {
+		ns.tprint("ERROR: run one supervisor on home; refusing duplicate ownership");
+		return;
+	}
 
 	const cfg = {
 		dashboardDetails: asBoolean(flags["dashboard-details"]),
@@ -57,77 +61,32 @@ export async function main(ns) {
 
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
 	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
-	ensureRunning(ns, DAEMON, daemonArgs);
-
-	let lastProgressionActionAt = 0;
+	const existingDaemon = ns.ps(HOME).find(process => process.filename === DAEMON);
+	const managedDaemonArgs = existingDaemon?.args ?? daemonArgs;
+	const fleetArgs = ["--port", readArgument(managedDaemonArgs, "--fleet-port", PORTS.FLEET_STATUS),
+		"--cloud", readArgument(managedDaemonArgs, "--cloud", true),
+		"--cloud-reserve", readArgument(managedDaemonArgs, "--cloud-reserve", 0.10),
+		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", 32),
+		"--cloud-prefix", readArgument(managedDaemonArgs, "--cloud-prefix", "cloud")];
+	// Start/adopt fleet first. The daemon bootstrap now leaves an existing fleet alone.
+	const services = [createService(FLEET, fleetArgs, "fleet-status", PORTS.FLEET_STATUS),
+		createService(DAEMON, daemonArgs)];
+	if (cfg.contracts) services.push(createService(CONTRACTS, [], "contract-status", PORTS.CONTRACT_STATUS));
+	if (cfg.progression) services.push(createService(PROGRESSION, [], "progression-status", PORTS.PROGRESSION_STATUS));
+	const actions = createActionState();
 
 	while (true) {
-		// daemon.js still owns initial fleet-manager startup. Supervisor repairs
-		// background managers if one exits or stops publishing heartbeats.
-		ensureRunning(ns, FLEET);
-		if (cfg.contracts) ensureRunning(ns, CONTRACTS);
-		if (cfg.progression) ensureRunning(ns, PROGRESSION);
-
-		const fleetStatus = ns.getPortHandle(PORTS.FLEET_STATUS).peek();
-		const contractStatus = cfg.contracts
-			? ns.getPortHandle(PORTS.CONTRACT_STATUS).peek()
-			: null;
-		const progressionStatus = cfg.progression
-			? ns.getPortHandle(PORTS.PROGRESSION_STATUS).peek()
-			: null;
-
-		if (cfg.progression && cfg.progressionActions) {
-			lastProgressionActionAt = maybeStartProgressionAction(
-				ns,
-				progressionStatus,
-				cfg,
-				lastProgressionActionAt
-			);
-		}
-
-		const fleetHealth = heartbeatHealth(fleetStatus, "fleet-status");
-		const contractHealth = cfg.contracts
-			? heartbeatHealth(contractStatus, "contract-status")
-			: disabledHealth();
-		const progressionHealth = cfg.progression
-			? heartbeatHealth(progressionStatus, "progression-status")
-			: disabledHealth();
-
-		if (!fleetHealth.healthy && isRunning(ns, FLEET)) {
-			restart(ns, FLEET, `stale fleet heartbeat (${formatAge(fleetHealth.age)})`);
-		}
-		if (cfg.contracts && !contractHealth.healthy && isRunning(ns, CONTRACTS)) {
-			restart(ns, CONTRACTS, `stale contract heartbeat (${formatAge(contractHealth.age)})`);
-		}
-		if (cfg.progression && !progressionHealth.healthy && isRunning(ns, PROGRESSION)) {
-			restart(ns, PROGRESSION, `stale progression heartbeat (${formatAge(progressionHealth.age)})`);
-		}
-
-		render(ns, {
-			cfg,
-			fleetStatus,
-			contractStatus,
-			progressionStatus,
-			fleetHealth,
-			contractHealth,
-			progressionHealth,
-		});
-
+		for (const service of services) tickService(ns, service);
+		const snapshot = name => {
+			const service = services.find(item => item.name === name);
+			return service?.port ? ns.getPortHandle(service.port).peek() : null;
+		};
+		cfg.fleetStatusPort = services.find(service => service.name === FLEET).port;
+		const fleetStatus = snapshot(FLEET), contractStatus = snapshot(CONTRACTS), progressionStatus = snapshot(PROGRESSION);
+		tickProgressionActions(ns, actions, progressionStatus, cfg);
+		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus });
 		await ns.sleep(cfg.interval);
 	}
-}
-
-function ensureRunning(ns, script, args = []) {
-	if (isRunning(ns, script)) return;
-	const pid = ns.run(script, 1, ...args);
-	if (!pid) ns.print(`WARN: supervisor could not start ${script}`);
-}
-
-function restart(ns, script, reason) {
-	ns.scriptKill(script, HOME);
-	const pid = ns.run(script, 1);
-	// Keep recovery chatter in the supervisor log. Do not spam the terminal.
-	ns.print(`${script} restarted: ${reason}${pid ? ` (pid ${pid})` : " (start failed)"}`);
 }
 
 function isRunning(ns, script) {
@@ -138,84 +97,18 @@ function findProcess(ns, script) {
 	return ns.ps(HOME).find(process => process.filename === script) ?? null;
 }
 
+// One-shot startup only; long-running services use tickService and its history.
+function ensureRunning(ns, script, args = []) {
+	return findProcess(ns, script)?.pid ?? ns.run(script, 1, ...args);
+}
+
 async function runOnce(ns, script) {
-	const pid = ns.run(script, 1);
-	if (!pid) {
-		ns.print(`WARN: unable to start ${script}`);
-		return;
-	}
-	while (ns.isRunning(pid, HOME)) await ns.sleep(100);
+	const pid = ensureRunning(ns, script);
+	if (!pid) { ns.print(`WARN: unable to start ${script}`); return; }
+	while (ns.isRunning(pid)) await ns.sleep(100);
 }
 
-function maybeStartProgressionAction(ns, progression, cfg, lastAttempt) {
-	if (
-		!progression ||
-		typeof progression !== "object" ||
-		progression.type !== "progression-status" ||
-		progression.error ||
-		!progression.singularity?.available ||
-		Date.now() - lastAttempt < PROGRESSION_ACTION_RETRY_MS ||
-		progressionActorProcess(ns)
-	) {
-		return lastAttempt;
-	}
-
-	const kind = progression.nextObjective?.kind;
-	const script =
-		kind === "tor" || kind === "program"
-			? PROGRESSION_PURCHASE
-			: kind === "backdoor"
-				? PROGRESSION_BACKDOOR
-				: "";
-
-	if (!script) return lastAttempt;
-
-	const args =
-		script === PROGRESSION_PURCHASE
-			? [
-				"--status-port",
-				PORTS.PROGRESSION_STATUS,
-				"--cash-reserve",
-				cfg.progressionCashReserve,
-			]
-			: [
-				"--status-port",
-				PORTS.PROGRESSION_STATUS,
-				"--fleet-port",
-				PORTS.FLEET_STATUS,
-			];
-
-	// One-shot actors only. No daemon hydra, no heartbeat sequel, no cinematic universe.
-	const pid = ns.run(script, 1, ...args);
-	if (!pid) ns.print(`WARN: unable to start ${script}`);
-	return Date.now();
-}
-
-function progressionActorProcess(ns) {
-	return ns
-		.ps(HOME)
-		.find(
-			process =>
-				process.filename === PROGRESSION_PURCHASE ||
-				process.filename === PROGRESSION_BACKDOOR
-		) ?? null;
-}
-
-function disabledHealth() {
-	return { healthy: true, age: 0, label: "disabled" };
-}
-
-function heartbeatHealth(value, expectedType) {
-	if (!value || typeof value !== "object" || value.type !== expectedType) {
-		return { healthy: false, age: Infinity, label: "missing" };
-	}
-	const age = Date.now() - Number(value.generatedAt || 0);
-	return {
-		healthy: Number.isFinite(age) && age <= HEARTBEAT_STALE_MS,
-		age,
-		label: age <= HEARTBEAT_STALE_MS ? "healthy" : "stale",
-	};
-}
+function progressionActorProcess(ns) { return actorProcesses(ns)[0] ?? null; }
 
 function render(ns, state) {
 	const { cfg, fleetStatus, contractStatus, progressionStatus, fleetHealth, contractHealth, progressionHealth } = state;
@@ -243,12 +136,21 @@ function render(ns, state) {
 	}
 	renderFleet(ns, fleet, cfg.dashboardDetails, daemon);
 	renderContracts(ns, contracts, cfg);
-	renderProgression(ns, progression, cfg);
+	renderProgression(ns, progression, cfg, state.actions);
 	dashboardSection(ns, "Services");
-	dashboardRow(ns, "Money engine", processStatus(ns, DAEMON));
-	dashboardRow(ns, "Managers", `Fleet: ${processHealth(ns, FLEET, fleetHealth)} | ` +
-		`Contracts: ${cfg.contracts ? processHealth(ns, CONTRACTS, contractHealth) : "Disabled"} | ` +
-		`Progression: ${cfg.progression ? processHealth(ns, PROGRESSION, progressionHealth) : "Disabled"}`);
+	if (state.services) {
+		for (const service of state.services) {
+			dashboardRow(ns, service.name.replace("-manager.js", "").replace(".js", ""),
+				`${serviceLabel(service)} | ${service.restarts} restarts`);
+		}
+		const last = [...state.services].filter(service => service.lastEvent).sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
+		if (last) dashboardRow(ns, "Last recovery", `${last.name}: ${last.lastEvent}`);
+	} else {
+		dashboardRow(ns, "Money engine", processStatus(ns, DAEMON));
+		dashboardRow(ns, "Managers", `Fleet: ${processHealth(ns, FLEET, fleetHealth)} | ` +
+			`Contracts: ${cfg.contracts ? processHealth(ns, CONTRACTS, contractHealth) : "Disabled"} | ` +
+			`Progression: ${cfg.progression ? processHealth(ns, PROGRESSION, progressionHealth) : "Disabled"}`);
+	}
 	if (cfg.dashboardDetails && daemon) renderTargetAnalysis(ns, daemon.targets);
 	if (!cfg.dashboardDetails) ns.print("  More diagnostics: --dashboard-details true");
 }
@@ -319,9 +221,15 @@ function renderContracts(ns, contracts, cfg) {
 	if (cfg.dashboardDetails && contracts.lastAction) row("Last action", humanContractAction(contracts.lastAction));
 }
 
-function renderProgression(ns, progression, cfg) {
+function renderProgression(ns, progression, cfg, actions = null) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Progression");
+	if (actions?.current) row("Action", `${actions.current.state.toUpperCase()}: ${actions.current.reason}`);
+	if (actions?.lastResult) {
+		const result = actions.lastResult;
+		row("Last result", `${result.request.target}: ${result.state} / ${result.reason}`);
+		if (result.restoration && !["restored", "not-needed"].includes(result.restoration)) row("Connection", result.restoration);
+	}
 	if (!cfg.progression) { row("Status", "Disabled"); return; }
 	if (!progression) { row("Status", "Waiting for progression snapshot"); return; }
 	if (progression.error) { row("Warning", progression.error); return; }
@@ -367,7 +275,9 @@ function readDaemonDashboard(ns) {
 	const process = findProcess(ns, DAEMON);
 	if (!process) return null;
 
-	const logs = ns.getScriptLogs(process.pid).map(String);
+	let logs;
+	try { logs = ns.getScriptLogs(process.pid).map(String); }
+	catch { return null; }
 	if (!logs.length) return null;
 
 	const prepHeader = findLog(logs, "JIT DAEMON :: PREP ::");
@@ -488,8 +398,8 @@ function processStatus(ns, script) {
 
 function processHealth(ns, script, health) {
 	if (!isRunning(ns, script)) return "DOWN";
-	if (health.healthy) return "Healthy";
-	return health.label === "missing" ? "Starting" : `Stale (${formatAge(health.age)})`;
+	if (health?.healthy) return "Healthy";
+	return health?.label === "missing" ? "Starting" : `Stale (${formatAge(health?.age)})`;
 }
 
 function formatSourceFiles(sourceFiles) {

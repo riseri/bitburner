@@ -1,133 +1,70 @@
 import { PORTS } from "lib/ports.js";
-
-const HOME = "home";
+import { claimAction, publishAction, validateRequest, freshStatus, routeBetween, resetEpoch } from "lib/progression-protocol.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
-	const flags = ns.flags([
-		["status-port", PORTS.PROGRESSION_STATUS],
-		["fleet-port", PORTS.FLEET_STATUS],
-	]);
-
 	ns.disableLog("ALL");
-
-	const status = ns.getPortHandle(Number(flags["status-port"])).peek();
-	const fleet = ns.getPortHandle(Number(flags["fleet-port"])).peek();
-
-	if (
-		!status ||
-		typeof status !== "object" ||
-		status.type !== "progression-status" ||
-		!status.singularity?.available
-	) {
-		return;
-	}
-
-	const objective = status.nextObjective;
-	if (objective?.kind !== "backdoor") return;
-
-	if (ns.singularity.isBusy()) {
-		// The player is doing something. We are not the main character.
-		ns.print("Player is busy; leaving the backdoor objective alone");
-		return;
-	}
-
-	const target = String(objective.host ?? "");
-	const parents =
-		fleet?.type === "fleet-status" &&
-		fleet.network?.parents &&
-		typeof fleet.network.parents === "object"
-			? fleet.network.parents
-			: {};
-
-	if (!target || !ns.serverExists(target)) return;
-
-	const current = String(ns.singularity.getCurrentServer());
-	const outbound = routeBetween(parents, current, target);
-	const restore = routeBetween(parents, target, current);
-
-	if (!outbound.length || !restore.length) {
-		ns.print(`No safe route available from ${current} to ${target}; refusing to teleport by vibes`);
-		return;
-	}
-
-	// We touch the player's terminal session, so put the furniture back exactly where we found it.
-	let reachedTarget = false;
+	const request = claimAction(ns, ["backdoor"]);
+	if (!request) return;
+	let original = "", lastReached = "", parents = {};
+	let outcome = { state: "failed", reason: "backdoor-not-confirmed" };
+	let restoration = "not-needed";
 	try {
-		if (!connectRoute(ns, outbound)) {
-			ns.print(`Unable to reach ${target}; aborting backdoor action`);
-			return;
-		}
-
-		reachedTarget = true;
-
-		if (ns.singularity.isBusy()) {
-			ns.print("Player became busy before backdoor install; aborting");
-			return;
-		}
-
-		await ns.singularity.installBackdoor();
-		ns.print(`Installed backdoor on ${target}`);
-	} finally {
-		if (reachedTarget) {
-			const afterAction = String(ns.singularity.getCurrentServer());
-
-			if (afterAction !== target) {
-				// Human touched the wheel. Their terminal session wins, obviously.
-				ns.print(`Connection moved to ${afterAction}; skipping automatic restore`);
-			} else if (!connectRoute(ns, restore)) {
-				// If this ever fires, the network tree changed mid-action. Extremely normal browser game behavior.
-				ns.print(`WARN: could not restore previous connection to ${current}`);
+		const error = backdoorBlocker(ns, request);
+		if (error) { outcome = { state: error === "already-installed" ? "succeeded" : "blocked", reason: error }; return; }
+		const fleet = ns.getPortHandle((request.fleetPort ?? PORTS.FLEET_STATUS)).peek();
+		if (!freshStatus(fleet, "fleet-status")) { outcome = { state: "blocked", reason: "stale-network" }; return; }
+		parents = fleet.network?.parents ?? {};
+		original = lastReached = ns.singularity.getCurrentServer();
+		const route = routeBetween(parents, original, request.target);
+		if (!route.length) { outcome = { state: "blocked", reason: "invalid-route" }; return; }
+		for (const host of route.slice(1)) {
+			if (ns.singularity.getCurrentServer() !== lastReached || ns.singularity.isBusy()) {
+				outcome = { state: "blocked", reason: "player-took-control" }; return;
 			}
+			if (!ns.singularity.connect(host)) { outcome = { state: "failed", reason: `connection-failed: ${host}` }; return; }
+			lastReached = host;
 		}
+		// Recheck after navigation, immediately before starting the costly action.
+		const beforeInstall = backdoorBlocker(ns, request);
+		if (beforeInstall) { outcome = { state: beforeInstall === "already-installed" ? "succeeded" : "blocked", reason: beforeInstall }; return; }
+		publishAction(ns, request, "running", `Installing backdoor on ${request.target}`);
+		await ns.singularity.installBackdoor();
+		// Expiry guards admission, not the duration of an already-started backdoor.
+		if (resetEpoch(ns.getResetInfo()) !== request.resetEpoch) {
+			outcome = { state: "failed", reason: "reset-changed" }; return;
+		}
+		const installed = ns.getServer(request.target).backdoorInstalled === true;
+		outcome = { state: installed ? "succeeded" : "failed", reason: installed ? `Installed ${request.target} backdoor` : "backdoor-not-confirmed" };
+	} catch (error) {
+		outcome = { state: "failed", reason: String(error?.message ?? error) };
+	} finally {
+		try {
+			if (original && lastReached !== original && resetEpoch(ns.getResetInfo()) === request.resetEpoch) {
+				// Human touched the wheel. Do not fight them for the aux cable.
+				if (ns.singularity.getCurrentServer() !== lastReached || ns.singularity.isBusy()) restoration = "manual-control-preserved";
+				else {
+					const route = routeBetween(parents, lastReached, original);
+					restoration = route.length ? "restored" : "restore-route-missing";
+					for (const host of route.slice(1)) {
+						if (!ns.singularity.connect(host)) { restoration = `restore-failed: ${host}`; break; }
+					}
+				}
+			}
+		} catch (error) { restoration = `restore-failed: ${String(error?.message ?? error)}`; }
+		publishAction(ns, request, outcome.state, outcome.reason, { restoration });
 	}
 }
 
-function connectRoute(ns, route) {
-	for (const host of route.slice(1)) {
-		if (!ns.singularity.connect(host)) return false;
-	}
-	return true;
-}
-
-function routeBetween(parents, from, to) {
-	if (from === to) return [from];
-
-	const fromPath = pathFromHome(parents, from);
-	const toPath = pathFromHome(parents, to);
-	if (!fromPath.length || !toPath.length) return [];
-
-	let common = 0;
-	while (
-		common < fromPath.length &&
-		common < toPath.length &&
-		fromPath[common] === toPath[common]
-	) {
-		common++;
-	}
-
-	if (common === 0) return [];
-
-	const lcaIndex = common - 1;
-	const up = fromPath.slice(lcaIndex).reverse();
-	const down = toPath.slice(lcaIndex + 1);
-	return [...up, ...down];
-}
-
-function pathFromHome(parents, target) {
-	if (target === HOME) return [HOME];
-
-	const reversed = [];
-	const seen = new Set();
-	let current = target;
-
-	while (current != null && !seen.has(current)) {
-		seen.add(current);
-		reversed.push(current);
-		if (current === HOME) break;
-		current = parents[current];
-	}
-
-	if (reversed[reversed.length - 1] !== HOME) return [];
-	return reversed.reverse();
+function backdoorBlocker(ns, request) {
+	const error = validateRequest(request, ns.getResetInfo());
+	if (error) return error;
+	if (!ns.serverExists(request.target)) return "server-missing";
+	const server = ns.getServer(request.target);
+	if (server.backdoorInstalled) return "already-installed";
+	if (!ns.hasRootAccess(request.target)) return "root-required";
+	if (!Number.isFinite(server.requiredHackingSkill)) return "invalid-server-state";
+	if (ns.getHackingLevel() < server.requiredHackingSkill) return "hacking-level-required";
+	if (ns.singularity.isBusy()) return "player-busy";
+	return "";
 }

@@ -48,6 +48,15 @@ export async function main(ns) {
 	let lastCloudAction = 0;
 	let lastRootPass = 0;
 	let networkState = emptyNetwork();
+	let lastHeartbeatAt = 0;
+	const pulse = (force = false) => {
+		if (!force && Date.now() - lastHeartbeatAt < 5_000) return;
+		lastHeartbeatAt = Date.now();
+		port.clear();
+		port.write({ type: "fleet-status", generatedAt: Date.now(), producerPid: ns.pid,
+			heartbeatIntervalMs: 5_000, cloud: { ...state }, network: networkState });
+	};
+	pulse(true);
 
 	while (true) {
 		const now = Date.now();
@@ -55,7 +64,7 @@ export async function main(ns) {
 		if (now - lastRootPass >= cfg.rootInterval) {
 			lastRootPass = now;
 			try {
-				networkState = await rootAndDeploy(ns);
+				networkState = await rootAndDeploy(ns, pulse);
 				state.error = "";
 			} catch (error) {
 				state.error = `root/deploy: ${String(error?.message ?? error)}`;
@@ -82,13 +91,7 @@ export async function main(ns) {
 		}
 
 		state.lastRun = Date.now();
-		port.clear();
-		port.write({
-			type: "fleet-status",
-			generatedAt: Date.now(),
-			cloud: { ...state },
-			network: networkState,
-		});
+		pulse(true);
 
 		await ns.sleep(1_000);
 	}
@@ -218,8 +221,8 @@ function largestAffordableUpgradeRam(ns, server, ramLimit, budget) {
 	return best;
 }
 
-async function rootAndDeploy(ns) {
-	const discovered = await scanNetwork(ns);
+async function rootAndDeploy(ns, pulse = () => {}) {
+	const discovered = await scanNetwork(ns, pulse);
 	const servers = discovered.servers;
 	const parents = discovered.parents;
 
@@ -234,6 +237,7 @@ async function rootAndDeploy(ns) {
 	let rooted = 0;
 
 	for (const host of servers) {
+		pulse();
 		tryRoot(ns, host);
 
 		if (!ns.hasRootAccess(host)) {
@@ -311,12 +315,13 @@ function refreshCloudHostsInNetwork(ns, network) {
 	};
 }
 
-async function scanNetwork(ns) {
+async function scanNetwork(ns, pulse = () => {}) {
 	const seen = new Set([HOME]);
 	const queue = [HOME];
 	const parents = { [HOME]: null };
 
 	for (let i = 0; i < queue.length; i++) {
+		pulse();
 		const host = queue[i];
 		for (const next of ns.scan(host)) {
 			if (seen.has(next)) continue;

@@ -1207,13 +1207,9 @@ function startFleetManager(
 		return;
 	}
 
-	// Exactly one background fleet manager should own rooting, deployment, and
-	// cloud purchasing. Restarting the daemon restarts the manager with the same
-	// configuration, but none of this work happens in the JIT launch loop.
-	ns.scriptKill(
-		FLEET_MANAGER,
-		HOME
-	);
+	// Adopt an existing fleet, including its cloud budget flags. A daemon restart
+	// must not reset another service's configuration or create a second owner.
+	if (ns.ps(HOME).some(process => process.filename === FLEET_MANAGER)) return;
 
 	const pid =
 		ns.run(
