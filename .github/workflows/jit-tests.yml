@@ -1,0 +1,33 @@
+name: JIT regression tests
+
+on:
+  push:
+    branches: [main, fix/jit-recovery-invariants]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run deterministic regression tests
+        if: ${{ hashFiles('test/*.test.cjs') != '' }}
+        run: node --test test/*.test.cjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jit-source
+          path: |
+            src/
+            package.json
+            package-lock.json
+            test/
+          retention-days: 1
