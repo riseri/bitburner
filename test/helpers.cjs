@@ -64,7 +64,7 @@ function loadScript(file, clock, extra = {}) {
     if (file === 'daemon.js' || file === 'supervisor.js') {
         extra = { ...loadScript('lib/dashboard.js', clock), ...extra };
     }
-    if (file === 'daemon.js' && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
+    if (['daemon.js', 'lib/target-pipelines.js'].includes(file) && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
         extra = { ...loadScript('lib/background-prep.js', clock), ...extra };
     }
     if (['supervisor.js', 'progression-manager.js', 'progression-purchase.js',
@@ -74,10 +74,11 @@ function loadScript(file, clock, extra = {}) {
     if (file === 'supervisor.js') {
         extra = { ...loadScript('lib/service-lifecycle.js', clock), ...loadScript('lib/progression-dispatch.js', clock), ...extra };
     }
+    if (file === 'daemon.js') extra = { ...loadScript('lib/target-pipelines.js', clock), ...extra };
     const source = fs.readFileSync(path.join(root, 'src', file), 'utf8')
         .replace(/^import .*;\s*$/gm, '')
         .replace(/\bexport (?=(?:async )?function|const )/g, '');
-    const names = [...source.matchAll(/^(?:async )?function (\w+)\s*\(/gm)].map(m => m[1]);
+    const names = [...source.matchAll(/^(?:async )?function\*? (\w+)\s*\(/gm)].map(m => m[1]);
     const sandbox = {
         console, Date: class extends Date { static now() { return clock.now; } },
         setTimeout: (fn, ms) => clock.timer(ms, fn),

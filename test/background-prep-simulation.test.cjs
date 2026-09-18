@@ -17,12 +17,12 @@ function assertHealthy(sim) {
 const profile = {
     target: 'phantasy', weakenTime: 78_000, levelPerMinute: 0,
     mainServer: { max: 600e6, money: 600e6, sec: 7, min: 7, required: 30 },
-    flags: { target: 'auto', 'dashboard-details': true },
+    flags: { target: 'auto', 'dashboard-details': true, 'max-targets': 1 },
     backgroundTargets: { 'the-hub': { max: 4.96e9, money: 198.4e6, sec: 24, min: 12, required: 300, weakenTime: 180_000 } },
 };
 
 test('18-minute concurrent prep reaches READY while active income matches prep-disabled baseline', { timeout: 120_000 }, async () => {
-    const baseline = new NetscriptSimulation({ ...profile, flags: { target: 'auto', 'background-prep': false, 'dashboard-details': true } });
+    const baseline = new NetscriptSimulation({ ...profile, flags: { target: 'auto', 'background-prep': false, 'dashboard-details': true, 'max-targets': 1 } });
     baseline.run(); await baseline.clock.runUntil(baseline.start + 18 * 60_000);
     const before = assertHealthy(baseline);
     const sim = new NetscriptSimulation(profile);
@@ -77,7 +77,7 @@ test('a dead prep worker retries in isolation and daemon exit cancels only its o
     assert.ok(owned);
     const jit = [...exit.processes.values()].filter(p => p.script.startsWith('jit-')).map(p => p.pid);
     exit.controller.active = false;
-    for (const handler of exit.exitHandlers) handler();
+    exit.exitHandlers[0](); // isolate the prep hook; owner shutdown is covered by multi-target tests
     assert.ok(!exit.processes.has(owned.pid));
     assert.ok(jit.every(pid => exit.processes.has(pid)), 'prep exit hook must not kill JIT workers');
 });

@@ -24,6 +24,7 @@ export function createBackgroundPrep(options = {}) {
 }
 
 export function backgroundPrepRam(state, host) {
+	if (Array.isArray(state)) return state.reduce((ram, item) => ram + backgroundPrepRam(item, host), 0);
 	return state?.active && (!host || state.active.host === host) ? state.active.ram : 0;
 }
 
@@ -79,7 +80,8 @@ function growthLog(security) {
 // At security 100 the API's chance is zero; label a chance=1 upper bound instead
 // of dividing by zero or permanently excluding a recoverable rich target.
 export function estimateBackgroundCandidate(ns, name, ctx) {
-	if (name === "home" || name === ctx.target || !ns.hasRootAccess(name) ||
+	if (name === "home" || name === ctx.target || ctx.activeTargets?.has(name) ||
+		(ctx.blockedTargets?.get(name) || 0) > Date.now() || !ns.hasRootAccess(name) ||
 		ns.getServerMaxMoney(name) <= 0) return null;
 	const required = ns.getServerRequiredHackingLevel(name);
 	if (required > ns.getHackingLevel()) return null;
@@ -154,12 +156,12 @@ function stepPrep(ns, ctx, now) {
 	const recentIncome = Number.isFinite(stats.lastHackAt) && now - stats.lastHackAt < 10_000;
 	const healthy = ctx.healthy && productive && recentIncome && now >= state.quietUntil;
 
-	if (!state.enabled || !healthy || state.target === ctx.target) {
+	if (!state.enabled || (!ctx.repair && (!healthy || state.target === ctx.target || ctx.activeTargets?.has(state.target)))) {
 		if (state.active) cancelBackgroundPrep(ns, state, "active pipeline has priority");
 		state.status = !state.enabled ? (state.error ? "ERROR" : "DISABLED") : !productive ? "WAITING" : "PAUSED";
 		state.reason = !state.enabled ? state.error || "disabled" : !productive ? "waiting for two productive minutes"
 			: "waiting for a healthy active pipeline";
-		if (state.target === ctx.target) {
+		if (!ctx.repair && (state.target === ctx.target || ctx.activeTargets?.has(state.target))) {
 			state.target = ""; state.candidate = null; state.scan = null; state.readyAt = 0;
 		}
 		return;

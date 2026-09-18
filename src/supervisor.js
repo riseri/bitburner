@@ -16,6 +16,7 @@ const CONTRACT_SELFTEST = "contract-selftest.js";
 export async function main(ns) {
 	const flags = ns.flags([
 		["background-prep", true],
+		["max-targets", 2],
 		["dashboard-details", false],
 		["contracts", true],
 		["progression", true],
@@ -59,7 +60,9 @@ export async function main(ns) {
 		await runOnce(ns, CONTRACT_SELFTEST);
 	}
 
+	if (![1, 2].includes(Number(flags["max-targets"]))) throw new Error("max-targets must be 1 or 2");
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
+	if (Number(flags["max-targets"]) !== 2) daemonArgs.push("--max-targets", Number(flags["max-targets"]));
 	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
 	const services = createManagedServices(ns, cfg, daemonArgs);
 	const actions = createActionState();
@@ -175,6 +178,22 @@ function render(ns, state) {
 
 function renderMoneyEngine(ns, daemon, details = false) {
 	const row = (label, value) => dashboardRow(ns, label, value);
+	if (daemon.mode === "multi") {
+		dashboardSection(ns, "Combined income");
+		row("Income 60s", `${cash(daemon.income60)}/s`);
+		row("Model", `${cash(daemon.model)}/s estimate`);
+		row("Run total", `${cash(daemon.earned)} earned`);
+		row("Target slots", `${daemon.pipelines.length}/${daemon.limit} | priority ${daemon.priority}`);
+		dashboardSection(ns, "Earning targets / independent recovery");
+		for (const p of daemon.pipelines) {
+			row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s`);
+			row("Pipe health", `${Object.values(p.misses).reduce((n, v) => n + v, 0)} misses | ${p.local} local | ${p.fallback} fallback`);
+			if (p.mode === "WARMUP") row("First hack", `ETA ${Math.ceil(p.eta / 1000)}s`);
+			if (details || !["LIVE", "WARMUP"].includes(p.mode)) row("Target note", p.note);
+		}
+		row("Admission", daemon.note);
+		return;
+	}
 	dashboardSection(ns, "Income");
 	if (daemon.mode === "reconfigure") {
 		row("Status", "RECONFIGURING");
@@ -292,6 +311,11 @@ function renderHealth(ns, daemon, details = false) {
 function readDaemonDashboard(ns) {
 	const process = findProcess(ns, DAEMON);
 	if (!process) return null;
+	const snapshot = typeof ns.getPortHandle === "function" ? ns.getPortHandle(PORTS.JIT_STATUS).peek() : null;
+	if (snapshot?.type === "jit-status" && snapshot.version === 2 && snapshot.pid === process.pid &&
+		Date.now() - snapshot.generatedAt <= 30_000 && snapshot.mode === "multi" && Array.isArray(snapshot.pipelines)) {
+		return snapshot;
+	}
 
 	let logs;
 	try { logs = ns.getScriptLogs(process.pid).map(String); }
