@@ -47,12 +47,14 @@ jobs:
           PY
       - name: Regression tests and concurrent simulations
         run: npm test
-      - name: Commit only tested changes to the review branch
+      - name: Commit only tested runtime changes to the review branch
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Workflow edits are published separately through the authorized repository connection.
+          git restore .github/workflows/jit-tests.yml
           git rm -f .github/background-prep.patch .github/workflows/apply-background-prep.yml
-          git add src test docs package.json .github/workflows/jit-tests.yml
+          git add src test docs package.json
           git diff --cached --check
           git commit -m 'Prepare one richer target while protecting active JIT income'
           git push origin HEAD:feature/protected-background-prep
