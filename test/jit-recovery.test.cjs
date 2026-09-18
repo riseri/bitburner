@@ -304,3 +304,190 @@ test('near-term target ranking does not prefer a long prep over a ready money ta
     assert.equal(ranked[0].name, 'ready');
     assert.equal(ranked.find(t => t.name === 'slow').score, 0);
 });
+
+// Presentation regressions live alongside the daemon tests so the existing CI
+// exercises the new log schema as well as its supervisor compatibility reader.
+function dashboardFixture() {
+    const clock = new Clock();
+    const api = loadScript('daemon.js', clock, {
+        // Rendering needs only the RAM readout, never the prep state machine.
+        backgroundPrepFiles: () => ['background-grow.js', 'background-weaken.js'],
+        backgroundPrepRam: (s, host) => s?.active && (!host || host === s.active.host) ? s.active.ram : 0,
+    });
+    const logs = [];
+    const ns = {
+        clearLog: () => { logs.length = 0; }, print: line => logs.push(String(line)),
+        getServerMoneyAvailable: () => 317_880_000, getServerMaxMoney: () => 600_000_000,
+        getServerSecurityLevel: () => 7.278, getServerMinSecurityLevel: () => 7,
+        getHackingLevel: () => 472, getServerUsedRam: () => 0,
+    };
+    const stats = api.createStats();
+    Object.assign(stats, { started: clock.now - 190_000, money: 65_450_000_000,
+        lastHackAt: clock.now - 100, completed: 252, scheduled: 434, profitable: 232,
+        income: [{ time: clock.now - 1000, money: 587_740_000 * 60 }],
+        batchTimes: Array.from({ length: 136 }, (_, i) => clock.now - i * 441) });
+    Object.assign(stats.pipeline, { completed: 252, driftCount: 100, driftSum: 384,
+        driftMax: 23.05, minSpacing: 86, loopLagMax: 18 });
+    const cfg = { requestedTarget: 'auto', gap: 100, lead: 600, homeReserve: 8,
+        cloud: { cashReserve: 0.1 }, backgroundPrep: { enabled: true, status: 'WEAKEN',
+            target: 'the-hub', reason: 'Repairing target security',
+            health: { money: 4_960_000_000, max: 4_960_000_000, sec: 100, min: 12 },
+            candidate: { potential: 3_120_000_000, upperBound: true, prepMs: 2_700_000 },
+            horizon: 7_200_000, active: { host: 'cloud-1', ram: 3080, finishAt: clock.now + 2_650_000 },
+            failures: 0, preemptions: 0 } };
+    const network = { rooted: 53, servers: Array(95).fill('server'),
+        hosts: [{ name: 'home', cores: 8, maxRam: 32_768 }, { name: 'cloud-1', cores: 1, maxRam: 26_214_400 }] };
+    const runtime = { capacity: 26_247_168, averageCoreBonus: 1.000017, plan: {
+        expected: 580_340_000, batchRate: 1000 / 441, period: 441, steal: 0.4973, chance: 0.903,
+        H: 147, estimatedG: 587, estimatedW1: 6, estimatedW2: 47, gEffective: 587,
+        times: { H: 19_500, G: 62_400, W: 78_000 } } };
+    const running = new Map(), batches = new Map();
+    api.trackRunning(running, 10, { host: 'cloud-1', ram: 204.83 * 1024 });
+    const queue = Array(182).fill({}), reservations = Array(740).fill({});
+    const targets = [
+        ['phantasy', 504_030_000, 580_340_000, 0],
+        ['max-hardware', 157_100_000, 252_300_000, 174_000],
+        ['harakiri-sushi', 97_100_000, 109_990_000, 34_800],
+        ['zer0', 91_110_000, 194_960_000, 252_000],
+        ['iron-gym', 90_410_000, 478_080_000, 384_000],
+    ].map(([name, score, steady, prepMs]) => ({ name, score, steady, prepMs }));
+    const cloud = { count: 25, limit: 25, totalRam: 26_214_400, minRam: 1_048_576, maxRam: 1_048_576,
+        ramLimit: 1_048_576, nextAction: 'fleet maxed', spent: 0, purchases: 0, upgrades: 0 };
+    const supervisor = loadScript('supervisor.js', clock);
+    function render(options = {}) {
+        api.renderDashboard(ns, 'phantasy', runtime, network, { ...cfg, ...options.cfg }, stats,
+            queue, running, reservations, batches, targets, cloud, options.drain || null,
+            options.recovery || null, new Map());
+        return logs.join('\n');
+    }
+    function read() {
+        return supervisor.readDaemonDashboard({ ps: () => [{ filename: 'daemon.js', pid: 1 }],
+            getScriptLogs: () => [...logs] });
+    }
+    return { clock, api, ns, logs, stats, cfg, network, runtime, running, targets, cloud, batches, supervisor, render, read };
+}
+
+test('dashboard puts actual income before target rankings and bounds the normal view', () => {
+    const f = dashboardFixture(), text = f.render();
+    assert.ok(text.indexOf('Income 60s') < text.indexOf('TARGETS / NEXT 10M'));
+    assert.match(text, /\$587\.74m\/s/);
+    assert.match(text, /2\.267\/s actual \| 2\.268\/s model/);
+    assert.match(text, /232 paid batches/);
+    assert.ok(f.logs.length <= 38, `normal view grew to ${f.logs.length} lines`);
+    assert.ok(f.logs.every(line => line.length <= 78));
+    assert.doesNotMatch(text, /\bNaN\b|\bInfinity\b|\bundefined\b/);
+    assert.doesNotMatch(text, /DETAILS \/ SESSION/);
+});
+
+test('dashboard retains current and session scopes without duplicating lifetime diagnostics by default', () => {
+    const f = dashboardFixture();
+    f.stats.misses.G = 999; f.stats.driftMax = 60.82; f.stats.restarts = 2;
+    const compact = f.render();
+    assert.doesNotMatch(compact, /G:999/);
+    assert.match(compact, /Pipe misses\s+H:0 W1:0 G:0 W2:0/);
+    assert.match(compact, /Restarts\s+2 session/);
+    const detailed = f.render({ cfg: { dashboardDetails: true } });
+    assert.match(detailed, /G:999/);
+    assert.match(detailed, /max 60\.82ms/);
+    assert.match(detailed, /gap 100ms \| period 441ms \| lead 600ms/);
+    assert.match(detailed, /required 20ms/);
+    assert.ok(f.logs.every(line => line.length <= 78));
+});
+
+test('dashboard recovery overrides historical LIVE and preserves a wrapped fault reason', () => {
+    const f = dashboardFixture();
+    const reason = 'G invocation rejected: the target security is above the planned minimum; waiting for remaining weaken work before retrying';
+    const text = f.render({ recovery: { deadline: f.clock.now + 4000, reason } });
+    assert.match(text, /State\s+RECOVERING/);
+    assert.match(text, /Hack status\s+PAUSED/);
+    assert.doesNotMatch(text, /Hack status\s+LIVE/);
+    assert.equal(f.read().reason, reason);
+    assert.ok(f.logs.every(line => line.length <= 78));
+    f.render({ drain: { reason } });
+    assert.match(f.read().hackStatus, /^DRAINING/);
+});
+
+test('dashboard warmup does not claim LIVE or stable timing before any completion', () => {
+    const f = dashboardFixture();
+    f.stats.lastHackAt = NaN; f.stats.pipeline.minSpacing = Infinity;
+    f.stats.pipeline.driftCount = 0; f.stats.pipeline.driftSum = 0; f.stats.pipeline.driftMax = 0;
+    f.batches.set('1', { phases: { H: { complete: false, skipped: false } }, landing: { H: f.clock.now + 78_000 } });
+    const text = f.render();
+    assert.match(text, /Hack status\s+ETA 1m 18s/);
+    assert.match(text, /spacing n\/a/);
+    assert.doesNotMatch(text, /\bLIVE\b|\bHealthy\b|\bInfinity\b|\bNaN\b/);
+});
+
+test('dashboard isolates background target health, estimates and RAM from active fields', () => {
+    const f = dashboardFixture(), text = f.render(), status = f.read();
+    assert.equal(status.target, 'phantasy');
+    assert.equal(status.state, 'RUNNING');
+    assert.equal(status.background, 'the-hub | WEAKEN | ETA 44m 10s');
+    assert.match(status.prepHealth, /security \+88\.000/);
+    assert.match(status.prepModel, /UPPER BOUND/);
+    assert.match(status.security, /^7\.278 \/ 7\.000/);
+    assert.match(status.ramOnline, /^207\.84 TB \/ 25\.03 PB/);
+    assert.match(text, /home 8 \(1\.438x\) \| fleet 1\.000x RAM-weighted/);
+    f.cfg.backgroundPrep = { enabled: false, status: 'DISABLED', reason: 'disabled' };
+    assert.match(f.render(), /Background\s+none \| DISABLED/);
+});
+
+test('dashboard supervisor parses old and new target tables without changing rate units', () => {
+    const f = dashboardFixture(); f.render();
+    const compact = f.read();
+    assert.equal(compact.income60, '$587.74m/s');
+    assert.equal(compact.targets.length, 4);
+    assert.equal(compact.targets[0].name, 'phantasy');
+    assert.equal(compact.targets[0].selected, true);
+    assert.equal(compact.targets[0].effective, '$504.03m/s');
+    assert.equal(compact.targets[1].prep, '2m 54s');
+    const legacy = f.supervisor.parseTargets(['> phantasy $504.03m/s steady:  $580.34m/s S:49.7% P:441ms prep:0ms']);
+    assert.equal(legacy[0].name, 'phantasy'); assert.equal(legacy[0].steady, '$580.34m/s');
+    assert.equal(legacy[0].prep, '0ms');
+});
+
+test('dashboard prep screen stays compact and preserves the full target name for the supervisor', () => {
+    const f = dashboardFixture();
+    f.api.renderPrep(f.ns, 'the-hub', f.network, f.cfg, 1, 'WEAKEN',
+        [{phase:'PREP-W', threads:14}], f.clock.now + 264_000, 0, 0, 0, 1, f.targets);
+    const status = f.read();
+    assert.equal(status.mode, 'prep'); assert.equal(status.target, 'the-hub');
+    assert.equal(status.stage, 'WEAKEN'); assert.match(status.wave, /4m 24s/);
+    assert.ok(f.logs.length <= 20);
+    assert.ok(f.logs.every(line => line.length <= 78));
+});
+
+test('dashboard helper wraps errors and caps table cells without invalid duration strings', () => {
+    const f = dashboardFixture(), ui = loadScript('lib/dashboard.js', f.clock);
+    f.logs.length = 0; ui.dashboardRow(f.ns, 'Reason', 'X'.repeat(250));
+    assert.ok(f.logs.every(line => line.length <= 78));
+    assert.equal(f.logs.join('').replace(/Reason| /g, ''), 'X'.repeat(250));
+    f.logs.length = 0;
+    ui.dashboardTargets(f.ns, [{name:'a'.repeat(100), effective:'$504.03m/s', steady:'$580.34m/s', prep:'ready'}]);
+    assert.ok(f.logs.every(line => line.length <= 78));
+    assert.equal(ui.dashboardTime(Infinity), 'n/a');
+    assert.equal(ui.dashboardTime(NaN), 'n/a');
+    assert.equal(ui.dashboardTime(3_900_000), '1h 05m');
+});
+
+test('dashboard rendering is read-only and supervisor overview consumes the new schema', () => {
+    const f = dashboardFixture();
+    const before = JSON.stringify({stats:f.stats, cfg:f.cfg, runtime:f.runtime, network:f.network});
+    f.render({cfg:{dashboardDetails:true}});
+    assert.equal(JSON.stringify({stats:f.stats, cfg:f.cfg, runtime:f.runtime, network:f.network}), before);
+    const daemonLogs = [...f.logs];
+    f.supervisor.render({...f.ns, ps:()=>[{filename:'daemon.js',pid:1}], getScriptLogs:()=>daemonLogs}, {
+        cfg:{contracts:false, progression:false, dashboardDetails:false},
+        fleetStatus:{type:'fleet-status', network:f.network, cloud:f.cloud},
+        fleetHealth:{healthy:true}, contractHealth:{healthy:true}, progressionHealth:{healthy:true},
+    });
+    assert.match(f.logs.join('\n'), /Income 60s\s+\$587\.74m\/s/);
+    assert.match(f.logs.join('\n'), /the-hub \| WEAKEN/);
+    assert.ok(f.logs.every(line=>line.length<=78));
+});
+
+test('dashboard phase counter parsing ignores the digits in W1 and W2 labels', () => {
+    const f = dashboardFixture();
+    assert.equal(f.supervisor.hasNonZeroCounters('H:0 W1:0 G:0 W2:0'), false);
+    assert.equal(f.supervisor.hasNonZeroCounters('H:0 W1:2 G:0 W2:0'), true);
+});

@@ -4,7 +4,7 @@ const HOME = "home";
 const HACK = "jit-hack.js";
 const GROW = "jit-grow.js";
 const WEAKEN = "jit-weaken.js";
-const WORKERS = [HACK, GROW, WEAKEN, "lib/jit-worker.js"];
+const WORKERS = [HACK, GROW, WEAKEN, "lib/jit-worker.js", "background-grow.js", "background-weaken.js"];
 
 /** @param {NS} ns */
 export async function main(ns) {

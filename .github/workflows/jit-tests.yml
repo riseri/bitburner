@@ -1,7 +1,7 @@
 name: JIT regression tests
 on:
   push:
-    branches: [main, fix/jit-recovery-invariants]
+    branches: [main, fix/jit-recovery-invariants, feature/protected-background-prep]
   pull_request:
     branches: [main]
 permissions:
@@ -18,6 +18,6 @@ jobs:
         with:
           node-version: '22'
       - name: Regression tests
-        run: node --test test/jit-recovery.test.cjs
+        run: node --test test/jit-recovery.test.cjs test/background-prep.test.cjs
       - name: Full daemon simulations
-        run: node --test test/jit-simulation.test.cjs
+        run: node --test test/jit-simulation.test.cjs test/background-prep-simulation.test.cjs
