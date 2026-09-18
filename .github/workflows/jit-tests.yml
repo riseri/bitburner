@@ -17,6 +17,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Regression fixtures
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-fixtures
+          retention-days: 1
+          path: |
+            src
+            test
+            package.json
+            docs
       - name: Regression tests
         run: node --test test/jit-recovery.test.cjs test/background-prep.test.cjs
       - name: Full daemon simulations
