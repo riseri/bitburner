@@ -278,7 +278,7 @@ export async function main(ns) {
 		beginSoftRecovery, updateSoftRecovery, cancelHackWindow, cancelPoisonedBatch,
 		beginDrain, serviceHardDrain, cancelChunk, publishHackPause,
 		reconcileRunning, untrackRunningByChunk, isTerminalChunk,
-		reserveIncomeBatch, rollbackReservations, cleanupReservations, rebuildReservationIndex,
+		reserveIncomeBatch, reserveBatch, rollbackReservations, cleanupReservations, rebuildReservationIndex,
 		enqueueChunks, makeBatchState, launchDueChunks, availableRam, totalRunningRam,
 		incomeRate, countRate, renderSchedulerDashboard,
 	});
@@ -1876,7 +1876,8 @@ function* tuneTargetSteps(
 	hosts,
 	cfg,
 	running,
-	model = null
+	model = null,
+	acceptPlan = null
 ) {
 	const profile =
 		poolProfile(
@@ -2142,7 +2143,7 @@ function* tuneTargetSteps(
 			expected >
 			best.expected
 		) {
-			best = {
+			const candidate = {
 				H,
 
 				gEffective,
@@ -2169,6 +2170,7 @@ function* tuneTargetSteps(
 
 				ramTime,
 			};
+			if (!acceptPlan || acceptPlan(candidate)) best = candidate;
 		}
 	}
 
@@ -4538,7 +4540,9 @@ function renderSchedulerDashboard(ns, pool) {
 	const rows = [...pool.pipelines.values()].map(p => {
 		const health = targetHealth(ns, p.name);
 		const mode = p.retiring ? "RETIRING" : p.drain ? "DRAINING" : p.recovery ? "RECOVERING" :
-			p.mode !== "RUNNING" ? p.mode : Number.isFinite(p.stats.lastHackAt) && now - p.stats.lastHackAt < 10_000 ? "LIVE" : "WARMUP";
+			p.mode !== "RUNNING" ? p.mode : !p.running.size && !p.queue.length &&
+				now >= p.firstLanding ? "IDLE" :
+				Number.isFinite(p.stats.lastHackAt) && now - p.stats.lastHackAt < 10_000 ? "LIVE" : "WARMUP";
 		return { target: p.name, mode, role: p.trial ? "TRIAL" : p.name === pool.anchor ? "PRIORITY" : "SUPPORT",
 			income60: incomeRate(p.stats, 60_000, now), model: p.runtime?.plan.expected || 0,
 			earned: p.stats.money, paid: p.stats.profitable, running: p.running.size, queued: p.queue.length,
@@ -4550,7 +4554,8 @@ function renderSchedulerDashboard(ns, pool) {
 			drift: p.stats.pipeline.driftMax, spacing: Number.isFinite(p.stats.pipeline.minSpacing) ? p.stats.pipeline.minSpacing : null,
 			local: p.stats.pipeline.softRecoveries, fallback: p.stats.pipeline.recoveries,
 			restarts: p.stats.restarts, resyncs: p.stats.resyncs, admissionSkips: p.admissionSkips,
-			allocationFails: p.stats.allocationFails, note: p.recovery?.reason || p.drain?.reason || p.note,
+			allocationFails: p.stats.allocationFails, idleRetunes: p.idleRetunes || 0, admissionReason: p.admissionReason || "",
+			note: p.recovery?.reason || p.drain?.reason || p.admissionReason || p.note,
 			workerRam: p.runningRam, epoch: p.epoch };
 	});
 	const totalRam = pool.network.hosts.reduce((n, host) => n + host.maxRam, 0);
@@ -4574,6 +4579,9 @@ function renderSchedulerDashboard(ns, pool) {
 		renderDashboard(ns, p.name, p.runtime, pool.network, p.cfg, p.stats, p.queue,
 			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
 			p.drain, p.recovery, pool.foreign);
+		if (p.admissionReason || p.stats.allocationFails || p.admissionSkips) dashboardRow(ns, "Batch slots",
+			`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+		if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
 		if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
 		return;
 	}
@@ -4595,7 +4603,10 @@ function renderSchedulerDashboard(ns, pool) {
 		row("Pipe misses", dashboardCounters(p.misses));
 		row("Pipe recovery", `${p.local} local | ${p.fallback} fallback | ${p.restarts} target rebuilds`);
 		row("Workers", `${p.running} running | ${p.queued} queued | ${formatRam(p.workerRam)}`);
-		if (["DRAINING", "RECOVERING", "RETIRING", "PREPARING", "TUNING"].includes(p.mode)) row("Reason", p.note);
+		if (["DRAINING", "RECOVERING", "RETIRING", "PREPARING", "TUNING", "IDLE"].includes(p.mode)) row("Reason", p.note);
+		if (p.admissionReason || p.allocationFails || p.admissionSkips) row("Batch slots",
+			`${p.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+		if (p.idleRetunes) row("Idle replans", p.idleRetunes);
 		if (pool.cfg.dashboardDetails) {
 			row("Timing", `gap ${p.gap}ms | period ${dashboardTime(p.period)} | lead ${p.lead}ms`);
 			row("Drift", `max ${p.drift.toFixed(2)}ms | spacing ${p.spacing === null ? "n/a" : `${p.spacing.toFixed(1)}ms`}`);

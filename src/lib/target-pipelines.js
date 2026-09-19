@@ -7,6 +7,8 @@ const TRIAL_MS = 180_000;
 const RETRY_MS = 10 * 60_000;
 const UI_MS = 10_000;
 const BUCKET_MS = 250;
+const IDLE_REPLAN_MS = 5_000;
+const IDLE_REPLAN_MAX_BACKOFF_MS = 300_000;
 
 export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime = null, stats = null) {
 	const pipeline = {
@@ -18,6 +20,8 @@ export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime 
 		liveSince: 0, firstLanding: 0, nextLanding: 0, serial: 0, allocationStreak: 0,
 		admissionSkips: 0, nextHealth: 0, tunedLevel: 0, tuner: null, tuneStarted: 0,
 		repair: null, control: null, note: "", nextRetry: 0, tunedCapacity: 0, lastCapacityRetune: 0,
+		idleSince: null, idleRetunes: 0, idleFailures: 0, idleRetryAt: 0, idleReplanning: false,
+		admissionReason: "", completedAtIdleReplan: 0,
 	};
 	pipeline.cfg.epoch = pipeline.epoch;
 	return pipeline;
@@ -78,6 +82,8 @@ function activatePipeline(ns, pool, pipeline, runtime, rebuilt) {
 	pipeline.stats.batchTimes = [];
 	pipeline.liveSince = 0;
 	pipeline.allocationStreak = 0;
+	pipeline.idleSince = null;
+	pipeline.admissionReason = "";
 	if (rebuilt) api.resetPipelineStats(pipeline.stats);
 	api.publishHackPause(pipeline.control, 0, "target ready");
 	pipeline.note = "Fresh target plan; initial warmup";
@@ -313,16 +319,21 @@ export function planPipelineBatch(ns, pool) {
 				!fitsLaunchBudget(pool.launchBuckets, result.chunks, maxLaunches)) {
 				api.rollbackReservations(pool.reservations, snapshot);
 				p.admissionSkips++;
-				p.note = "Admission limited by shared process/launch budget";
+				p.admissionReason = pending + result.chunks.length > pool.cfg.maxWorkers
+					? "shared worker-commitment limit" : "shared launch budget / fragmented batch";
+				p.note = `Batch admission blocked: ${p.admissionReason}`;
 			} else {
 				for (const chunk of result.chunks) chunk.owner = p;
 				api.enqueueChunks(p.queue, result.chunks);
 				p.batches.set(id, api.makeBatchState(id, result.chunks));
 				p.stats.scheduled++; p.allocationStreak = 0;
+				p.idleSince = null; p.admissionReason = "";
 				recordLaunchBudget(pool, result.chunks);
 			}
 		} else {
 			p.stats.allocationFails++; p.allocationStreak++;
+			p.admissionReason = "no whole HWGW batch fits host RAM reservations";
+			p.note = `Batch admission blocked: ${p.admissionReason}`;
 			p.stats.maxConsecutiveAllocationFails = Math.max(p.stats.maxConsecutiveAllocationFails, p.allocationStreak);
 			// Optional work yields instead of letting a RAM-constrained peer harm
 			// the current earner. Nothing changes that earner's queued reservations.
@@ -375,14 +386,71 @@ function beginPipelineTuning(ns, pool, p) {
 			Math.max(4, pool.cfg.maxWorkers - usedSlots));
 	} else p.cfg.ramBudget = Math.max(0, profile.capacity - peers.reduce((n, peer) =>
 		n + (peer.runtime?.plan.ramTime || 0) / (peer.runtime?.plan.period || 1) * 1.25, 0));
-	p.tuner = api.tuneTargetSteps(ns, p.name, pool.network.hosts, p.cfg, pool.running, model);
+	const acceptPlan = p.idleReplanning ? plan => idlePlanFits(ns, pool, p, plan) : null;
+	p.tuner = api.tuneTargetSteps(ns, p.name, pool.network.hosts, p.cfg, pool.running, model, acceptPlan);
 	p.tuneStarted = Date.now();
 	p.note = "Building a fresh plan with actual chance and shared capacity";
+}
+
+// Probe one candidate at a time during the yielding tuner. Use the pure allocator,
+// not reserveIncomeBatch: a planning probe must never preempt another process.
+function idlePlanFits(ns, pool, p, plan) {
+	const boundary = pool.reservations.length;
+	try {
+		const landing = Date.now() + plan.times.W + p.cfg.lead + 250;
+		const result = pool.api.reserveBatch(ns, p.name, `probe:${p.epoch}`, landing, plan,
+			pool.network.hosts, p.cfg, pool.reservations, pool.running, pool.foreign);
+		if (!result) return false;
+		const pending = [...pool.pipelines.values()].reduce((n, lane) => n + lane.queue.length, pool.running.size);
+		const limit = p.name === pool.anchor ? pool.cfg.maxLaunches : Math.max(4, pool.cfg.maxLaunches - 8);
+		return pending + result.chunks.length <= pool.cfg.maxWorkers &&
+			fitsLaunchBudget(pool.launchBuckets, result.chunks, limit);
+	} finally {
+		pool.api.rollbackReservations(pool.reservations, boundary);
+	}
+}
+
+// Productive-time gates are for elective optimizations, not liveness. A lane with
+// no remaining work cannot earn its way out of a stale/infeasible plan. Only
+// quiescent ownership can be retuned here: never erase a live PID or peer state.
+function replanIdlePipeline(ns, pool, p, now) {
+	if (p.mode !== "RUNNING" || p.retiring || p.recovery || p.drain || p.repair?.active ||
+		p.queue.length || p.running.size || p.batches.size) {
+		p.idleSince = null;
+		return false;
+	}
+	p.idleSince ??= now;
+	if (now - p.idleSince < IDLE_REPLAN_MS || now < p.idleRetryAt) return false;
+	if ([...pool.running.values()].some(c => c.owner === p)) return false;
+	if (pool.reservations.some(r => r.chunk?.owner === p && !pool.api.isTerminalChunk(r.chunk))) {
+		p.admissionReason = "waiting for owned reservation accounting";
+		return false;
+	}
+	// Reset retry backoff only after genuine batch completions, not one accepted
+	// reservation. A persistently impossible plan must not retune every five seconds.
+	if (p.stats.pipeline.completed > p.completedAtIdleReplan) p.idleFailures = 0;
+	p.completedAtIdleReplan = p.stats.pipeline.completed;
+	p.idleFailures++; p.idleRetunes++;
+	p.idleRetryAt = now + Math.min(IDLE_REPLAN_MAX_BACKOFF_MS, IDLE_REPLAN_MS * 2 ** Math.min(6, p.idleFailures - 1));
+	p.idleReplanning = true;
+	p.tuner = null; p.nextRetry = 0;
+	p.epoch = `${pool.ownerPid}:${p.ordinal}:${++p.epochNumber}`; p.cfg.epoch = p.epoch;
+	pool.api.publishHackPause(p.control, Number.MAX_SAFE_INTEGER, "idle pipeline replanning");
+	pool.api.finishReadyBatches(p.batches, p.stats, p.cfg);
+	let write = 0;
+	for (const r of pool.reservations) if (r.chunk?.owner !== p) pool.reservations[write++] = r;
+	pool.reservations.length = write;
+	pool.api.rebuildReservationIndex(pool.reservations);
+	p.mode = pool.api.targetHealth(ns, p.name).clean ? "TUNING" : "PREPARING";
+	p.note = `Idle replan: ${p.admissionReason || "no queued or running work"}`;
+	pool.note = `${p.name}: rebuilding an empty pipeline, not waiting for more earnings`;
+	return true;
 }
 
 function servicePipelineMaintenance(ns, pool) {
 	const { api } = pool;
 	for (const p of pool.pipelines.values()) {
+		replanIdlePipeline(ns, pool, p, Date.now());
 		if (p.mode === "DRAINING" && p.queue.length === 0 && p.running.size === 0 && !p.repair?.active && pool.port.empty()) {
 			api.finishReadyBatches(p.batches, p.stats, p.cfg);
 			if (p.batches.size) continue;
@@ -438,7 +506,9 @@ function servicePipelineMaintenance(ns, pool) {
 			if (step.done) {
 				p.tuner = null;
 				if (!step.value) {
-					p.note = "No plan fits shared limits; retrying later"; p.nextRetry = Date.now() + 30_000;
+					p.note = "No plan fits shared limits; retrying later";
+					p.nextRetry = Date.now() + (p.idleReplanning ? Math.min(IDLE_REPLAN_MAX_BACKOFF_MS,
+						30_000 * 2 ** Math.min(4, p.idleFailures++)) : 30_000);
 				} else activatePipeline(ns, pool, p, step.value, p.stats.restarts > 0);
 			}
 			return;
@@ -506,6 +576,14 @@ function serviceBackgroundAndAdmission(ns, pool) {
 		return;
 	}
 	if (!anchor || anchor.mode !== "RUNNING") return;
+	if (!productive(anchor, now)) {
+		const seconds = Math.floor(anchor.stats.pipeline.completed * anchor.runtime.plan.period / 1000);
+		pool.note = anchor.admissionReason ? `${anchor.name}: ${anchor.admissionReason}`
+			: `Waiting for productive runtime: ${seconds}/120 seconds; recent Hack required`;
+	} else if (!full) {
+		pool.note = pool.readyScan ? `Scanning ready targets: ${pool.readyScan.index}/${pool.readyScan.names.length}`
+			: "Looking for a ready target; background prep may be needed";
+	}
 	const activeTargets = new Set(pool.pipelines.keys());
 	let name = "";
 	if (cfg.maxTargets > 1 && !full && now >= pool.nextAdmission && productive(anchor, now)) {
