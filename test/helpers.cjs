@@ -82,7 +82,7 @@ function loadScript(file, clock, extra = {}) {
     const sandbox = {
         console, Date: class extends Date { static now() { return clock.now; } },
         setTimeout: (fn, ms) => clock.timer(ms, fn),
-        PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15, PROGRESSION_ACTION: 14, STOCK_STATUS: 13 },
+        PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15, PROGRESSION_ACTION: 14, STOCK_STATUS: 13, GO_STATUS: 12 },
         ...extra,
     };
     vm.createContext(sandbox);
