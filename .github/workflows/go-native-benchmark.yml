@@ -1,0 +1,59 @@
+name: Native IPvGO benchmark
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/go-bot.js'
+      - 'src/lib/go-*.js'
+      - 'test/go*'
+      - 'test/native-go/**'
+      - '.github/workflows/go-native-benchmark.yml'
+permissions:
+  contents: read
+jobs:
+  native-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: bitburner-official/bitburner-src
+          ref: f02059a6769b6e20c6f1b32178a581801779b1f3
+          path: native-upstream
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Native opponent benchmark
+        shell: bash
+        run: |
+          if test -f test/go-native-benchmark.cjs; then
+            node test/go-native-benchmark.cjs --upstream native-upstream --output go-benchmark.json
+          else
+            echo 'Preparing pinned native fixture; strategy benchmark is not implemented yet.'
+          fi
+      - name: Benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-native-report
+          path: go-benchmark.json
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Pinned reproducibility sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-native-fixtures
+          retention-days: 3
+          path: |
+            native-upstream/src/Go
+            native-upstream/src/Casino/RNG.ts
+            native-upstream/src/utils
+            native-upstream/src/Augmentation/Enums.ts
+            native-upstream/LICENSE*
+            src
+            test
+            package.json
