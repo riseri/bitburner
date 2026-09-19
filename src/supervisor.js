@@ -1,4 +1,4 @@
-import { dashboardSection, dashboardRow, dashboardTargets } from "lib/dashboard.js";
+import { dashboardSection, dashboardRow, dashboardTargets, dashboardTime } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
@@ -190,11 +190,21 @@ function render(ns, state) {
 	const contracts = contractStatus?.type === "contract-status" ? contractStatus : null;
 	const progression = progressionStatus?.type === "progression-status" ? progressionStatus : null;
 	const stocks = stockStatus?.type === "stock-status" ? stockStatus : null;
+
 	ns.clearLog();
 	ns.print("BITBURNER AUTOMATION");
+
+	if (!cfg.dashboardDetails) {
+		renderOverview(ns, daemon, fleet);
+		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, actions: state.actions, services: state.services, stockAccess: state.stockAccess });
+		renderAttention(ns, { daemon, fleet, contracts, progression, services: state.services });
+		ns.print("  Details: restart with --dashboard-details true");
+		return;
+	}
+
 	if (daemon) {
-		renderMoneyEngine(ns, daemon, cfg.dashboardDetails);
-		if (daemon.mode === "running") renderHealth(ns, daemon, cfg.dashboardDetails);
+		renderMoneyEngine(ns, daemon, true);
+		if (daemon.mode === "running") renderHealth(ns, daemon, true);
 		if (daemon.background) {
 			dashboardSection(ns, "Background prep / separate target");
 			dashboardRow(ns, "Background", daemon.background);
@@ -208,7 +218,8 @@ function render(ns, state) {
 		dashboardRow(ns, "Money engine", processStatus(ns, DAEMON));
 		dashboardRow(ns, "Status", "Waiting for daemon dashboard");
 	}
-	renderFleet(ns, fleet, cfg.dashboardDetails, daemon);
+
+	renderFleet(ns, fleet, true, daemon);
 	renderStocks(ns, stocks, cfg, state.stockAccess);
 	renderContracts(ns, contracts, cfg);
 	renderProgression(ns, progression, cfg, state.actions);
@@ -226,8 +237,102 @@ function render(ns, state) {
 			`Contracts: ${cfg.contracts ? processHealth(ns, CONTRACTS, contractHealth) : "Disabled"} | ` +
 			`Progression: ${cfg.progression ? processHealth(ns, PROGRESSION, progressionHealth) : "Disabled"}`);
 	}
-	if (cfg.dashboardDetails && daemon) renderTargetAnalysis(ns, daemon.targets);
-	if (!cfg.dashboardDetails) ns.print("  More diagnostics: --dashboard-details true");
+	if (daemon) renderTargetAnalysis(ns, daemon.targets);
+}
+
+function renderOverview(ns, daemon, fleet) {
+	const row = (label, value) => dashboardRow(ns, label, value);
+	dashboardSection(ns, "Overview");
+
+	if (!daemon) {
+		row("Money engine", processStatus(ns, DAEMON));
+		row("Status", "Waiting for daemon dashboard");
+	} else if (daemon.mode === "multi") {
+		row("Income 60s", `${cash(daemon.income60)}/s | model ${cash(daemon.model)}/s`);
+		row("Targets", daemon.pipelines?.length
+			? daemon.pipelines.map(p => `${p.target} ${p.mode}`).join(" | ")
+			: "No active earning targets");
+		if (Number.isFinite(Number(daemon.usedRam)) && Number.isFinite(Number(daemon.totalRam))) {
+			const pctUsed = 100 * Number(daemon.usedRam) / Math.max(1, Number(daemon.totalRam));
+			row("RAM online", `${formatRam(daemon.usedRam)} / ${formatRam(daemon.totalRam)} (${pctUsed.toFixed(1)}%)`);
+		}
+		const bg = daemon.backgroundPrep;
+		if (bg?.target) row("Background", `${bg.target} | ${bg.status || "PREPARING"}${bg.eta ? ` | ETA ${dashboardTime(bg.eta)}` : ""}`);
+	} else if (daemon.mode === "prep") {
+		row("Target", `${daemon.target} | PREPARING`);
+		row("Stage", `${daemon.stage || "working"}${daemon.wave ? ` | ${daemon.wave}` : ""}`);
+		if (daemon.money) row("Money", daemon.money);
+		if (daemon.security) row("Security", daemon.security);
+	} else if (daemon.mode === "reconfigure") {
+		row("Status", "RECONFIGURING");
+		if (daemon.reason) row("Reason", daemon.reason);
+	} else {
+		const status = [daemon.state ? humanState(daemon.state) : "", daemon.hackStatus ? humanHackStatus(daemon.hackStatus) : ""]
+			.filter(Boolean).join(" | ");
+		row("Income 60s", `${daemon.income60 || "n/a"}${daemon.model ? ` | model ${daemon.model}` : ""}`);
+		row("Target", `${daemon.target}${daemon.targetMode ? ` | ${daemon.targetMode}` : ""}${status ? ` | ${status}` : ""}`);
+		if (daemon.money || daemon.security) row("Target health",
+			`${daemon.money ? `money ${daemon.money}` : ""}${daemon.money && daemon.security ? " | " : ""}${daemon.security ? `security ${daemon.security}` : ""}`);
+		if (daemon.pipeline) row("Pipeline", humanPipeline(daemon.pipeline));
+		if (daemon.ramOnline) row("RAM online", daemon.ramOnline);
+		if (daemon.background) row("Background", daemon.background);
+	}
+
+	if (fleet) {
+		const network = fleet.network ?? {};
+		const cloud = fleet.cloud ?? {};
+		row("Fleet", `${Number(network.rooted) || 0}/${network.servers?.length || 0} rooted | ${network.hosts?.length || 0} workers | cloud ${Number(cloud.count) || 0}/${Number(cloud.limit) || 0}`);
+	}
+}
+
+function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, actions, services, stockAccess }) {
+	const row = (label, value) => dashboardRow(ns, label, value);
+	dashboardSection(ns, "Automation");
+
+	if (!cfg.stocks) row("Stocks", "Disabled");
+	else if (!stockAccess?.ok) row("Stocks", `Locked: missing ${stockAccess?.missing?.join(", ") || "market access"}`);
+	else if (!stocks) row("Stocks", "Starting / waiting for market snapshot");
+	else row("Stocks", `${stocks.state || "running"} | ${cash(stocks.equity)} equity | ${cashSigned(stocks.openPnl)} open P/L`);
+
+	if (!cfg.contracts) row("Contracts", "Disabled");
+	else if (!contracts) row("Contracts", "Starting / waiting for scan");
+	else row("Contracts", `${Number(contracts.waiting) || 0} waiting | ${Number(contracts.solved) || 0} solved | ${Number(contracts.found) || 0} found`);
+
+	if (!cfg.progression) row("Progression", "Disabled");
+	else if (!progression) row("Progression", "Starting / waiting for snapshot");
+	else if (progression.error) row("Progression", `Blocked: ${progression.error}`);
+	else {
+		const next = progression.nextObjective?.label || "No immediate objective";
+		row("Progression", `${next} | ${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`);
+	}
+
+	if (actions?.current) row("Active action", `${actions.current.state.toUpperCase()}: ${actions.current.reason}`);
+	if (services?.length) {
+		const summary = services.map(service => {
+			const name = service.name.replace("-manager.js", "").replace(".js", "");
+			return `${name} ${serviceLabel(service)}`;
+		}).join(" | ");
+		row("Services", summary);
+	}
+}
+
+function renderAttention(ns, { daemon, fleet, contracts, progression, services }) {
+	const notices = [];
+	if (daemon?.reason && ["RECOVERING", "DRAINING"].includes(String(daemon.state).toUpperCase())) notices.push(["Money engine", daemon.reason]);
+	if (daemon?.mode === "reconfigure" && daemon.reason) notices.push(["Money engine", daemon.reason]);
+	if (fleet?.cloud?.error) notices.push(["Fleet", fleet.cloud.error]);
+	if (contracts?.error) notices.push(["Contracts", contracts.error]);
+	if (progression?.error) notices.push(["Progression", progression.error]);
+
+	const recentService = services?.filter(service => service.lastEvent)
+		.sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
+	if (recentService && Date.now() - Number(recentService.lastEventAt || 0) < 60_000) {
+		notices.push(["Recovery", `${recentService.name}: ${recentService.lastEvent}`]);
+	}
+
+	if (!notices.length) return;
+	dashboardSection(ns, "Attention");
+	for (const [label, value] of notices) dashboardRow(ns, label, value);
 }
 
 function renderMoneyEngine(ns, daemon, details = false) {
