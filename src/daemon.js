@@ -2,6 +2,7 @@ import { runTargetPipelines } from "lib/target-pipelines.js";
 import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary } from "lib/background-prep.js";
+import { hackingFormulasAvailable, preparedHackingModel } from "lib/formulas.js";
 
 const HOME = "home";
 
@@ -280,7 +281,7 @@ export async function main(ns) {
 		reconcileRunning, untrackRunningByChunk, isTerminalChunk,
 		reserveIncomeBatch, reserveBatch, rollbackReservations, cleanupReservations, rebuildReservationIndex,
 		enqueueChunks, makeBatchState, launchDueChunks, availableRam, totalRunningRam,
-		incomeRate, countRate, renderSchedulerDashboard,
+		incomeRate, countRate, renderSchedulerDashboard, hackingFormulasAvailable,
 	});
 }
 
@@ -994,6 +995,11 @@ function createPreppedModel(
 	ns,
 	target
 ) {
+	// This is deliberately checked for every retune. A daemon that started
+	// before Formulas.exe was acquired upgrades itself without a restart.
+	const exact = preparedHackingModel(ns, target);
+	if (exact) return exact;
+
 	const currentSecurity =
 		ns.getServerSecurityLevel(
 			target
@@ -1111,6 +1117,7 @@ function createPreppedModel(
 		minSecurity,
 		hackPercent,
 		chance,
+		formulas: false,
 
 		times: {
 			H:
@@ -2184,6 +2191,9 @@ function* tuneTargetSteps(
 
 		averageCoreBonus:
 			profile.averageCoreBonus,
+
+		formulas:
+			Boolean(model?.formulas),
 
 		plan:
 			best,

@@ -2,7 +2,7 @@ import { PORTS } from "lib/ports.js";
 import { resetEpoch } from "lib/progression-protocol.js";
 
 const STATE_FILE = "data/darknet-state.json", AGENT = "darknet-agent.js";
-const AGENT_FILES = [AGENT, "darknet-phish.js", "lib/darknet-solvers.js", "lib/ports.js"];
+const AGENT_FILES = [AGENT, "darknet-phish.js", "lib/darknet-solvers.js", "lib/formulas.js", "lib/ports.js"];
 
 /** Home-owned durable Darknet coordinator. @param {NS} ns */
 export async function main(ns) {
@@ -31,7 +31,7 @@ export async function main(ns) {
 		if (dirty) await saveState(ns, state);
 		const active = Object.values(state.agents).filter(a => now - a.at < 30_000).length;
 		statusPort.clear(); statusPort.write({ type: "darknet-status", version: 1, producerPid: ns.pid, generatedAt: now, heartbeatIntervalMs: cfg.interval,
-			state: unlocked ? "ACTIVE" : "LOCKED", unlocked, known: Object.keys(state.servers).length,
+			state: unlocked ? "ACTIVE" : "LOCKED", unlocked, formulas: ns.fileExists("Formulas.exe", "home"), known: Object.keys(state.servers).length,
 			authenticated: Object.values(state.servers).filter(s => s.password != null).length, activeAgents: active,
 			caches: state.stats.caches, deployments: state.stats.deployments, blocked: state.stats.blocked,
 			stasis: safe(() => ns.dnet.getStasisLinkedServers().length, 0), instability: safe(() => ns.dnet.getDarknetInstability(), null),

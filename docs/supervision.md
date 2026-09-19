@@ -58,6 +58,12 @@ copy themselves and their dependencies, recover blocked RAM, open caches and
 launch bounded phishing workers. A lost or moved server therefore affects only
 its local disposable processes; surviving neighbors rediscover it.
 
+`Formulas.exe` is a live capability rather than a startup requirement. The JIT
+scheduler drains and retunes individual lanes when hacking formulas become
+available, while background admission, Darknet agents, and the augmentation loop
+re-evaluate formulas during their normal ticks. Every formulas call is guarded and
+falls back to the existing approximation if the file or API is unavailable.
+
 Darknet RAM is not admitted to the JIT allocator. Per-PID sessions, topology
 mutation and abrupt server deletion are incompatible with precise HWGW landing
 reservations. Risky policies—stasis, induced migration, stock promotion, freezing,

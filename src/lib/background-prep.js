@@ -1,5 +1,7 @@
 // Background preparation owns one independent G/W process, never a second JIT
 // controller. A non-expiring RAM hold protects both current and future batches.
+import { formulaGrowThreads, formulaWeakenEffect, preparedHackingModel } from "lib/formulas.js";
+
 const TICK_MS = 500;
 const QUIET_MS = 60_000;
 const PRODUCTIVE_MS = 120_000;
@@ -90,10 +92,11 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 	if (h.min >= 100) return null;
 	const currentW = ns.getWeakenTime(name);
 	const factor = sec => 2.5 * required * sec + 500;
-	const minW = currentW * factor(h.min) / factor(h.sec);
+	const exact = preparedHackingModel(ns, name);
+	const minW = exact?.times.W ?? currentW * factor(h.min) / factor(h.sec);
 	const upperBound = h.sec >= 100;
-	const chance = upperBound ? 1 : Math.min(1,
-		ns.hackAnalyzeChance(name) * (100 - h.min) / (100 - h.sec));
+	const chance = exact?.chance ?? (upperBound ? 1 : Math.min(1,
+		ns.hackAnalyzeChance(name) * (100 - h.min) / (100 - h.sec)));
 	const slotFill = Boolean(ctx.slotFill);
 	const promotion = Boolean(ctx.promotion);
 	const activeRate = ctx.runtime.plan.expected;
@@ -125,13 +128,13 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 	const wSlots = Math.floor(budget / ns.getScriptRam(WEAKEN, "home"));
 	const gSlots = Math.floor(budget / ns.getScriptRam(GROW, "home"));
 	if (!(wSlots > 0 && gSlots > 0)) return null;
-	const effect = ns.weakenAnalyze(1, 1);
+	const effect = formulaWeakenEffect(ns, 1, 1) ?? ns.weakenAnalyze(1, 1);
 	const wThreads = Math.ceil(Math.max(0, h.sec - h.min) / effect);
 	const wWaves = Math.ceil(wThreads / wSlots);
 	let prepMs = wWaves ? currentW + (wWaves - 1) * minW : 0;
 	if (h.money < h.max * 0.9999) {
-		const growth = ns.growthAnalyze(name, h.max / Math.max(1, h.money), 1) *
-			growthLog(h.sec) / growthLog(h.min);
+		const growth = formulaGrowThreads(ns, name, h.money, h.max, 1) ??
+			ns.growthAnalyze(name, h.max / Math.max(1, h.money), 1) * growthLog(h.sec) / growthLog(h.min);
 		if (!Number.isFinite(growth)) return null;
 		const gThreads = Math.max(1, Math.ceil(growth * 1.05));
 		const waves = Math.ceil(gThreads / gSlots);
@@ -164,7 +167,8 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 	if (!(score > 0) || !Number.isFinite(score)) return null;
 	const minimumExpected = slotFill ? activeRate
 		: promotion ? replacementRate * ctx.cfg.switchThreshold : 0;
-	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill, promotion, minimumExpected };
+	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill, promotion, minimumExpected,
+		formulas: Boolean(exact) };
 }
 
 function prepBudget(ctx) {

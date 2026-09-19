@@ -99,7 +99,7 @@ test('loop does not interrupt a busy Singularity action that has no current-work
 test('loop donates for reputation only when favor, formulas, purchase cash, and reserve are available', async () => {
     const f = fixture(); f.world.favor = 200;
     f.ns.fileExists = name => ['bootstrap.js', 'Formulas.exe'].includes(name);
-    f.ns.formulas = { work: { donationForRep: () => 1e6 } };
+    f.ns.formulas = { reputation: { donationForRep: () => 1e6 } };
     const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
     assert.equal(status.phase, 'DONATE'); assert.equal(f.world.donations.length, 1); assert.equal(f.world.works.length, 0);
 });

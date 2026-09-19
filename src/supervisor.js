@@ -132,6 +132,7 @@ export async function main(ns) {
 	if (cfg.progression) required.push(PROGRESSION);
 	if (cfg.stocks) required.push(STOCK_TRADER);
 	if (cfg.go) required.push(GO_BOT);
+	required.push("lib/formulas.js");
 	if (cfg.darknet) required.push(DARKNET_MANAGER, "darknet-agent.js", "darknet-phish.js", "lib/darknet-solvers.js");
 	if (cfg.augmentationActions) required.push(AUGMENTATION_MANAGER, "bootstrap.js");
 	if (cfg.progression && cfg.progressionActions) {
@@ -737,6 +738,7 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
 	row("Status", `${augmentation.state || "UNKNOWN"}${augmentation.phase ? ` | ${augmentation.phase}` : ""}`);
 	if (augmentation.action) row("Last action", augmentation.action);
 	if (augmentation.recommendation) row("Next", augmentation.recommendation);
+	if (augmentation.formulas) row("Work model", `Exact Formulas | ${Number(augmentation.reputationPerSecond || 0).toFixed(3)} rep/s | share ${Number(augmentation.sharePower || 1).toFixed(3)}x${Number.isFinite(Number(augmentation.projectedFavor)) ? ` | projected favor ${Number(augmentation.projectedFavor).toFixed(2)}` : ""}`);
 	row("Queued", `${Number(augmentation.queued) || 0} augmentation(s) | auto-install ${cfg.autoInstall ? `armed at ${cfg.minInstall}` : "disabled"}`);
 }
 
@@ -766,6 +768,7 @@ function renderGoStatus(ns, go, cfg, services) {
 function renderHealth(ns, daemon, details = false) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Current pipeline");
+	row("Planning model", ns.fileExists("Formulas.exe", "home") ? "Exact Formulas (live adoption)" : "Adaptive fallback");
 	if (daemon.pipeline) row("Workers", daemon.pipeline);
 	if (daemon.pipeMisses) row("Misses", daemon.pipeMisses);
 	if (daemon.pipeDrift) row("Timing", daemon.pipeDrift);
@@ -924,6 +927,7 @@ function renderDarknet(ns, darknet, cfg) {
 	if (!darknet) { row("Status", "Starting / waiting for coordinator"); return; }
 	if (!darknet.unlocked) { row("Status", "Locked; DarkscapeNavigator.exe is the next Darknet prerequisite"); return; }
 	row("Coverage", `${Number(darknet.authenticated) || 0}/${Number(darknet.known) || 0} authenticated | ${Number(darknet.activeAgents) || 0} active agents`);
+	row("Planning", darknet.formulas ? "Exact Darknet Formulas" : "Adaptive fallback; switches live when Formulas.exe appears");
 	row("Loot", `${Number(darknet.caches) || 0} caches | ${Number(darknet.deployments) || 0} deployments | ${Number(darknet.blocked) || 0} blocked attempts`);
 	row("Stability", `${Number(darknet.stasis) || 0} stasis links | auth +${(100 * Number(darknet.instability?.authenticationDurationMultiplier - 1 || 0)).toFixed(1)}% | timeout ${(100 * Number(darknet.instability?.authenticationTimeoutChance || 0)).toFixed(1)}%`);
 	if (darknet.last) row("Last event", darknet.last);

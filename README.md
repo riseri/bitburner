@@ -28,7 +28,10 @@ their own requirements. BN means your **current BitNode**; SF means an owned
 
 These are feature gates in this implementation, not a promise of identical income
 or server availability in every BitNode. BitNode rules and multipliers still apply.
-The hacking daemon does **not** require `Formulas.exe`.
+The hacking daemon does **not** require `Formulas.exe`. It uses a conservative
+fallback model until the program appears, then safely drains each lane and retunes
+with exact hacking formulas without restarting the daemon. Background target
+admission switches on its next candidate evaluation.
 
 SF4 level 1 is enough to unlock Singularity, but outside BN4 its APIs have higher
 RAM costs at lower SF4 levels. An unlocked planner or progression actor can still
@@ -179,6 +182,11 @@ Darknet probing and execution are local and servers can move, restart, or disapp
 Agents solve every current upstream server-model family, traverse the Labyrinth,
 reclaim blocked RAM, open caches, and use otherwise-idle RAM for phishing. Darknet
 RAM is intentionally separate from the timing-sensitive JIT allocator.
+
+When `Formulas.exe` becomes available, active agents immediately use Darknet
+formulas to estimate authentication and Heartbleed timing, retry cooldowns, and
+the number of memory-reallocation calls. The coordinator and dashboard expose the
+active mode; no Darknet service restart is needed.
 
 The ordinary `observe`, `assist`, and `hands-off` profiles enable exploration,
 loot, and phishing but do not enable consequential topology mutations. Stasis,

@@ -4,6 +4,7 @@ import { chooseInvitation, chooseFactionWorkType, matchingFactionWork, queuedAug
 import { readSavings } from "lib/savings.js";
 import { PORTS } from "lib/ports.js";
 import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
+import { factionWorkAnalysis, formulaDonationForRep, formulaFavorProjection } from "lib/formulas.js";
 
 const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP = "bootstrap.js";
 
@@ -85,7 +86,7 @@ export async function tickAugmentationLoop(ns, cfg, state) {
 
 function handleNextAugmentation(ns, cfg, state, plan, next) {
     const queued = queuedCount(ns), current = ns.singularity.getCurrentWork(), busy = ns.singularity.isBusy();
-    if (next.repGap > 0) {
+	if (next.repGap > 0) {
         const donation = affordableDonation(ns, cfg, next);
         if (donation > 0) {
             const donated = ns.singularity.donateToFaction(next.faction, donation);
@@ -93,15 +94,18 @@ function handleNextAugmentation(ns, cfg, state, plan, next) {
                 action: donated ? `Donated ${Math.ceil(donation)} to ${next.faction}` : "",
                 recommendation: donated ? `Refreshing reputation for ${next.name}` : `Donation to ${next.faction} failed; continuing with faction work` };
         }
-        if (!cfg.work) return { state: "WAITING", phase: "REPUTATION", plan, queued,
-            recommendation: `Earn ${Math.ceil(next.repGap)} reputation with ${next.faction} for ${next.name}` };
-        const types = ns.singularity.getFactionWorkTypes(next.faction);
-        const workType = chooseFactionWorkType(types, ns.getPlayer(), cfg.focus);
-        if (!workType) return { state: "BLOCKED", phase: "REPUTATION", plan, queued,
-            recommendation: `${next.faction} offers no available faction work` };
-        if (matchingFactionWork(current, next.faction, workType)) {
-            return { state: "ACTIVE", phase: "REPUTATION", plan, queued,
-                recommendation: `Working ${workType} for ${next.faction}; ${Math.ceil(next.repGap)} reputation remaining` };
+		const types = ns.singularity.getFactionWorkTypes(next.faction);
+		const analysis = factionWorkAnalysis(ns, next.faction, types, ns.getPlayer());
+		const workType = analysis?.workType || chooseFactionWorkType(types, ns.getPlayer(), cfg.focus);
+		const formulaStatus = workFormulaStatus(ns, next, analysis);
+		const eta = formulaStatus.etaMs ? `; ETA ${formatDuration(formulaStatus.etaMs)}` : "";
+		if (!cfg.work) return { state: "WAITING", phase: "REPUTATION", plan, queued, ...formulaStatus,
+			recommendation: `Earn ${Math.ceil(next.repGap)} reputation with ${next.faction} for ${next.name}${eta}` };
+		if (!workType) return { state: "BLOCKED", phase: "REPUTATION", plan, queued,
+			recommendation: `${next.faction} offers no available faction work` };
+		if (matchingFactionWork(current, next.faction, workType)) {
+			return { state: "ACTIVE", phase: "REPUTATION", plan, queued, ...formulaStatus,
+				recommendation: `Working ${workType} for ${next.faction}; ${Math.ceil(next.repGap)} reputation remaining${eta}` };
         }
         if (busy && !current) return { state: "BLOCKED", phase: "REPUTATION", plan, queued,
             recommendation: `Wait for the current Singularity action to finish, then work for ${next.faction}` };
@@ -109,9 +113,9 @@ function handleNextAugmentation(ns, cfg, state, plan, next) {
             recommendation: `Finish or stop current ${current.type || "player"} activity, then work for ${next.faction}` };
         const started = ns.singularity.workForFaction(next.faction, workType, cfg.focusWork);
         if (started) state.ownedWork = { faction: next.faction, workType };
-        return { state: started ? "ACTIVE" : "BLOCKED", phase: "REPUTATION", plan, queued,
-            action: started ? `Started ${workType} work for ${next.faction}` : "",
-            recommendation: started ? `Earn ${Math.ceil(next.repGap)} reputation for ${next.name}` : `Start ${workType} work for ${next.faction} manually` };
+		return { state: started ? "ACTIVE" : "BLOCKED", phase: "REPUTATION", plan, queued, ...formulaStatus,
+			action: started ? `Started ${workType} work for ${next.faction}` : "",
+			recommendation: started ? `Earn ${Math.ceil(next.repGap)} reputation for ${next.name}${eta}` : `Start ${workType} work for ${next.faction} manually` };
     }
 
     if (!cfg.purchase) return { state: "READY", phase: "PURCHASE", plan, queued,
@@ -136,15 +140,30 @@ function queuedCount(ns) {
 }
 
 function affordableDonation(ns, cfg, next) {
-    if (!cfg.donate || !ns.fileExists("Formulas.exe", HOME) || typeof ns.formulas?.work?.donationForRep !== "function" ||
-        typeof ns.getFavorToDonate !== "function") return 0;
-    const favor = ns.singularity.getFactionFavor(next.faction);
-    if (favor < ns.getFavorToDonate()) return 0;
-    const amount = Number(ns.formulas.work.donationForRep(next.repGap, ns.getPlayer()));
-    if (!(amount > 0) || !Number.isFinite(amount)) return 0;
+	if (!cfg.donate || typeof ns.getFavorToDonate !== "function") return 0;
+	const favor = ns.singularity.getFactionFavor(next.faction);
+	if (favor < ns.getFavorToDonate()) return 0;
+	const amount = formulaDonationForRep(ns, next.repGap, ns.getPlayer());
+	if (!(amount > 0) || !Number.isFinite(amount)) return 0;
     const cash = ns.getServerMoneyAvailable(HOME), savings = readSavings(ns);
     const floor = Math.max(cash * cfg.cashReserve, Math.max(0, Number(savings.floor) || 0));
     return cash - amount - next.price >= floor ? amount : 0;
+}
+
+function workFormulaStatus(ns, next, analysis) {
+	if (!analysis) return { formulas: false };
+	const rate = Number(analysis.reputationPerSecond) || 0;
+	return { formulas: true, workType: analysis.workType, reputationPerSecond: rate,
+		etaMs: rate > 0 ? next.repGap / rate * 1000 : null,
+		sharePower: analysis.sharePower,
+		projectedFavor: formulaFavorProjection(ns, next.faction) };
+}
+
+function formatDuration(ms) {
+	const seconds = Math.max(0, Math.ceil(Number(ms) / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60), remainder = seconds % 60;
+	return minutes < 60 ? `${minutes}m ${remainder}s` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
 function normalizeConfig(flags) {

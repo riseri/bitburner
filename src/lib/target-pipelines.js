@@ -560,6 +560,16 @@ function servicePipelineMaintenance(ns, pool) {
 			return;
 		}
 		if (servicePipelineTuning(ns, pool, p)) return;
+		// A long-running daemon changes model only after its owned work drains,
+		// preserving every already-scheduled landing while adopting the newly
+		// unlocked formulas without requiring a restart.
+		const formulaMode = pool.api.hackingFormulasAvailable
+			? pool.api.hackingFormulasAvailable(ns) : Boolean(p.runtime?.formulas);
+		if (p.mode === "RUNNING" && Boolean(p.runtime?.formulas) !== formulaMode) {
+			beginPipelineDrain(pool, p, { kind: "drain", afterKind: "retune",
+				reason: `${formulaMode ? "Formulas.exe unlocked" : "Formulas API unavailable"}; retune ${p.name}` });
+			return;
+		}
 		// Elective work must never take down the other earner during a peer's
 		// initial trial, recovery or warmup. Only the affected target is drained.
 		const peerBusy = [...pool.pipelines.values()].some(other => other !== p &&
