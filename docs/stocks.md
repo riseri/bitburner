@@ -97,14 +97,18 @@ The script log shows:
 
 - cash, equity, invested value and reserve
 - open mark-to-market P/L
-- realized sales P/L for this session
+- realized **net** profit for this session
+- average and last net profit per closed trade, plus win/loss count
 - trade count and commissions
 - the strongest current 4S signals
 - current exposure/reserve safety limits
 
-Realized P/L follows the current owned average price and sale proceeds. Historical
-entry commissions on positions that existed before this script started are not
-reconstructed.
+For positions opened by the running trader, realized profit is net of both the buy
+and sell commissions. The dashboard also shows average realized profit per closed
+trade, the last closed trade's net profit, and closed-trade W/L. Historical entry
+commissions on positions that already existed before this script started cannot be
+reconstructed, so a later sale of one of those adopted positions can differ from
+true lifetime profit by its unknown historical entry commissions.
 
 ## Notes
 
@@ -144,7 +148,8 @@ run supervisor.js --stocks false
 ```
 
 The supervisor dashboard shows stock equity, invested value, cash, shared cash
-floor, open/realized P/L, and the last trade action.
+floor, unrealized P/L, realized net session profit, average/last closed-trade
+profit, W/L, and the last trade action.
 
 ### Shared capital floor
 
