@@ -123,3 +123,15 @@ test('background prep can select work in a tight window without exec', () => {
     assert.match(state.reason, /safe scheduler window/);
     assert.equal(execs, 0);
 });
+
+
+test('pipeline maintenance gets the quiet window before another batch is planned', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.join(__dirname, '../src/lib/target-pipelines.js'), 'utf8');
+    const loopStart = source.indexOf('while (true) {');
+    const maintenance = source.indexOf('servicePipelineMaintenance(ns, pool);', loopStart);
+    const planning = source.indexOf('planPipelineBatch(ns, pool);', loopStart);
+    assert.ok(loopStart >= 0 && maintenance > loopStart && planning > maintenance,
+        'maintenance/tuning must run before planning can consume the quiet window');
+});
