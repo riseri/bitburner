@@ -3,14 +3,70 @@ import { checkBoard, simulateMove } from "lib/go-strategy.js";
 export const GO_STATE_FILE = "go-bot-state.txt";
 export const GO_OPPONENTS = Object.freeze(["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati"]);
 
+export const GO_CYCLE_MS = 200;
+const DAEDALUS_DISTRACTION_RNG = 0.9;
+const DAEDALUS_WINDOW_TICKS = 4;
+
+/** Match the game's Wichmann-Hill RNG used by IPvGO AI selection. */
+export function whrngValues(seed, count = 4) {
+	if (!Number.isFinite(seed) || seed < 0 || !Number.isSafeInteger(count) || count < 1 || count > 16) {
+		throw new Error("Invalid IPvGO RNG input");
+	}
+	const v = (seed / 1000) % 30000;
+	let s1 = v, s2 = v, s3 = v;
+	const values = [];
+	for (let i = 0; i < count; i++) {
+		s1 = (171 * s1) % 30269;
+		s2 = (172 * s2) % 30307;
+		s3 = (170 * s3) % 30323;
+		values.push((s1 / 30269 + s2 / 30307 + s3 / 30323) % 1);
+	}
+	return values;
+}
+
+/** Daedalus uses the third seeded random value to decide whether to skip its priority AI. */
+export function daedalusPriorityRng(seed) {
+	return whrngValues(seed, 3)[2];
+}
+
+/**
+ * Find a four-tick window where Daedalus is in its >=0.9 "distracted" branch.
+ * Four consecutive 200ms game-cycle seeds absorb timer ordering and the small
+ * amount of work between waking up and committing the move.
+ */
+export function findDaedalusDistractionWindow(totalPlaytime, maxWaitMs = 10_000) {
+	if (!Number.isFinite(totalPlaytime) || totalPlaytime < 0 ||
+		!Number.isFinite(maxWaitMs) || maxWaitMs < 0 || maxWaitMs > 60_000) return null;
+	const maxCycles = Math.floor(maxWaitMs / GO_CYCLE_MS);
+	for (let delayCycles = 0; delayCycles <= maxCycles; delayCycles++) {
+		const seedStart = totalPlaytime + delayCycles * GO_CYCLE_MS;
+		const priority = Array.from({ length: DAEDALUS_WINDOW_TICKS },
+			(_, index) => daedalusPriorityRng(seedStart + index * GO_CYCLE_MS));
+		if (priority.every(value => value >= DAEDALUS_DISTRACTION_RNG)) {
+			return {
+				waitMs: delayCycles * GO_CYCLE_MS,
+				seedStart,
+				priority,
+				minPriority: Math.min(...priority),
+				maxPriority: Math.max(...priority),
+			};
+		}
+	}
+	return null;
+}
+
 export function goConfig(flags) {
 	const cfg = { opponent: String(flags.opponent), size: Number(flags.size), games: Number(flags.games),
-		interval: Number(flags.interval), thinkMs: Number(flags["think-ms"]), takeover: flags.takeover === true || flags.takeover === "true" };
+		interval: Number(flags.interval), thinkMs: Number(flags["think-ms"]),
+		takeover: flags.takeover === true || flags.takeover === "true",
+		rngSnipe: flags["rng-snipe"] !== false && flags["rng-snipe"] !== "false",
+		rngMaxWait: Number(flags["rng-max-wait"]) };
 	if (!GO_OPPONENTS.includes(cfg.opponent)) throw new Error(`Choose an ordinary opponent: ${GO_OPPONENTS.join(", ")}`);
 	if (![5, 7, 9, 13].includes(cfg.size)) throw new Error("size must be 5, 7, 9, or 13");
 	if (!Number.isSafeInteger(cfg.games) || cfg.games < 0) throw new Error("games must be a nonnegative integer (0 means continuous)");
 	if (!Number.isFinite(cfg.interval) || cfg.interval < 100 || cfg.interval > 60_000) throw new Error("interval must be 100..60000 ms");
 	if (!Number.isFinite(cfg.thinkMs) || cfg.thinkMs < 1 || cfg.thinkMs > 100) throw new Error("think-ms must be 1..100");
+	if (!Number.isFinite(cfg.rngMaxWait) || cfg.rngMaxWait < 0 || cfg.rngMaxWait > 60_000) throw new Error("rng-max-wait must be 0..60000 ms");
 	return cfg;
 }
 
