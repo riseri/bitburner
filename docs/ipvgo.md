@@ -1,9 +1,10 @@
-# Standalone IPvGO bot
+# Supervised IPvGO bot
 
 `go-bot.js` plays ordinary black-side IPvGO games through the supported `ns.go`
-API. It does not need Singularity or use `go.cheat`. It is deliberately NOT a
-supervisor service: nothing in the JIT scheduler, fleet allocation, progression
-actors, contract validation or existing ports changes.
+API. It does not need Singularity or use `go.cheat`. The supervisor manages exactly
+one copy on `home` by default and reads its dashboard snapshot from reserved port 12
+(`PORTS.GO_STATUS`). Go remains independent from JIT scheduling, fleet allocation,
+progression actors and contract execution.
 
 ## Start with a finite trial
 
@@ -26,15 +27,16 @@ in Active Scripts to see scores, selected moves, session results, cumulative
 opponent statistics and the actual bonus reported by the game. No hacking or
 fleet restart is necessary. Stop the trial before starting another copy.
 
-For continuous play, run just:
+For normal continuous play, start the supervisor:
 
 ```text
-run go-bot.js
+run supervisor.js
 ```
 
-This repeats completed games until you stop the script or a safety check fails.
-It is not auto-restarted by the supervisor. Kill only this bot's PID to stop it;
-there is no exit hook that resets the board or kills unrelated scripts.
+Go is enabled by default and repeats completed games continuously. Use
+`run supervisor.js --go false` when you intentionally do not want Go automation.
+A directly launched `go-bot.js` is still supported for finite trials; the supervisor
+adopts an existing copy rather than starting a duplicate.
 
 ## Existing games and restarts
 
@@ -65,10 +67,12 @@ write is reconciled as an ordinary opponent move, not mistaken for takeover.
 The API exposes neither an exclusive game lock nor a unique game identifier.
 Identical, unobservable resets or interventions cannot be detected. **Stop the
 bot before playing manually, and do not run a second Go bot under another name
-or on another host.** Go errors produce one terminal message on exit; there is
-no automatic error/restart loop. Slow AI responses are awaited, not forcefully
-reset by a heartbeat timer. An unusual game exceeding eight turns per board
-point stops with its board intact rather than looping indefinitely.
+or on another host.** Go errors produce one terminal message and a terminal
+`go-status` snapshot. The supervisor marks that service `BLOCKED` rather than
+blindly replaying an uncertain board. Slow AI responses are explicitly exempt
+from heartbeat-based recovery and are awaited without force-resetting the game.
+An unusual game exceeding eight turns per board point stops with its board intact
+rather than looping indefinitely.
 
 ## Options
 
@@ -82,6 +86,7 @@ point stops with its board intact rather than looping indefinitely.
 | `--think-ms` | `8` | Cooperative adversarial-search budget, 1..100 ms |
 | `--rng-snipe` | `false` | Experimental Daedalus timing exploit; disabled by default because live results were worse |
 | `--rng-max-wait` | `10000` | Maximum cooperative wall-clock wait per move for an RNG window |
+| `--port` | `12` | Informational `go-status` port used by the supervisor |
 
 Other supported opponents are `Netburners`, `Slum Snakes`, `The Black Hand`,
 `Tetrads`, and `Illuminati`. For example, an easier-opponent shakedown:
