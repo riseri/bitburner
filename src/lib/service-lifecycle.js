@@ -3,8 +3,8 @@ const STALE_CONFIRM_MS = 15_000;
 const STABLE_MS = 120_000;
 
 /** One record per service, including adopted process arguments and restart history. */
-export function createService(name, args = [], heartbeatType = "", port = 0) {
-	return { name, args: [...args], threads: 1, heartbeatType, port, pid: 0,
+export function createService(name, args = [], heartbeatType = "", port = 0, heartbeatRequired = true) {
+	return { name, args: [...args], threads: 1, heartbeatType, port, heartbeatRequired, pid: 0,
 		state: "STOPPED", startedAt: 0, healthySince: null, staleSince: null,
 		nextStartAt: 0, failures: 0, restarts: 0, lastEvent: "", adopted: false };
 }
@@ -33,7 +33,7 @@ export function tickService(ns, service, now = Date.now()) {
 		// Adopt the real command line. Defaults are not a personality transplant.
 		service.pid = process.pid;
 		service.args = [...process.args];
-		if (service.heartbeatType) service.port = Number(readArgument(service.args, "--port", service.port));
+		if (service.port) service.port = Number(readArgument(service.args, "--port", service.port));
 		service.threads = process.threads || 1;
 		service.adopted = true;
 		service.startedAt = now;
@@ -61,7 +61,7 @@ export function tickService(ns, service, now = Date.now()) {
 			return service;
 		}
 		service.pid = pid;
-		if (service.heartbeatType) service.port = Number(readArgument(service.args, "--port", service.port));
+		if (service.port) service.port = Number(readArgument(service.args, "--port", service.port));
 		service.startedAt = now;
 		service.staleSince = null;
 		service.healthySince = null;
@@ -74,7 +74,7 @@ export function tickService(ns, service, now = Date.now()) {
 	const age = now - status?.generatedAt;
 	const interval = Number(status?.heartbeatIntervalMs);
 	const timeout = Math.max(15_000, Number.isFinite(interval) && interval > 0 ? interval * 3 : 0);
-	const healthy = !service.heartbeatType || (status?.type === service.heartbeatType &&
+	const healthy = !service.heartbeatType || !service.heartbeatRequired || (status?.type === service.heartbeatType &&
 		Number.isFinite(status.generatedAt) && status.generatedAt >= service.startedAt &&
 		(!status.producerPid || status.producerPid === service.pid) && age >= 0 && age <= timeout);
 	if (healthy) {
