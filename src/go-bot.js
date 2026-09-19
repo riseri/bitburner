@@ -15,10 +15,13 @@ export async function main(ns) {
 			startedAt: Date.now(), gameStartedAt: Date.now(), startBonus: 0, last: "Starting", analysis: null,
 			rng: null, rngAttempts: 0, rngSnipes: 0, rngWaitMs: 0 };
 		let snapshot = readGoSnapshot(ns);
-		session.startBonus = Number(ns.go.analysis.getStats()[snapshot.opponent]?.bonusPercent) || 0;
 		const decision = mayStartGo(snapshot, readGoRecord(ns), cfg.takeover);
 		if (decision === "new") snapshot = await startGame(ns, cfg, snapshot);
 		else if (snapshot.game.currentPlayer === "Black") await saveGoRecord(ns, snapshot, "ready");
+		session.bonusOpponent = snapshot.opponent;
+		session.startBonus = Number(ns.go.analysis.getStats()[snapshot.opponent]?.bonusPercent) || 0;
+		session.startedAt = Date.now();
+		session.gameStartedAt = Date.now();
 		let turns = 0;
 
 		while (true) {
@@ -35,7 +38,13 @@ export async function main(ns) {
 				renderGo(ns, snapshot, session, "GAME COMPLETE");
 				if (cfg.games && session.games >= cfg.games) return;
 				await ns.sleep(Math.max(250, cfg.interval));
-				snapshot = await startGame(ns, cfg, snapshot); session.gameStartedAt = Date.now(); turns = 0;
+				snapshot = await startGame(ns, cfg, snapshot);
+				if (snapshot.opponent !== session.bonusOpponent) {
+					session.bonusOpponent = snapshot.opponent;
+					session.startBonus = Number(ns.go.analysis.getStats()[snapshot.opponent]?.bonusPercent) || 0;
+					session.startedAt = Date.now();
+				}
+				session.gameStartedAt = Date.now(); turns = 0;
 				continue;
 			}
 			if (++turns > snapshot.board.length ** 2 * 8) throw new Error("Turn limit reached; leaving the unfinished board intact");
