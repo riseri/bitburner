@@ -625,11 +625,17 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	// Read-only scouting is allowed in small launch gaps. Background preparation
 	// may also scan/select a candidate there, but it cannot exec a prep worker
 	// until a >50ms scheduler window is available.
-	if (!pool.readyScan && !name) tickBackgroundPrep(ns, { state: cfg.backgroundPrep, target: anchor.name, activeTargets,
-		blockedTargets: pool.blocked, network: pool.network, cfg, runtime: anchor.runtime, stats: anchor.stats,
-		healthy: productive(anchor, now), allowLaunch: allowPrepLaunch,
-		spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
-			now, Infinity, pool.foreign) });
+	if (!pool.readyScan && !name) {
+		tickBackgroundPrep(ns, { state: cfg.backgroundPrep, target: anchor.name, activeTargets,
+			blockedTargets: pool.blocked, network: pool.network, cfg, runtime: anchor.runtime, stats: anchor.stats,
+			healthy: productive(anchor, now), allowLaunch: allowPrepLaunch,
+			spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
+				now, Infinity, pool.foreign) });
+		const prep = cfg.backgroundPrep;
+		const target = prep.target ? ` ${prep.target}` : "";
+		pool.note = `Background prep${target}: ${prep.status || "WAITING"}` +
+			(prep.reason ? ` | ${prep.reason}` : "");
+	}
 	if (!name || cfg.maxTargets === 1 || full || !productive(anchor, now)) return;
 	if (!api.targetHealth(ns, name).clean) {
 		pool.pendingAdmission = "";
