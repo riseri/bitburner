@@ -118,7 +118,8 @@ test('normal dashboard exposes an empty lane and its admission failure without d
     f.api.renderSchedulerDashboard({...f.ns,pid:1,getHackingLevel:()=>510,getPortHandle:()=>status,
         clearLog(){},print:text=>logs.push(text)},f.pool);
     assert.equal(status.peek().pipelines[0].mode,'IDLE');
-    assert.ok(logs.some(line=>line.includes('Batch slots')));
-    assert.ok(logs.some(line=>line.includes('12 budget skips')));
+    assert.ok(logs.some(line=>line.includes('Pressure')));
     assert.ok(logs.some(line=>line.includes('fragmented batch')));
+    assert.ok(!logs.some(line=>line.includes('budget skips')),
+        'budget-skip telemetry belongs in details mode, not the operator view');
 });
