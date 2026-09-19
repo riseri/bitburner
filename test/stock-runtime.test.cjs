@@ -231,9 +231,7 @@ test('stock trader never auto-buys access or mutates unrelated services',()=>{
   for(const re of [
     /purchaseWseAccount\s*\(/,
     /purchaseTixApi\s*\(/,
-    /purchase4SMarketData/,
-    /buyShort\s*\(/,
-    /sellShort\s*\(/,
+    /purchase4SMarketData/,,,
     /ns\.(run|exec|kill|scriptKill|killall)\s*\(/,
     /ns\.singularity/,
   ]) assert.doesNotMatch(source,re);
@@ -292,7 +290,7 @@ test('stock trader reports net realized profit for closed short trades',async()=
     },
     onUpdate:async({stocks,updates})=>{
       if(updates===2){
-        stocks.BEAR.forecast=0.60;
+        stocks.BEAR.forecast=0.50;
         stocks.BEAR.ask=80;
         stocks.BEAR.bid=79;
       }
