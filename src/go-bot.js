@@ -180,18 +180,18 @@ function renderGo(ns, snapshot, session, state) {
 	if (stats) {
 		dashboardSection(ns, "Rewards");
 		row("Record", `${stats.wins} wins | ${stats.losses} losses | streak ${stats.winStreak}`);
-		row("Node bonus", `+${Number(stats.bonusPercent).toFixed(3)}% | ${stats.bonusDescription}`);
+		row("Actual bonus", `+${Number(stats.bonusPercent).toFixed(3)}% | ${stats.bonusDescription}`);
 		const elapsedHours = Math.max(1, Date.now() - session.startedAt) / 3_600_000;
 		const bonusRate = (Number(stats.bonusPercent) - session.startBonus) / elapsedHours;
 		row("Bonus pace", `${bonusRate >= 0 ? "+" : ""}${bonusRate.toFixed(3)}%/hour this session`);
-		row("Faction", member ? "Joined; qualifying win streaks can award favor" : "Not joined; node-power bonus still applies");
+		row("Membership", member ? "Joined; qualifying win streaks can award favor" : "Not joined; node-power bonus still applies");
 	}
 
 	if (session.rngAttempts) {
 		dashboardSection(ns, "Daedalus timing");
 		const r = session.rng;
 		const last = r ? `${r.armed ? "ARMED" : "MISS"} | last wait ${(r.waitedMs / 1000).toFixed(1)}s` : "not needed on final pass";
-		row("RNG attempts", `${session.rngSnipes}/${session.rngAttempts} armed | ${last} | total wait ${(session.rngWaitMs / 1000).toFixed(1)}s`);
+		row("RNG rig", `${session.rngSnipes}/${session.rngAttempts} armed | ${last} | total wait ${(session.rngWaitMs / 1000).toFixed(1)}s`);\n\t\tif (r?.priority?.length) row("Daedalus RNG", `${r.priority.map(value => value.toFixed(3)).join(" / ")} priority samples`);
 	}
 
 	dashboardSection(ns, "Safety");
