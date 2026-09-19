@@ -10,6 +10,7 @@ const CONTRACTS = "contract-manager.js";
 const PROGRESSION = "progression-manager.js";
 const PROGRESSION_PURCHASE = "progression-purchase.js";
 const PROGRESSION_BACKDOOR = "progression-backdoor.js";
+const STOCK_TRADER = "stock-trader.js";
 const CONTRACT_SELFTEST = "contract-selftest.js";
 
 /** @param {NS} ns */
@@ -22,6 +23,8 @@ export async function main(ns) {
 		["progression", true],
 		["progression-actions", false],
 		["progression-cash-reserve", 0.10],
+		["stocks", true],
+		["stock-cash-reserve", 0.20],
 		["contract-selftest", false],
 		["interval", 5_000],
 	]);
@@ -38,6 +41,8 @@ export async function main(ns) {
 		progression: asBoolean(flags.progression),
 		progressionActions: asBoolean(flags["progression-actions"]),
 		progressionCashReserve: clampFraction(flags["progression-cash-reserve"]),
+		stocks: asBoolean(flags.stocks),
+		stockCashReserve: clampFraction(flags["stock-cash-reserve"]),
 		contractSelftest: asBoolean(flags["contract-selftest"]),
 		interval: Math.max(1_000, Number(flags.interval) || 5_000),
 	};
@@ -45,6 +50,7 @@ export async function main(ns) {
 	const required = [DAEMON, FLEET];
 	if (cfg.contracts) required.push(CONTRACTS);
 	if (cfg.progression) required.push(PROGRESSION);
+	if (cfg.stocks) required.push(STOCK_TRADER);
 	if (cfg.progression && cfg.progressionActions) {
 		required.push(PROGRESSION_PURCHASE, PROGRESSION_BACKDOOR);
 	}
@@ -68,15 +74,20 @@ export async function main(ns) {
 	const actions = createActionState();
 
 	while (true) {
-		for (const service of services) tickService(ns, service);
+		const stockGate = stockAccess(ns);
+		for (const service of services) {
+			if (service.name === STOCK_TRADER && !stockGate.ok) blockStockService(ns, service, stockGate);
+			else tickService(ns, service);
+		}
 		const snapshot = name => {
 			const service = services.find(item => item.name === name);
 			return service?.port ? ns.getPortHandle(service.port).peek() : null;
 		};
 		cfg.fleetStatusPort = services.find(service => service.name === FLEET).port;
-		const fleetStatus = snapshot(FLEET), contractStatus = snapshot(CONTRACTS), progressionStatus = snapshot(PROGRESSION);
+		const fleetStatus = snapshot(FLEET), contractStatus = snapshot(CONTRACTS),
+			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
-		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus });
+		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, stockAccess: stockGate });
 		await ns.sleep(cfg.interval);
 	}
 }
@@ -88,13 +99,14 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	const existingFleet = processes.find(process => process.filename === FLEET);
 	const managedDaemonArgs = existingDaemon?.args ?? daemonArgs;
 	const fleetArgs = ["--port", readArgument(managedDaemonArgs, "--fleet-port", PORTS.FLEET_STATUS),
+		"--stock-port", PORTS.STOCK_STATUS,
 		"--cloud", readArgument(managedDaemonArgs, "--cloud", true),
 		"--cloud-reserve", readArgument(managedDaemonArgs, "--cloud-reserve", 0.10),
 		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", 32),
 		"--cloud-prefix", readArgument(managedDaemonArgs, "--cloud-prefix", "cloud")];
 	const fleetPort = Number(readArgument(existingFleet?.args ?? fleetArgs, "--port", PORTS.FLEET_STATUS));
 	const reserved = [PORTS.WORKER_EVENTS, PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS,
-		PORTS.PROGRESSION_STATUS, PORTS.JIT_CONTROL, PORTS.PROGRESSION_ACTION];
+		PORTS.PROGRESSION_STATUS, PORTS.JIT_CONTROL, PORTS.PROGRESSION_ACTION, PORTS.STOCK_STATUS];
 	if (!Number.isSafeInteger(fleetPort) || fleetPort <= 0 || reserved.includes(fleetPort)) {
 		throw new Error("Fleet status port must not collide with a reserved automation channel");
 	}
@@ -107,7 +119,47 @@ function createManagedServices(ns, cfg, daemonArgs) {
 		createService(DAEMON, launchDaemonArgs)];
 	if (cfg.contracts) services.push(createService(CONTRACTS, ["--fleet-port", fleetPort], "contract-status", PORTS.CONTRACT_STATUS));
 	if (cfg.progression) services.push(createService(PROGRESSION, ["--fleet-port", fleetPort], "progression-status", PORTS.PROGRESSION_STATUS));
+	if (cfg.stocks) services.push(createService(STOCK_TRADER,
+		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve], "stock-status", PORTS.STOCK_STATUS));
 	return services;
+}
+
+function stockAccess(ns) {
+	const checks = [
+		["WSE Account", () => ns.stock?.hasWseAccount?.()],
+		["TIX API", () => ns.stock?.hasTixApiAccess?.()],
+		["4S TIX API", () => ns.stock?.has4SDataTixApi?.()],
+	];
+	const missing = [];
+	for (const [name, check] of checks) {
+		let ok = false;
+		try { ok = check() === true; } catch { ok = false; }
+		if (!ok) missing.push(name);
+	}
+	return { ok: missing.length === 0, missing };
+}
+
+function blockStockService(ns, service, access, now = Date.now()) {
+	const process = findProcess(ns, STOCK_TRADER);
+	if (process) {
+		service.pid = process.pid;
+		service.args = [...process.args];
+		service.threads = process.threads || 1;
+	} else {
+		service.pid = 0;
+		service.nextStartAt = 0;
+		service.failures = 0;
+		try { ns.getPortHandle(service.port).clear(); } catch {}
+	}
+	service.state = "BLOCKED";
+	service.healthySince = null;
+	service.staleSince = null;
+	const reason = `Market access unavailable: ${access.missing.join(", ")}`;
+	if (service.lastEvent !== reason) {
+		service.lastEvent = reason;
+		service.lastEventAt = now;
+	}
+	return service;
 }
 
 function isRunning(ns, script) {
@@ -132,11 +184,12 @@ async function runOnce(ns, script) {
 function progressionActorProcess(ns) { return actorProcesses(ns)[0] ?? null; }
 
 function render(ns, state) {
-	const { cfg, fleetStatus, contractStatus, progressionStatus, fleetHealth, contractHealth, progressionHealth } = state;
+	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, fleetHealth, contractHealth, progressionHealth } = state;
 	const daemon = readDaemonDashboard(ns);
 	const fleet = fleetStatus?.type === "fleet-status" ? fleetStatus : null;
 	const contracts = contractStatus?.type === "contract-status" ? contractStatus : null;
 	const progression = progressionStatus?.type === "progression-status" ? progressionStatus : null;
+	const stocks = stockStatus?.type === "stock-status" ? stockStatus : null;
 	ns.clearLog();
 	ns.print("BITBURNER AUTOMATION");
 	if (daemon) {
@@ -156,6 +209,7 @@ function render(ns, state) {
 		dashboardRow(ns, "Status", "Waiting for daemon dashboard");
 	}
 	renderFleet(ns, fleet, cfg.dashboardDetails, daemon);
+	renderStocks(ns, stocks, cfg, state.stockAccess);
 	renderContracts(ns, contracts, cfg);
 	renderProgression(ns, progression, cfg, state.actions);
 	dashboardSection(ns, "Services");
@@ -234,6 +288,7 @@ function renderFleet(ns, fleet, details = false, daemon = null) {
 	if (daemon?.ramOnline) row("RAM online", daemon.ramOnline);
 	row("Cloud", `${Number(cloud.count) || 0}/${Number(cloud.limit) || 0} servers | ${formatRam(cloud.totalRam)}` +
 		`${cloud.nextAction === "fleet maxed" ? " | MAXED" : ""}`);
+	if (Number(cloud.stockReserveFloor) > 0) row("Stock reserve", `${cash(cloud.stockReserveFloor)} protected from cloud spend`);
 	if (cloud.error) row("Cloud error", cloud.error);
 	else if (cloud.nextAction && cloud.nextAction !== "fleet maxed") row("Cloud next", humanCloudAction(String(cloud.nextAction)));
 	if (details) {
@@ -241,6 +296,23 @@ function renderFleet(ns, fleet, details = false, daemon = null) {
 		row("Cloud spend", cash(cloud.spent));
 		if (daemon?.coreBonus) row("Core bonus", daemon.coreBonus);
 		if (cloud.lastAction && cloud.lastAction !== "none") row("Last upgrade", humanCloudAction(String(cloud.lastAction)));
+	}
+}
+
+function renderStocks(ns, stocks, cfg, access) {
+	const row = (label, value) => dashboardRow(ns, label, value);
+	dashboardSection(ns, "Stocks");
+	if (!cfg.stocks) { row("Status", "Disabled"); return; }
+	if (!access?.ok) { row("Status", `Locked: missing ${access?.missing?.join(", ") || "market access"}`); return; }
+	if (!stocks) { row("Status", "Waiting for stock snapshot"); return; }
+	row("State", stocks.state || "unknown");
+	row("Portfolio", `${cash(stocks.equity)} equity | ${cash(stocks.exposure)} invested`);
+	row("Cash", `${cash(stocks.cash)} | shared floor ${cash(stocks.reserveFloor)}`);
+	row("P/L", `${cashSigned(stocks.openPnl)} open | ${cashSigned(stocks.realized)} realized`);
+	if (stocks.last) row("Last", stocks.last);
+	if (cfg.dashboardDetails) {
+		row("Trades", `${Number(stocks.buys) || 0} buys | ${Number(stocks.sells) || 0} sells | fees ${cash(stocks.fees)}`);
+		row("Positions", String(Number(stocks.positions) || 0));
 	}
 }
 
@@ -555,6 +627,11 @@ function formatRam(gb) {
 	if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} PB`;
 	if (value >= 1024) return `${(value / 1024).toFixed(2)} TB`;
 	return `${value.toFixed(0)} GB`;
+}
+
+function cashSigned(value) {
+	const n = Number(value) || 0;
+	return `${n >= 0 ? "+" : "-"}${cash(Math.abs(n))}`;
 }
 
 function cash(value) {
