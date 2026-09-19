@@ -747,7 +747,7 @@ function incomeGuard(pool, incumbent, trial, now) {
 	return { incumbent: incumbent.name, trial: trial.name, admitted: now,
 		baseline: pool.api.incomeRate(incumbent.stats, 60_000, now),
 		misses: sumMisses(incumbent.stats), trialMisses: sumMisses(trial.stats), fallbacks: incumbent.stats.recoveries,
-		allocationFails: incumbent.stats.allocationFails, admissionSkips: incumbent.admissionSkips, badSince: 0 };
+		allocationFails: incumbent.stats.allocationFails, badSince: 0 };
 }
 
 function sumMisses(stats) { return Object.values(stats.misses).reduce((n, value) => n + value, 0); }
@@ -758,10 +758,14 @@ export function monitorPipelineLoad(ns, pool, now) {
 	if (!guard) return;
 	const trial = pool.pipelines.get(guard.trial), incumbent = pool.pipelines.get(guard.incumbent);
 	if (!trial || !incumbent || trial.retiring) return;
+	// Admission skips are scheduler backpressure, not evidence that a trial is
+	// damaging the incumbent. Near the global launch budget, a healthy incumbent
+	// can accumulate skips while still matching its income model. Kill a trial
+	// early only for concrete overload symptoms; measured income below handles
+	// sustained economic harm after warmup.
 	const overloaded = pool.slowTicks.filter(time => time >= guard.admitted).length >= 8 ||
 		(sumMisses(incumbent.stats) - guard.misses >= 3 && sumMisses(trial.stats) - guard.trialMisses >= 3) ||
-		incumbent.stats.allocationFails - guard.allocationFails >= 4 ||
-		incumbent.admissionSkips - guard.admissionSkips >= 4;
+		incumbent.stats.allocationFails - guard.allocationFails >= 4;
 	if (overloaded) {
 		beginPipelineDrain(pool, trial, { kind: "drain", reason: "shared-load guard protecting incumbent income" }, true);
 		return;
@@ -798,6 +802,6 @@ export function monitorPipelineLoad(ns, pool, now) {
 	if (!trial.trial && now - guard.admitted >= 10 * 60_000 && !poor) {
 		guard.admitted = now; guard.baseline = a;
 		guard.misses = sumMisses(incumbent.stats); guard.trialMisses = sumMisses(trial.stats); guard.fallbacks = incumbent.stats.recoveries;
-		guard.allocationFails = incumbent.stats.allocationFails; guard.admissionSkips = incumbent.admissionSkips;
+		guard.allocationFails = incumbent.stats.allocationFails;
 	}
 }
