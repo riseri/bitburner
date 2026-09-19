@@ -30,7 +30,7 @@ export function daedalusPriorityRng(seed) {
 }
 
 /**
- * Find a four-tick window where Daedalus is in its >=0.9 "distracted" branch.
+ * Find a four-tick band where Daedalus is in its >=0.9 "distracted" branch.
  * Four consecutive 200ms game-cycle seeds absorb timer ordering and the small
  * amount of work between waking up and committing the move.
  */
