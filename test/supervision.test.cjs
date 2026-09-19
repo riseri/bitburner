@@ -149,6 +149,33 @@ test('new dependent managers and daemon follow an adopted custom fleet port', ()
     }
 });
 
+test('supervisor wires stock trader to the dedicated status port', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    const services=api.createManagedServices({ps:()=>[]},
+        {contracts:false,progression:false,stocks:true,stockCashReserve:0.20},[]);
+    const stock=services.find(s=>s.name==='stock-trader.js');
+    assert.ok(stock);
+    assert.equal(stock.port,13);
+    assert.equal(stock.heartbeatType,'stock-status');
+    assert.equal(stock.args[stock.args.indexOf('--cash-reserve')+1],0.20);
+    const fleet=services.find(s=>s.name==='fleet-manager.js');
+    assert.equal(fleet.args[fleet.args.indexOf('--stock-port')+1],13);
+});
+
+test('missing market access blocks stock service without restart backoff', () => {
+    const clock=new Clock(),api=loadScript('supervisor.js',clock),status=new Port();
+    const service=api.createManagedServices({ps:()=>[]},
+        {contracts:false,progression:false,stocks:true,stockCashReserve:0.20},[])
+        .find(s=>s.name==='stock-trader.js');
+    const ns={ps:()=>[],getPortHandle:()=>status};
+    api.blockStockService(ns,service,{ok:false,missing:['4S TIX API']},clock.now);
+    assert.equal(service.state,'BLOCKED');
+    assert.equal(service.pid,0);
+    assert.equal(service.failures,0);
+    assert.equal(service.nextStartAt,0);
+    assert.match(service.lastEvent,/4S TIX API/);
+});
+
 test('an inconsistent existing daemon/fleet pair fails before starting dependents', () => {
     const api=loadScript('supervisor.js',new Clock());
     assert.throws(()=>api.createManagedServices({ps:()=>[
@@ -160,7 +187,8 @@ test('an inconsistent existing daemon/fleet pair fails before starting dependent
 test('action channel is reserved from fleet and daemon configuration', () => {
     const clock=new Clock(),api=loadScript('supervisor.js',clock),daemon=loadScript('daemon.js',clock);
     assert.throws(()=>api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',14]}]}, {}, []),/reserved/);
-    for(const config of [{port:14,fleetPort:19,controlPort:15},{port:20,fleetPort:14,controlPort:15},{port:20,fleetPort:19,controlPort:14}]) {
+    assert.throws(()=>api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',13]}]}, {}, []),/reserved/);
+    for(const config of [{port:14,fleetPort:19,controlPort:15},{port:20,fleetPort:14,controlPort:15},{port:20,fleetPort:19,controlPort:14},{port:13,fleetPort:19,controlPort:15}]) {
         assert.throws(()=>daemon.validateDaemonPorts(config),/reserved/);
     }
 });
