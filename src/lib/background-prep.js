@@ -96,18 +96,27 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 	const chance = upperBound ? 1 : Math.min(1,
 		ns.hackAnalyzeChance(name) * (100 - h.min) / (100 - h.sec));
 	const slotFill = Boolean(ctx.slotFill);
+	const promotion = Boolean(ctx.promotion);
 	const activeRate = ctx.runtime.plan.expected;
+	const replacementRate = Number(ctx.replacementRate) || activeRate;
 	const freeRate = Number(ctx.availableBatchRate);
+	const replacementBatchRate = Number(ctx.replacementBatchRate);
 	const period = slotFill
 		? Math.max(4 * ctx.cfg.gap + 20, 1000 / Math.max(0.25,
 			Number.isFinite(freeRate) && freeRate > 0 ? freeRate : 1000 / ctx.runtime.plan.period))
-		: Math.max(ctx.runtime.plan.period, 4 * ctx.cfg.gap + 20);
+		: promotion
+			? Math.max(4 * ctx.cfg.gap + 20, 1000 / Math.max(0.25,
+				Number.isFinite(replacementBatchRate) && replacementBatchRate > 0
+					? replacementBatchRate : 1000 / ctx.runtime.plan.period))
+			: Math.max(ctx.runtime.plan.period, 4 * ctx.cfg.gap + 20);
 	const potential = h.max * ctx.cfg.maxSteal * 0.95 * chance * 1000 / period;
-	// Filling an empty second lane is additive. It does not need to beat the
-	// incumbent by the replacement threshold; even a modest second earner is
-	// useful while richer long-prep targets remain future options.
+	// Filling an empty second lane is additive. Promotion is different: both
+	// lanes already earn, so a candidate must beat the weaker lane's prepped
+	// steady estimate by the configured switch threshold.
 	if (slotFill) {
 		if (!(potential > activeRate * SLOT_FILL_MIN_ACTIVE_FRACTION)) return null;
+	} else if (promotion) {
+		if (!(potential > replacementRate * ctx.cfg.switchThreshold)) return null;
 	} else if (!(potential > activeRate * ctx.cfg.switchThreshold)) return null;
 
 	const budget = prepBudget(ctx);
@@ -141,12 +150,17 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 		score = earningMs > 0
 			? potential * earningMs / horizon
 			: potential * 0.01 / (1 + (prepMs + warmupMs) / horizon);
+	} else if (promotion) {
+		// Once both earning lanes are healthy, prep happens off to the side.
+		// Rank promotion candidates by prepped steady earning power, not by how
+		// quickly the prep cost amortizes. The current lanes keep paying meanwhile.
+		score = potential;
 	} else {
 		score = (potential - activeRate) *
 			Math.max(0, ctx.state.horizon - prepMs - warmupMs) / ctx.state.horizon;
 	}
 	if (!(score > 0) || !Number.isFinite(score)) return null;
-	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill };
+	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill, promotion };
 }
 
 function prepBudget(ctx) {
@@ -240,7 +254,9 @@ function stepPrep(ns, ctx, now) {
 	const h = prepHealth(ns, state.target);
 	state.health = h;
 	if (h.ready) {
-		state.status = "READY"; state.reason = "prepared only; no automatic promotion";
+		state.status = "READY";
+		state.reason = ctx.promotion ? "prepared for steady-state promotion"
+			: ctx.slotFill ? "prepared for empty target slot" : "prepared only";
 		state.readyAt ||= now;
 		return;
 	}

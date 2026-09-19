@@ -123,6 +123,37 @@ test('empty second-slot scoring prefers near-term earnings over a slow two-hour 
         'empty-slot acquisition should prefer the target that starts paying inside the short horizon');
 });
 
+
+test('steady promotion ignores prep amortization and ranks by prepped earning power', () => {
+    const f = fixture();
+    f.servers.fast = { max: 4e6, money: 4e6, min: 5, sec: 5, required: 60 };
+    f.servers.whale = { max: 30e6, money: 1e6, min: 5, sec: 20, required: 80 };
+    const oldW = f.ns.getWeakenTime, oldG = f.ns.getGrowTime;
+    f.ns.getWeakenTime = h => h === 'whale' ? 900_000 : oldW(h);
+    f.ns.getGrowTime = h => h === 'whale' ? 720_000 : oldG(h);
+
+    f.ctx.promotion = true;
+    f.ctx.replacementRate = 1e6;
+    f.ctx.replacementBatchRate = 2;
+    const fast = f.prep.estimateBackgroundCandidate(f.ns, 'fast', f.ctx);
+    const whale = f.prep.estimateBackgroundCandidate(f.ns, 'whale', f.ctx);
+    assert.ok(fast && whale);
+    assert.equal(fast.promotion, true); assert.equal(whale.promotion, true);
+    assert.ok(whale.prepMs > fast.prepMs);
+    assert.ok(whale.potential > fast.potential);
+    assert.ok(whale.score > fast.score,
+        'promotion should prefer higher prepped steady income even when prep takes much longer');
+});
+
+test('steady promotion still requires switch-threshold upside over the weaker lane', () => {
+    const f = fixture();
+    f.servers.small = { max: 1.5e6, money: 1.5e6, min: 5, sec: 5, required: 60 };
+    f.ctx.promotion = true;
+    f.ctx.replacementRate = 1.5e6;
+    f.ctx.replacementBatchRate = 2;
+    assert.equal(f.prep.estimateBackgroundCandidate(f.ns, 'small', f.ctx), null);
+});
+
 test('one background worker reaches READY without hacking or touching active PIDs', async () => {
     const f = fixture(); f.select();
     for (let i = 0; i < 40 && f.state.status !== 'READY'; i++) {
