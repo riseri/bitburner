@@ -1,21 +1,34 @@
 import { chooseGoMove } from "lib/go-strategy.js";
+import { PORTS } from "lib/ports.js";
 import { dashboardSection, dashboardRow } from "lib/dashboard.js";
 import { GO_STATE_FILE, GO_OPPONENTS, GO_CYCLE_MS, goConfig, readGoSnapshot, snapshotKey, readGoRecord, saveGoRecord, mayStartGo, assertSameGo, verifyGoReply, inferWhiteReply, daedalusPriorityRng, findDaedalusDistractionWindow } from "lib/go-session.js";
 
-/** Standalone IPvGO player. Never launched by the supervisor or deployed to the fleet. @param {NS} ns */
+/** Supervisor-managed singleton IPvGO player. Never deployed to the hacking fleet. @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([["opponent", "Daedalus"], ["size", 5], ["games", 0],
-		["takeover", false], ["interval", 25], ["think-ms", 8], ["rng-snipe", false], ["rng-max-wait", 10_000]]);
+		["takeover", false], ["interval", 25], ["think-ms", 8], ["rng-snipe", false], ["rng-max-wait", 10_000],
+		["port", PORTS.GO_STATUS]]);
 	ns.disableLog("ALL");
+
+	let status = null;
+	let snapshot = null;
+	let session = null;
 	try {
 		if (ns.getHostname() !== "home") throw new Error("Run go-bot.js on home only");
 		if (ns.ps("home").some(p => p.filename === ns.getScriptName() && p.pid !== ns.pid)) {
 			throw new Error("Only one go-bot.js may play at a time");
 		}
-		const cfg = goConfig(flags), session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, score: 0, gameMs: 0,
+
+		const statusPort = Number(flags.port);
+		if (!Number.isSafeInteger(statusPort) || statusPort <= 0) throw new Error("port must be a positive integer");
+		status = ns.getPortHandle(statusPort);
+		status.clear();
+
+		const cfg = goConfig(flags);
+		session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, score: 0, gameMs: 0,
 			startedAt: Date.now(), gameStartedAt: Date.now(), startBonus: 0, last: "Starting", analysis: null,
 			rng: null, rngAttempts: 0, rngSnipes: 0, rngWaitMs: 0 };
-		let snapshot = readGoSnapshot(ns);
+		snapshot = readGoSnapshot(ns);
 		const decision = mayStartGo(snapshot, readGoRecord(ns), cfg.takeover);
 		if (decision === "new") snapshot = await startGame(ns, cfg, snapshot);
 		else if (snapshot.game.currentPlayer === "Black") await saveGoRecord(ns, snapshot, "ready");
@@ -24,6 +37,7 @@ export async function main(ns) {
 		session.startedAt = Date.now();
 		session.gameStartedAt = Date.now();
 		let turns = 0;
+		renderGo(ns, snapshot, session, "STARTING", status);
 
 		while (true) {
 			if (snapshot.game.currentPlayer !== "White") assertSameGo(ns, snapshot);
@@ -36,7 +50,7 @@ export async function main(ns) {
 				session.gameMs += Math.max(0, Date.now() - session.gameStartedAt);
 				session.last = `${won ? "Won" : "Lost"} ${snapshot.game.blackScore} to ${snapshot.game.whiteScore} vs ${snapshot.opponent}`;
 				await saveGoRecord(ns, snapshot, "complete", { lastResult: session.last });
-				renderGo(ns, snapshot, session, "GAME COMPLETE");
+				renderGo(ns, snapshot, session, "GAME COMPLETE", status);
 				if (cfg.games && session.games >= cfg.games) return;
 				await ns.sleep(Math.max(250, cfg.interval));
 				snapshot = await startGame(ns, cfg, snapshot);
@@ -54,7 +68,7 @@ export async function main(ns) {
 			if (snapshot.game.currentPlayer === "White") {
 				session.last = "Waiting for the opponent's pending move";
 				await saveGoRecord(ns, snapshot, "pending");
-				renderGo(ns, snapshot, session, "WAITING FOR OPPONENT");
+				renderGo(ns, snapshot, session, "WAITING FOR OPPONENT", status);
 				const current = readGoSnapshot(ns);
 				reply = snapshotKey(current) === snapshotKey(snapshot)
 					? await ns.go.opponentNextTurn(false) : inferWhiteReply(snapshot, current);
@@ -86,7 +100,7 @@ export async function main(ns) {
 				session.last = action.x === null ? action.reason : `(${action.x}, ${action.y}) ${action.reason}`;
 				await saveGoRecord(ns, snapshot, "pending", { action: { x: action.x, y: action.y } });
 				assertSameGo(ns, snapshot);
-				renderGo(ns, snapshot, session, "PLAYING / AWAITING REPLY");
+				renderGo(ns, snapshot, session, "PLAYING / AWAITING REPLY", status);
 				// One awaited API action at a time. No timer watchdog resets a slow opponent.
 				reply = action.x === null ? await ns.go.passTurn() : await ns.go.makeMove(action.x, action.y);
 				session.moves++;
@@ -97,12 +111,14 @@ export async function main(ns) {
 			}
 			snapshot = after;
 			await saveGoRecord(ns, snapshot, "ready");
-			renderGo(ns, snapshot, session, "RUNNING");
+			renderGo(ns, snapshot, session, "RUNNING", status);
 		}
 	} catch (error) {
 		const reason = String(error?.message ?? error);
+		if (status) publishGoStopped(status, ns, snapshot, session, reason);
 		ns.print(`STOPPED: ${reason}`);
-		// One terminal message on exit, not a terminal-shaped machine gun.
+		// One terminal message on exit. The supervisor treats STOPPED status as blocked,
+		// so it will not blindly restart a game with uncertain ownership.
 		ns.tprint(`IPvGO bot stopped: ${reason}`);
 	}
 }
@@ -150,10 +166,11 @@ async function startGame(ns, cfg, previous) {
 	return snapshot;
 }
 
-function renderGo(ns, snapshot, session, state) {
+function renderGo(ns, snapshot, session, state, status = null) {
 	const stats = ns.go.analysis.getStats()[snapshot.opponent];
 	const member = ns.getPlayer().factions.includes(snapshot.opponent);
 	const row = (label, value) => dashboardRow(ns, label, value);
+	publishGoStatus(status, ns, snapshot, session, state, stats, member);
 
 	ns.clearLog();
 	ns.print("IPvGO BOT");
@@ -191,10 +208,59 @@ function renderGo(ns, snapshot, session, state) {
 		dashboardSection(ns, "Daedalus timing");
 		const r = session.rng;
 		const last = r ? `${r.armed ? "ARMED" : "MISS"} | last wait ${(r.waitedMs / 1000).toFixed(1)}s` : "not needed on final pass";
-		row("RNG rig", `${session.rngSnipes}/${session.rngAttempts} armed | ${last} | total wait ${(session.rngWaitMs / 1000).toFixed(1)}s`);\n\t\tif (r?.priority?.length) row("Daedalus RNG", `${r.priority.map(value => value.toFixed(3)).join(" / ")} priority samples`);
+		row("RNG rig", `${session.rngSnipes}/${session.rngAttempts} armed | ${last} | total wait ${(session.rngWaitMs / 1000).toFixed(1)}s`);
+		if (r?.priority?.length) row("Daedalus RNG", `${r.priority.map(value => value.toFixed(3)).join(" / ")} priority samples`);
 	}
 
 	dashboardSection(ns, "Safety");
 	row("Manual play", `Stop this bot first | resume state: ${GO_STATE_FILE}`);
 }
+
+function publishGoStatus(port, ns, snapshot, session, state, stats = null, member = false) {
+	if (!port || !snapshot || !session) return;
+	port.clear();
+	port.write({
+		type: "go-status",
+		version: 1,
+		generatedAt: Date.now(),
+		producerPid: ns.pid,
+		state,
+		terminal: false,
+		opponent: snapshot.opponent,
+		size: snapshot.board.length,
+		currentPlayer: snapshot.game.currentPlayer,
+		blackScore: snapshot.game.blackScore,
+		whiteScore: snapshot.game.whiteScore,
+		games: session.games,
+		wins: session.wins,
+		losses: session.losses,
+		moves: session.moves,
+		last: session.last,
+		bonusPercent: Number(stats?.bonusPercent) || 0,
+		bonusDescription: stats?.bonusDescription || "",
+		winStreak: Number(stats?.winStreak) || 0,
+		member: Boolean(member),
+	});
+}
+
+function publishGoStopped(port, ns, snapshot, session, error) {
+	port.clear();
+	port.write({
+		type: "go-status",
+		version: 1,
+		generatedAt: Date.now(),
+		producerPid: ns.pid,
+		state: "STOPPED",
+		terminal: true,
+		error,
+		opponent: snapshot?.opponent || "",
+		size: snapshot?.board?.length || 0,
+		games: session?.games || 0,
+		wins: session?.wins || 0,
+		losses: session?.losses || 0,
+		moves: session?.moves || 0,
+		last: session?.last || "Stopped before session initialization",
+	});
+}
+
 
