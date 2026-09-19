@@ -1,3 +1,4 @@
+import { readSavings } from "lib/savings.js";
 import {
 	normalizeStockConfig,
 	expectedDirectionalEdge,
@@ -182,7 +183,7 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 	let cash = metrics.cash;
 	let exposure = metrics.exposure;
 	let equity = metrics.equity;
-	const reserveFloor = Math.max(cfg.cashFloor, equity * cfg.cashReserve);
+	const reserveFloor = Math.max(cfg.cashFloor, equity * cfg.cashReserve, readSavings(ns).floor);
 	const exposureCap = equity * cfg.maxExposure;
 	const positionCap = equity * cfg.maxPosition;
 	const candidates = rankTradeCandidates(rows, cfg, session.canShort);
@@ -293,7 +294,7 @@ function readMarket(ns, symbols) {
 function render(ns, market, cfg, session, commission, state) {
 	const rows = market.rows ?? market;
 	const metrics = market.metrics ?? portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
-	const reserveFloor = Math.max(cfg.cashFloor, metrics.equity * cfg.cashReserve);
+	const reserveFloor = Math.max(cfg.cashFloor, metrics.equity * cfg.cashReserve, readSavings(ns).floor);
 	const exposureCap = metrics.equity * cfg.maxExposure;
 	const positionCap = metrics.equity * cfg.maxPosition;
 	const candidates = rankTradeCandidates(rows, cfg, session.canShort).slice(0, 5);
@@ -358,7 +359,7 @@ function deploymentSummary(rows, candidates, metrics, cfg, commission, positionC
 function publishStatus(port, ns, market, cfg, session, commission, state, missing = []) {
 	const rows = market.rows ?? market;
 	const metrics = market.metrics ?? portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
-	const reserveFloor = Math.max(cfg.cashFloor, metrics.equity * cfg.cashReserve);
+	const reserveFloor = Math.max(cfg.cashFloor, metrics.equity * cfg.cashReserve, readSavings(ns).floor);
 	const positions = rows.filter(row => row.longShares > 0 || row.shortShares > 0).length;
 	port.clear();
 	port.write({

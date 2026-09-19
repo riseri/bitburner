@@ -1,3 +1,4 @@
+import { readSavings } from "lib/savings.js";
 import { PORTS } from "lib/ports.js";
 import { freshStatus, resetEpoch, singularityAvailable, actionKey, createRequest, terminalAction, validateRequest } from "lib/progression-protocol.js";
 
@@ -80,7 +81,7 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 			blockedReason = `${objective.target}: ${cached.reason} (retry cooling down)`; continue;
 		}
 		const estimate = objective.costEstimate || 0;
-		if (estimate > 0 && cash * (1 - reserve) < estimate) {
+		if (estimate > 0 && (cash * (1 - reserve) < estimate || cash - estimate < readSavings(ns, objective.target).floor)) {
 			blockedReason = `${objective.target}: waiting for cash reserve`; continue;
 		}
 		const request = { ...createRequest(ns, plan, objective, reserve, ++state.sequence, now),

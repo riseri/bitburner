@@ -82,13 +82,15 @@ Defaults:
 
 The reserve is based on **portfolio equity**, not just current cash. This prevents
 the reserve target from shrinking toward zero after each purchase and gives the
-cloud/JIT ecosystem room to keep spending.
+cloud/JIT ecosystem room to keep spending. The shared `savings.js` goal adds an absolute floor for new
+entries; it never prevents closing positions. See the root README for controls.
 
 ## Existing positions
 
 Existing long positions are adopted and managed by the same exit rule. Existing
-short positions are never modified and the trader will not add a long position
-to a symbol that already has a short position.
+short positions are managed by the mirrored exit rule when shorting is unlocked;
+without that capability they remain untouched. The trader will not add a long
+position to a symbol that already has a short position.
 
 Stopping the script never liquidates anything automatically. Manual trading while
 the script is running is unsupported; stop the trader first.

@@ -1,3 +1,6 @@
+import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
+import { readSavings, writeSavings } from "lib/savings.js";
+import { loadTelemetry, recordTelemetry, summarizeTelemetry } from "lib/telemetry.js";
 import { dashboardSection, dashboardRow, dashboardTargets, dashboardTime } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
@@ -29,6 +32,19 @@ export async function main(ns) {
 		["go", true],
 		["contract-selftest", false],
 		["interval", 5_000],
+		["telemetry", true],
+		["diagnostics", true],
+		["augmentations", true],
+		["augmentation-focus", "hacking"],
+		["augmentation-target", ""],
+		["augmentation-price-multiplier", 1],
+		["savings", "auto"],
+		["save-amount", -1],
+		["save-label", "Savings"],
+		["save-target", ""],
+		["cloud-roi", true],
+		["cloud-payback", 1800],
+		["home-reserve", 8],
 	]);
 
 	ns.disableLog("ALL");
@@ -39,6 +55,15 @@ export async function main(ns) {
 
 	const cfg = {
 		dashboardDetails: asBoolean(flags["dashboard-details"]),
+		telemetry: asBoolean(flags.telemetry),
+		diagnostics: asBoolean(flags.diagnostics),
+		augmentations: asBoolean(flags.augmentations),
+		augmentationFocus: String(flags["augmentation-focus"]),
+		augmentationTarget: String(flags["augmentation-target"]),
+		augmentationMultiplier: Number(flags["augmentation-price-multiplier"]),
+		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
+		cloudRoi: asBoolean(flags["cloud-roi"]),
+		cloudPayback: Number(flags["cloud-payback"]),
 		contracts: asBoolean(flags.contracts),
 		progression: asBoolean(flags.progression),
 		progressionActions: asBoolean(flags["progression-actions"]),
@@ -50,6 +75,7 @@ export async function main(ns) {
 		interval: Math.max(1_000, Number(flags.interval) || 5_000),
 	};
 
+	validateSupervisorOptions(flags, cfg);
 	const required = [DAEMON, FLEET];
 	if (cfg.contracts) required.push(CONTRACTS);
 	if (cfg.progression) required.push(PROGRESSION);
@@ -74,10 +100,31 @@ export async function main(ns) {
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
 	if (Number(flags["max-targets"]) !== 2) daemonArgs.push("--max-targets", Number(flags["max-targets"]));
 	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
+	const utilityReserve = Math.max(0,
+		cfg.diagnostics ? ns.getScriptRam("doctor.js", HOME) : 0,
+		cfg.augmentations && augmentationAccess(ns) ? ns.getScriptRam("augmentation-planner.js", HOME) : 0,
+		cfg.progression && cfg.progressionActions ? ns.getScriptRam(PROGRESSION_PURCHASE, HOME) : 0,
+		cfg.progression && cfg.progressionActions ? ns.getScriptRam(PROGRESSION_BACKDOOR, HOME) : 0);
+	daemonArgs.push("--home-reserve", Math.max(Number(flags["home-reserve"]), utilityReserve + 8));
 	const services = createManagedServices(ns, cfg, daemonArgs);
 	const actions = createActionState();
+	const jobs = createSupervisorUtilities(cfg);
+	if (cfg.savingsMode === "fixed") await writeSavings(ns, Number(flags["save-amount"]), flags["save-label"], flags["save-target"]);
+	else if (cfg.savingsMode === "none") await writeSavings(ns, 0, "No savings goal");
+	const telemetry = cfg.telemetry ? loadTelemetry(ns) : null;
 
 	while (true) {
+		// Keep optional child computations out of the supervisor and serialize their RAM use.
+		for (const job of jobs) {
+			const other = jobs.find(candidate => candidate !== job && ns.ps(HOME).some(p => p.filename === candidate.script));
+			const gate = job.type === "augmentation-plan" && !augmentationAccess(ns) ? "Singularity is locked"
+				: other ? `Waiting for ${other.script}` : "";
+			tickUtilityJob(ns, job, gate);
+		}
+		cfg.utilityJobs = jobs;
+		cfg.augmentationPlan = currentAugmentationPlan(ns, jobs.find(job => job.type === "augmentation-plan"));
+		try { await updateSupervisorSavings(ns, cfg, cfg.augmentationPlan); }
+		catch (error) { cfg.savingsStatus = `Savings update failed: ${String(error.message || error)}`; }
 		const stockGate = stockAccess(ns);
 		for (const service of services) {
 			if (service.name === STOCK_TRADER && !stockGate.ok) {
@@ -102,6 +149,9 @@ export async function main(ns) {
 			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER),
 			goStatus = snapshot(GO_BOT);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
+		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
+		cfg.telemetryError = telemetry?.error || "";
+		if (telemetry) cfg.telemetrySummary = summarizeTelemetry(telemetry.samples, Date.now() - 3600000);
 		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, stockAccess: stockGate });
 		await ns.sleep(cfg.interval);
 	}
@@ -115,6 +165,8 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	const managedDaemonArgs = existingDaemon?.args ?? daemonArgs;
 	const fleetArgs = ["--port", readArgument(managedDaemonArgs, "--fleet-port", PORTS.FLEET_STATUS),
 		"--stock-port", PORTS.STOCK_STATUS,
+		"--cloud-roi", cfg.cloudRoi ?? true,
+		"--cloud-payback", cfg.cloudPayback ?? 1800,
 		"--cloud", readArgument(managedDaemonArgs, "--cloud", true),
 		"--cloud-reserve", readArgument(managedDaemonArgs, "--cloud-reserve", 0.10),
 		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", 32),
@@ -238,6 +290,34 @@ function render(ns, state) {
 
 	ns.clearLog();
 	ns.print("BITBURNER AUTOMATION");
+	const goal = readSavings(ns);
+	if (goal.floor > 0 || goal.error) {
+		const funds = ns.getServerMoneyAvailable(HOME);
+		const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
+		const fresh = snapshot?.type === "jit-status" && Number.isFinite(snapshot.generatedAt) && Date.now() >= snapshot.generatedAt && Date.now() - snapshot.generatedAt < 15000 && ns.isRunning(snapshot.pid);
+		const eta = fresh && snapshot.income60 > 0 ? Math.max(0, goal.floor - funds) / snapshot.income60 : null;
+		dashboardRow(ns, "Savings", goal.error || `${goal.label}: ${cash(funds)} / ${cash(goal.floor)} | ${funds >= goal.floor ? "FUNDED" : eta === null ? "ETA unknown" : `~${Math.ceil(eta)}s at gross hack income`}`);
+	}
+	if (fleet?.cloud?.investment) dashboardRow(ns, "RAM investment", fleet.cloud.investment);
+	if (cfg.telemetryError) dashboardRow(ns, "Telemetry", cfg.telemetryError);
+	else if (cfg.telemetrySummary) {
+		const report = cfg.telemetrySummary;
+		dashboardRow(ns, "History 1h", `${cash(report.earnings)} hacked | ${cash(report.spending)} RAM spending | ${report.recoveries} recoveries | ${report.count} samples`);
+	}
+	if (cfg.savingsStatus) dashboardRow(ns, "Savings policy", cfg.savingsStatus);
+	for (const job of cfg.utilityJobs || []) {
+		const stale = job.type === "augmentation-plan" && job.report && Date.now() - job.report.generatedAt > 120000;
+		dashboardRow(ns, job.type === "diagnostics" ? "Diagnostics" : "Augmentations", `${stale ? "STALE / " : ""}${job.state}: ${job.message}`);
+		if (job.type === "diagnostics") {
+			for (const issue of (job.report?.issues || []).slice(0, cfg.dashboardDetails ? 10 : 2)) dashboardRow(ns, "Warning", issue);
+		}
+	}
+	if (cfg.dashboardDetails && cfg.augmentationPlan) {
+		dashboardSection(ns, "Augmentation shopping plan");
+		for (const item of cfg.augmentationPlan.order.slice(0, 8)) dashboardRow(ns, item.name,
+			`${item.faction} | ${cash(item.price)} | rep gap ${Math.ceil(item.repGap)} | prerequisites ${item.prerequisites.join(", ") || "none"}`);
+		dashboardRow(ns, "Basket", `${cash(cfg.augmentationPlan.total)} | ${cfg.augmentationPlan.multiplier === 1 ? "current-price lower bound" : `estimated at ${cfg.augmentationPlan.multiplier}x purchase inflation`}`);
+	}
 
 	if (!cfg.dashboardDetails) {
 		renderOverview(ns, daemon, fleet);
@@ -843,4 +923,31 @@ function clampFraction(value) {
 function asBoolean(value) {
 	if (typeof value === "boolean") return value;
 	return !["false", "0", "no", "off"].includes(String(value).trim().toLowerCase());
+}
+
+function augmentationAccess(ns) {
+	try {
+		const reset = ns.getResetInfo();
+		return reset.currentNode === 4 || Number(reset.ownedSF?.get?.(4)) > 0;
+	} catch { return false; }
+}
+
+function createSupervisorUtilities(cfg) {
+	const jobs = [];
+	if (cfg.diagnostics) jobs.push(createUtilityJob("doctor.js", "data/diagnostics.json", "diagnostics", [], 0));
+	if (cfg.augmentations) jobs.push(createUtilityJob("augmentation-planner.js", "data/augmentation-plan.json", "augmentation-plan",
+		["--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget, "--price-multiplier", cfg.augmentationMultiplier]));
+	return jobs;
+}
+
+function validateSupervisorOptions(flags, cfg) {
+	if (!["auto", "keep", "programs", "augmentations", "none"].includes(String(flags.savings))) throw new Error("savings must be auto, keep, programs, augmentations, or none");
+	const amount = Number(flags["save-amount"]);
+	if (!Number.isFinite(amount) || amount < -1 || (amount < 0 && amount !== -1)) throw new Error("save-amount must be nonnegative or -1 (unset)");
+	if (amount >= 0 && !["auto", "keep"].includes(String(flags.savings))) throw new Error("Use save-amount or an automatic savings mode, not both");
+	if (!["hacking", "all"].includes(cfg.augmentationFocus)) throw new Error("augmentation-focus must be hacking or all");
+	if (!Number.isFinite(cfg.augmentationMultiplier) || cfg.augmentationMultiplier < 1) throw new Error("augmentation-price-multiplier must be at least 1");
+	if (!Number.isFinite(cfg.cloudPayback) || cfg.cloudPayback <= 0) throw new Error("cloud-payback must be positive");
+	if (!Number.isFinite(Number(flags["home-reserve"])) || Number(flags["home-reserve"]) < 0) throw new Error("home-reserve must be nonnegative");
+	if (cfg.savingsMode === "augmentations" && !cfg.augmentations) throw new Error("Augmentation savings requires augmentation planning");
 }

@@ -22,7 +22,9 @@ hack chance, thread requirements, timing and shared resource constraints. The
 scouting upper bound is never treated as an earning rate. Live tuning yields
 between small search steps rather than running the entire search in the hot loop.
 The peer keeps earning during tuning and initial warmup. Once both slots are
-occupied, no third target is prepared or started in this rollout.
+occupied and both lanes are stable and productive, spare RAM can prepare a third
+candidate. A stronger ready candidate replaces the support lane after its owned
+work drains; at most two earning lanes remain active.
 
 ## Shared limits and priority
 
@@ -165,5 +167,6 @@ scripts or suspended/offline time. Passing tests supports the tested ownership,
 resource and recovery invariants, not guaranteed dollars/second or universal
 stability. Monitor per-target income, combined income and recovery after the
 first live two-target warmup before considering higher concurrency or tighter
-timing. This rollout does not implement arbitrary target counts or continuous
-replacement with a third candidate.
+timing. This rollout does not implement arbitrary target counts. Stable lanes can scout
+and prepare a third candidate for a controlled replacement; promotion waits for
+a safe handoff and drains the old support lane before admitting its replacement.

@@ -1,3 +1,5 @@
+import { readSavings } from "lib/savings.js";
+import { evaluateFleetInvestment } from "lib/fleet-economics.js";
 import { PORTS } from "lib/ports.js";
 
 const HOME = "home";
@@ -11,6 +13,8 @@ export async function main(ns) {
 	const flags = ns.flags([
 		["port", PORTS.FLEET_STATUS],
 		["cloud", true],
+		["cloud-roi", true],
+		["cloud-payback", 1800],
 		["cloud-reserve", 0.10],
 		["cloud-cash-floor", 0],
 		["cloud-max-action", 0.25],
@@ -27,6 +31,8 @@ export async function main(ns) {
 		port: Number(flags.port),
 		cloud: {
 			enabled: asBoolean(flags.cloud),
+			roi: asBoolean(flags["cloud-roi"]),
+			payback: Math.max(1, Number(flags["cloud-payback"]) || 1800),
 			cashReserve: clampFraction(flags["cloud-reserve"], 0.95),
 			cashFloor: Math.max(0, Number(flags["cloud-cash-floor"]) || 0),
 			maxAction: clampFraction(flags["cloud-max-action"], 1),
@@ -133,7 +139,7 @@ async function manageOneCloudAction(ns, cfg, state) {
 	const cashAvailable = ns.getServerMoneyAvailable(HOME);
 	const stockReserveFloor = readStockReserveFloor(ns, cfg.stockPort);
 	const reserveFloor = Math.max(
-		cfg.cloud.cashFloor,
+		cfg.cloud.cashFloor, readSavings(ns).floor,
 		cashAvailable * cfg.cloud.cashReserve,
 		stockReserveFloor
 	);
@@ -147,7 +153,13 @@ async function manageOneCloudAction(ns, cfg, state) {
 	state.stockReserveFloor = stockReserveFloor;
 	state.actionBudget = actionBudget;
 
-	if (actionBudget <= 0) return;
+	if (actionBudget <= 0) { state.investment = "Saving cash / reserve protected"; return; }
+
+	if (cfg.cloud.roi && names.length > 0) {
+		await buyBestInvestment(ns, cfg, state, names, limit, ramLimit, actionBudget);
+		return;
+	}
+	state.investment = cfg.cloud.roi ? "Bootstrap: first cloud server" : "ROI guard disabled";
 
 	if (names.length < limit) {
 		const purchaseRam = largestAffordablePurchaseRam(
@@ -376,7 +388,8 @@ function refreshCloudState(ns, cfg, state) {
 	state.totalRam = servers.reduce((sum, server) => sum + server.ram, 0);
 	state.minRam = servers.length ? Math.min(...servers.map(server => server.ram)) : 0;
 	state.maxRam = servers.length ? Math.max(...servers.map(server => server.ram)) : 0;
-	state.nextAction = describeNextCloudAction(ns, cfg, servers, limit, ramLimit);
+	state.nextAction = cfg.cloud.enabled && cfg.cloud.roi && state.investment
+		? state.investment : describeNextCloudAction(ns, cfg, servers, limit, ramLimit);
 }
 
 function describeNextCloudAction(ns, cfg, servers, limit, ramLimit) {
@@ -384,7 +397,7 @@ function describeNextCloudAction(ns, cfg, servers, limit, ramLimit) {
 
 	const cashAvailable = ns.getServerMoneyAvailable(HOME);
 	const stockReserveFloor = readStockReserveFloor(ns, cfg.stockPort);
-	const reserveFloor = Math.max(cfg.cloud.cashFloor, cashAvailable * cfg.cloud.cashReserve, stockReserveFloor);
+	const reserveFloor = Math.max(cfg.cloud.cashFloor, readSavings(ns).floor, cashAvailable * cfg.cloud.cashReserve, stockReserveFloor);
 	const spendable = Math.max(0, cashAvailable - reserveFloor);
 	const budget = Math.min(spendable, cashAvailable * cfg.cloud.maxAction);
 
@@ -462,4 +475,43 @@ function cash(value) {
 		if (Math.abs(n) >= threshold) return `$${(n / threshold).toFixed(2)}${suffix}`;
 	}
 	return `$${n.toFixed(Math.abs(n) >= 100 ? 0 : 2)}`;
+}
+
+async function buyBestInvestment(ns, cfg, state, names, limit, ramLimit, budget) {
+    const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
+    const now = Date.now();
+    if (snapshot?.type !== "jit-status" || !Number.isFinite(snapshot.generatedAt) || now < snapshot.generatedAt ||
+        now - snapshot.generatedAt > 15000 || !ns.isRunning(snapshot.pid)) {
+        state.investment = "Waiting for fresh live scheduler evidence"; return;
+    }
+    const candidates = [];
+    if (names.length < limit) {
+        for (let ram = cfg.cloud.minRam; ram <= ramLimit; ram *= 2) {
+            const cost = ns.cloud.getServerCost(ram);
+            if (Number.isFinite(cost) && cost > 0 && cost <= budget) candidates.push({ ram, added: ram, cost });
+        }
+    }
+    for (const name of names) {
+        const current = ns.getServerMaxRam(name);
+        if (!(current > 0)) continue;
+        for (let ram = current * 2; ram <= ramLimit; ram *= 2) {
+            const cost = ns.cloud.getServerUpgradeCost(name, ram);
+            if (Number.isFinite(cost) && cost > 0 && cost <= budget) candidates.push({ name, ram, added: ram - current, cost });
+        }
+    }
+    const scored = candidates.map(c => ({ ...c, ...evaluateFleetInvestment(snapshot, c.added, c.cost, cfg.cloud.payback) }));
+    const best = scored.filter(c => c.ok).sort((a, b) => a.payback - b.payback || a.cost - b.cost)[0];
+    state.investment = best?.reason || scored[0]?.reason || "Waiting for an affordable RAM upgrade";
+    if (!best) return;
+    // Read current cash and the goal again immediately before the transaction.
+    const cashNow = ns.getServerMoneyAvailable(HOME);
+    const floor = Math.max(cfg.cloud.cashFloor, cashNow * cfg.cloud.cashReserve, readSavings(ns).floor, readStockReserveFloor(ns, cfg.stockPort));
+    if (cashNow - best.cost < floor) { state.investment = "Cash goal changed; purchase deferred"; return; }
+    const host = best.name || nextCloudServerName(ns, cfg.cloud.prefix);
+    const ok = best.name ? ns.cloud.upgradeServer(host, best.ram) : ns.cloud.purchaseServer(host, best.ram);
+    if (!ok) { state.lastAction = `investment failed: ${host}`; return; }
+    if (best.name) state.upgrades++; else state.purchases++;
+    state.spent += best.cost;
+    state.lastAction = `${best.name ? "upgraded" : "bought"} ${host} ${formatRam(best.ram)} for ${cash(best.cost)}`;
+    if (!best.name) await ns.scp(WORKERS, host, HOME);
 }

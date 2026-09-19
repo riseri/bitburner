@@ -98,7 +98,9 @@ An unaffordable program does not block an independent ready backdoor. Program or
 is retained for purchases. Planner prices are upstream estimates, while the purchase
 actor gets the live darkweb quote and checks actual cash and ownership immediately
 before buying. TOR's current price is 200,000. A 10% reserve is retained by default;
-this is not a shared augmentation budget or a promise that other scripts preserve it.
+the shared `savings.js` floor is checked in addition to this percentage by fleet,
+stock entries and progression purchases. Only the goal's named TOR/program
+purchase may consume that floor. External scripts do not participate.
 
 No worker is killed to make space for a progression actor. Insufficient `home` RAM
 is displayed as `WAITING_RAM`; retries are bounded. Leave sufficient controller/actor
@@ -151,3 +153,30 @@ These are deterministic mocked Netscript tests, not an in-game execution test or
 replacement for the Netscript RAM analyzer. Smoke-test planner-only mode first, then
 opt in and watch `Action`, `Last result`, `Connection` and the service recovery rows.
 The heartbeat cinematic universe has been replaced by regression tests.
+
+## Savings and telemetry
+
+The supervisor displays the shared savings goal and the fleet investment decision.
+It writes one bounded telemetry sample per minute by default, outside the JIT loop.
+Use `--telemetry false` to disable recording. See the root README for the savings,
+augmentation planner, telemetry report, and read-only `doctor.js` commands.
+
+## One-command utility management
+
+`run supervisor.js --progression-actions true` now includes automatic program
+savings, one startup diagnostic pass, periodic read-only augmentation advice,
+telemetry recording, and a rolling one-hour history summary. Standalone utility
+commands are optional. Use `--savings augmentations` to reserve for the next
+augmentation recommendation, `--save-amount N` for a fixed manual goal, or
+`--savings keep` to disable automatic goal updates. Automatic policies preserve
+active manually configured goals. Program savings uses the configured progression
+reserve and waits for Singularity and enabled progression actions.
+
+`--cloud-roi` and `--cloud-payback` are forwarded to newly launched fleet managers.
+The diagnostic/planner children are serialized, never heartbeat-killed, and retry
+RAM shortages or failed runs with bounded delays. Planner capability is checked
+before launch. Reports use files rather than new reserved ports, and are bound to
+the child PID, publication time and current reset. Stale advice is not used for
+savings. Diagnostics runs once per supervisor session; planning repeats about once
+per minute. New daemons reserve helper RAM automatically; adopted daemons retain
+their old arguments. Use the root README for all flags and deployment instructions.

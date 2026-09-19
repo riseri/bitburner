@@ -1,3 +1,4 @@
+import { readSavings } from "lib/savings.js";
 import { claimAction, publishAction, validateRequest } from "lib/progression-protocol.js";
 
 /** @param {NS} ns */
@@ -14,7 +15,7 @@ export async function main(ns) {
 		const cost = tor ? 200_000 : ns.singularity.getDarkwebProgramCost(request.target);
 		if (!Number.isFinite(cost) || cost <= 0) { publishAction(ns, request, "blocked", "invalid-price"); return; }
 		const cash = ns.getServerMoneyAvailable("home");
-		const requiredCash = cost / (1 - request.reserve);
+		const requiredCash = Math.max(cost / (1 - request.reserve), cost + readSavings(ns, request.target).floor);
 		if (!Number.isFinite(cash) || cash < requiredCash) {
 			// The shopping cart still has parental controls.
 			publishAction(ns, request, "blocked", "insufficient-cash", { cost, requiredCash }); return;

@@ -5,11 +5,11 @@ const path=require('node:path');
 const vm=require('node:vm');
 
 function load(){
-  const files=['lib/ports.js','lib/dashboard.js','lib/stock-strategy.js','stock-trader.js'];
+  const files=['lib/savings.js','lib/ports.js','lib/dashboard.js','lib/stock-strategy.js','stock-trader.js'];
   let all='';
   for(const item of files){
     all+=fs.readFileSync(path.join(__dirname,'../src',item),'utf8')
-      .replace(/^import(?:.|\n)*?;\s*$/gm,'')
+      .replace(/^import\s[\s\S]*?;[ \t]*\r?$/gm,'')
       .replace(/\bexport (?=(?:async )?function|const )/g,'')+'\n';
   }
   const names=[...all.matchAll(/^(?:async )?function (\w+)\s*\(/gm)].map(m=>m[1]);
@@ -18,6 +18,15 @@ function load(){
   return sandbox.api;
 }
 const api=load();
+
+test('shared savings protects cash from new stock entries without preventing exits', async () => {
+  const f=fixture({cash:1e9,stocks:{AAA:{forecast:0.50,volatility:0.04,ask:100,bid:99,maxShares:5e9,pos:[1e6,80,0,0]}}});
+  f.ns.read=()=>JSON.stringify({version:1,amount:2e9,label:'Augmentation',target:'',epoch:'1:undefined:undefined'});
+  await api.main(f.ns);
+  assert.ok(f.calls.includes('sell:AAA'));
+  assert.ok(!f.calls.some(c=>c.startsWith('buy:')||c.startsWith('short:')));
+  assert.equal(f.status.peek().reserveFloor,2e9);
+});
 
 function fixture(overrides={}){
   const logs=[],terminal=[],calls=[];

@@ -40,6 +40,24 @@ function fixture() {
     return {clock,protocol,dispatch,manager,ports,processes,reset,world,parents,launched,connections,purchases,ns,cfg,plan,prepare};
 }
 
+test('shared savings defers an unrelated purchase but still allows an independent backdoor', () => {
+    const f=fixture();
+    f.ns.read=()=>JSON.stringify({version:1,amount:1e9,label:'Augmentation',target:'',epoch:f.protocol.resetEpoch(f.reset)});
+    f.dispatch.tickProgressionActions(f.ns,f.dispatch.createActionState(),f.plan,f.cfg);
+    assert.equal(f.launched[0].filename,'progression-backdoor.js');
+});
+
+test('purchase actor rechecks changed savings and allows the goal purchase itself', async () => {
+    for (const target of ['', 'SQLInject.exe']) {
+        const f=fixture();
+        f.ns.read=()=>JSON.stringify({version:1,amount:1e9,label:'Goal',target,epoch:f.protocol.resetEpoch(f.reset)});
+        const job=f.prepare('program','SQLInject.exe');
+        await job.api.main(job.actor);
+        assert.equal(f.purchases.length,target ? 1 : 0);
+        if (!target) assert.equal(f.ports.get(14).peek().reason,'insufficient-cash');
+    }
+});
+
 test('planner exposes ready backdoor independently of an unaffordable program', () => {
     const f=fixture();
     const objectives=f.manager.planObjectives({torOwned:true, money:1e6, programs:[{name:'SQLInject.exe',cost:250e6,owned:false}],

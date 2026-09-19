@@ -61,6 +61,16 @@ class Port {
 }
 
 function loadScript(file, clock, extra = {}) {
+    if (file === 'lib/supervised-utilities.js') extra = { ...loadScript('lib/savings.js', clock), ...loadScript('lib/progression-protocol.js', clock), ...extra };
+    if (file === 'lib/utility-report.js') extra = { ...loadScript('lib/progression-protocol.js', clock), ...extra };
+    if (['doctor.js', 'augmentation-planner.js'].includes(file)) extra = { ...loadScript('lib/utility-report.js', clock), ...extra };
+    if (file === 'supervisor.js') extra = { ...loadScript('lib/supervised-utilities.js', clock), ...extra };
+    if (['supervisor.js', 'fleet-manager.js', 'stock-trader.js', 'progression-purchase.js', 'lib/progression-dispatch.js', 'savings.js', 'doctor.js', 'augmentation-planner.js'].includes(file)) {
+        extra = { ...loadScript('lib/savings.js', clock), ...extra };
+    }
+    if (file === 'fleet-manager.js') extra = { ...loadScript('lib/fleet-economics.js', clock), ...extra };
+    if (['supervisor.js', 'telemetry.js'].includes(file)) extra = { ...loadScript('lib/telemetry.js', clock), ...extra };
+    if (file === 'augmentation-planner.js') extra = { ...loadScript('lib/augmentation-plan.js', clock), ...extra };
     if (['daemon.js', 'supervisor.js', 'contract-manager.js', 'stock-trader.js'].includes(file)) {
         extra = { ...loadScript('lib/dashboard.js', clock), ...extra };
     }
@@ -76,7 +86,7 @@ function loadScript(file, clock, extra = {}) {
     }
     if (file === 'daemon.js') extra = { ...loadScript('lib/target-pipelines.js', clock), ...extra };
     const source = fs.readFileSync(path.join(root, 'src', file), 'utf8')
-        .replace(/^import .*;\s*$/gm, '')
+        .replace(/^import\s[\s\S]*?;[ \t]*\r?$/gm, '')
         .replace(/\bexport (?=(?:async )?function|const )/g, '');
     const names = [...source.matchAll(/^(?:async )?function\*? (\w+)\s*\(/gm)].map(m => m[1]);
     const sandbox = {
