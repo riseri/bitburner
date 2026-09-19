@@ -140,3 +140,23 @@ test('only initial trial tuning gets the pre-planning liveness lane', () => {
     assert.match(service, /p\.trial && p\.mode === "TUNING"/);
     assert.doesNotMatch(service, /p\.mode === "PREPARING"/);
 });
+
+
+test('multi dashboard exposes second-target prep instead of mislabeling it as repair RAM', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const daemon = fs.readFileSync(path.join(__dirname, '../src/daemon.js'), 'utf8');
+    assert.match(daemon, /Background prep \/ second target/);
+    assert.match(daemon, /held for second-target prep/);
+    assert.match(daemon, /backgroundPrep: background \?/);
+    assert.match(daemon, /repairRam = Math\.max\(0, prepRam - backgroundRam\)/);
+    assert.doesNotMatch(daemon, /row\("Repair RAM", `\$\{formatRam\(prepRam\)\} held separately`\)/);
+});
+
+test('admission status reports the active background-prep target and phase', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const source = fs.readFileSync(path.join(__dirname, '../src/lib/target-pipelines.js'), 'utf8');
+    assert.match(source, /pool\.note = `Background prep\$\{target\}: \$\{prep\.status \|\| "WAITING"\}`/);
+    assert.match(source, /prep\.reason \? ` \| \$\{prep\.reason\}` : ""/);
+});
