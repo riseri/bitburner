@@ -67,6 +67,16 @@ test('IPvGO default run completes a Daedalus game and leaves the final board int
     assert.match(f.logs.join('\n'),/Not joined/);
     assert.equal(JSON.parse(f.files.get('go-bot-state.txt')).phase,'complete');
 });
+test('IPvGO defaults to fast pacing with RNG sniping disabled',async()=>{
+    const f=fixture();const observed=[];
+    f.onSleep=async ms=>observed.push(ms);
+    await api.main(f.ns);
+    assert.deepEqual(f.terminal,[]);
+    assert.ok(observed.includes(25),'expected 25ms turn pacing');
+    assert.ok(observed.includes(1),'expected 1ms cooperative search yields');
+    assert.doesNotMatch(f.logs.join('\n'),/RNG rig/);
+});
+
 test('IPvGO repeat mode resets only after verified completion',async()=>{
     const f=fixture({games:2});let resets=0;
     const reset=f.ns.go.resetBoardState;f.ns.go.resetBoardState=(...args)=>{
@@ -110,7 +120,7 @@ test('IPvGO accepts a legitimate white reply that completes during a state write
 });
 for(const event of ['move','reset','epoch'])test(`IPvGO stops on external ${event} during move analysis`,async()=>{
     const f=fixture();let changed=false;
-    f.onSleep=async ms=>{if(ms!==5||changed)return;changed=true;
+    f.onSleep=async ms=>{if(ms!==1||changed)return;changed=true;
         if(event==='move'){const [x,y]=[0,0];f.play('X',x,y);f.white();}
         if(event==='reset'){f.ns.go.resetBoardState('The Black Hand',5);}
         if(event==='epoch')f.world.reset.lastAugReset++;
@@ -140,7 +150,7 @@ test('IPvGO move API exceptions stop once without retry or destructive reset',as
     assert.equal(f.terminal.length,1);assert.match(f.terminal[0],/API unavailable/);
     assert.equal(JSON.parse(f.files.get('go-bot-state.txt')).phase,'pending');
 });
-for(const flags of [{opponent:'w0r1d_d43m0n'},{opponent:'No AI'},{size:19},{games:-1},{interval:0},{'think-ms':NaN}]) {
+for(const flags of [{opponent:'w0r1d_d43m0n'},{opponent:'No AI'},{size:19},{games:-1},{interval:-1},{'think-ms':NaN}]) {
     test(`IPvGO invalid configuration fails before any Go mutations ${JSON.stringify(flags)}`,async()=>{
         const f=fixture(flags);await api.main(f.ns);assert.equal(f.terminal.length,1);assert.deepEqual(f.calls,[]);
     });
@@ -180,7 +190,7 @@ test('IPvGO manual changes during pending-write persistence prevent the next mov
     await api.main(f.ns);assert.match(f.terminal[0],/outside this bot/);assert.ok(!f.calls.includes('move'));
 });
 test('IPvGO changing only history while thinking still invalidates ownership',async()=>{
-    const f=fixture();f.onSleep=async ms=>{if(ms===5){f.world.history.push(f.world.board.join(''));f.onSleep=null;}};
+    const f=fixture();f.onSleep=async ms=>{if(ms===1){f.world.history.push(f.world.board.join(''));f.onSleep=null;}};
     await api.main(f.ns);assert.match(f.terminal[0],/outside this bot/);assert.ok(!f.calls.includes('move'));
 });
 test('IPvGO a slow opponent is awaited once with no heartbeat-triggered restart',async()=>{
@@ -207,7 +217,7 @@ test('IPvGO a passed manual turn is not mistaken for an untouched opening',()=>{
     assert.throws(()=>api.mayStartGo(api.readGoSnapshot(f.ns),null,false),/Unowned/);
 });
 test('IPvGO arms a Daedalus distraction window before committing moves',async()=>{
-    const f=fixture();let playtime=0;
+    const f=fixture({'rng-snipe':true});let playtime=0;
     const getPlayer=f.ns.getPlayer,baseSleep=f.ns.sleep;
     f.ns.getPlayer=()=>({...getPlayer(),totalPlaytime:playtime});
     f.ns.sleep=async ms=>{if(ms>=200)playtime+=Math.floor(ms/200)*200;return baseSleep(ms);};
