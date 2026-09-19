@@ -32,6 +32,22 @@ through their work, not just between passes. This is cooperative liveness report
 a synchronous computation that freezes the entire browser cannot independently
 publish a heartbeat. No extra heartbeat daemon is added.
 
+## Stock service and shared cash
+
+Port 13 (`PORTS.STOCK_STATUS`) is reserved for the 4S stock trader. When stock
+automation is enabled, the supervisor manages `stock-trader.js` as a heartbeat
+service and displays its portfolio state. WSE, TIX and 4S TIX access are checked
+outside the lifecycle restart loop: missing access puts the service in `BLOCKED`
+without accumulating failures or backoff. An active trader that loses access
+stops itself without liquidating positions; the supervisor does not immediately
+relaunch it while the capability remains unavailable.
+
+The stock heartbeat advertises an absolute cash reserve floor. Fleet cloud
+spending preserves the maximum of its own reserve policy and this fresh stock
+floor. Dry-run, blocked, malformed and stale stock heartbeats do not reserve cash.
+This coordination is budget-only: stocks do not own JIT RAM, fleet allocation,
+worker ports or target selection.
+
 ## Action protocol
 
 Port 14 (`PORTS.PROGRESSION_ACTION`) is a single request/result slot, separate from

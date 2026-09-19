@@ -18,6 +18,7 @@ export async function main(ns) {
 		["cloud-prefix", "cloud"],
 		["cloud-interval", 5_000],
 		["root-interval", 30_000],
+		["stock-port", PORTS.STOCK_STATUS],
 	]);
 
 	ns.disableLog("ALL");
@@ -34,7 +35,11 @@ export async function main(ns) {
 		},
 		cloudInterval: Math.max(1_000, Number(flags["cloud-interval"]) || 5_000),
 		rootInterval: Math.max(10_000, Number(flags["root-interval"]) || 30_000),
+		stockPort: Number(flags["stock-port"]),
 	};
+	if (!Number.isSafeInteger(cfg.stockPort) || cfg.stockPort <= 0 || cfg.stockPort === cfg.port) {
+		throw new Error("stock-port must be a positive port distinct from fleet status");
+	}
 
 	for (const script of WORKERS) {
 		if (!ns.fileExists(script, HOME)) {
@@ -112,6 +117,7 @@ function createState(cfg) {
 		upgrades: 0,
 		spent: 0,
 		reserveFloor: 0,
+		stockReserveFloor: 0,
 		actionBudget: 0,
 		lastRun: 0,
 		lastAction: "none",
@@ -125,9 +131,11 @@ async function manageOneCloudAction(ns, cfg, state) {
 	const ramLimit = ns.cloud.getRamLimit();
 	const names = ns.cloud.getServerNames();
 	const cashAvailable = ns.getServerMoneyAvailable(HOME);
+	const stockReserveFloor = readStockReserveFloor(ns, cfg.stockPort);
 	const reserveFloor = Math.max(
 		cfg.cloud.cashFloor,
-		cashAvailable * cfg.cloud.cashReserve
+		cashAvailable * cfg.cloud.cashReserve,
+		stockReserveFloor
 	);
 	const spendable = Math.max(0, cashAvailable - reserveFloor);
 	const actionBudget = Math.min(
@@ -136,6 +144,7 @@ async function manageOneCloudAction(ns, cfg, state) {
 	);
 
 	state.reserveFloor = reserveFloor;
+	state.stockReserveFloor = stockReserveFloor;
 	state.actionBudget = actionBudget;
 
 	if (actionBudget <= 0) return;
@@ -374,7 +383,8 @@ function describeNextCloudAction(ns, cfg, servers, limit, ramLimit) {
 	if (!cfg.cloud.enabled) return "management disabled";
 
 	const cashAvailable = ns.getServerMoneyAvailable(HOME);
-	const reserveFloor = Math.max(cfg.cloud.cashFloor, cashAvailable * cfg.cloud.cashReserve);
+	const stockReserveFloor = readStockReserveFloor(ns, cfg.stockPort);
+	const reserveFloor = Math.max(cfg.cloud.cashFloor, cashAvailable * cfg.cloud.cashReserve, stockReserveFloor);
 	const spendable = Math.max(0, cashAvailable - reserveFloor);
 	const budget = Math.min(spendable, cashAvailable * cfg.cloud.maxAction);
 
@@ -392,6 +402,19 @@ function describeNextCloudAction(ns, cfg, servers, limit, ramLimit) {
 	const targetRam = largestAffordableUpgradeRam(ns, weakest, ramLimit, budget);
 	if (targetRam <= weakest.ram) return `waiting to upgrade ${weakest.name}`;
 	return `upgrade ${weakest.name} -> ${formatRam(targetRam)} for ${cash(ns.cloud.getServerUpgradeCost(weakest.name, targetRam))}`;
+}
+
+function readStockReserveFloor(ns, portNumber, now = Date.now()) {
+	try {
+		const status = ns.getPortHandle(portNumber).peek();
+		if (status?.type !== "stock-status" || status.version !== 1) return 0;
+		if (!Number.isFinite(status.generatedAt) || now - status.generatedAt < 0 || now - status.generatedAt > 30_000) return 0;
+		if (status.access?.ok !== true || status.dryRun === true) return 0;
+		const floor = Number(status.reserveFloor);
+		return Number.isFinite(floor) && floor > 0 ? floor : 0;
+	} catch {
+		return 0;
+	}
 }
 
 function nextCloudServerName(ns, prefix) {

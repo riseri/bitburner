@@ -289,9 +289,9 @@ function validateDaemonPorts(cfg) {
 	if (selected.some(port => !Number.isSafeInteger(port) || port <= 0) || new Set(selected).size !== 3) {
 		throw new Error("Worker events, fleet status and JIT control need distinct positive integer ports");
 	}
-	const reserved = [PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS, PORTS.PROGRESSION_STATUS, PORTS.PROGRESSION_ACTION];
+	const reserved = [PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS, PORTS.PROGRESSION_STATUS, PORTS.PROGRESSION_ACTION, PORTS.STOCK_STATUS];
 	if (selected.some(port => reserved.includes(port))) {
-		throw new Error("Daemon port conflicts with a reserved supervisor/contract/progression channel");
+		throw new Error("Daemon port conflicts with a reserved supervisor/contract/progression/stock channel");
 	}
 }
 
