@@ -600,7 +600,7 @@ function readDaemonDashboard(ns) {
 		mode: "running",
 		target: headerMatch?.[1] ?? "unknown",
 		hackingLevel: headerMatch?.[2] ?? "",
-		targetMode: field(logs, "Target"),
+		targetMode: field(logs, "Selection") || field(logs, "Target"),
 		state: field(logs, "State"),
 		money: field(logs, "Money"),
 		security: field(logs, "Security"),
