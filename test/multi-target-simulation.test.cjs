@@ -43,10 +43,10 @@ test('18 virtual minutes: two earning targets keep the incumbent productive thro
     assert.equal(sim.killed.filter(p=>p.target==='phantasy'&&p.phase==='H').length,0);
     assert.equal(state(sim).priority,'the-hub');
     const dashboard = sim.summary().logs.map(line => line.trimStart());
-    assert.ok(dashboard.some(line => line.includes(' OVERVIEW ')), dashboard.join('\n'));
-    assert.ok(dashboard.some(line => line.includes(' PIPELINES ')), dashboard.join('\n'));
-    assert.ok(dashboard.some(line => line.includes(' NEXT TARGET ')), dashboard.join('\n'));
-    assert.ok(dashboard.some(line => line.includes(' FLEET ')), dashboard.join('\n'));
+    assert.ok(dashboard.some(line => line.startsWith('OVERVIEW ')), dashboard.join('\n'));
+    assert.ok(dashboard.some(line => line.startsWith('PIPELINES ')), dashboard.join('\n'));
+    assert.ok(dashboard.some(line => line.startsWith('NEXT TARGET ')), dashboard.join('\n'));
+    assert.ok(dashboard.some(line => line.startsWith('FLEET ')), dashboard.join('\n'));
     assert.ok(!dashboard.some(line => line.includes('INDEPENDENT TARGET PIPELINES')), dashboard.join('\n'));
     assert.ok(!dashboard.some(line => line.startsWith('Admission skips')), dashboard.join('\n'));
     console.log(JSON.stringify({baseline:baseline.summary().income60,combined:sim.summary().income60,
