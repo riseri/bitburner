@@ -9,7 +9,7 @@ function load(){
   let all='';
   for(const item of files){
     all+=fs.readFileSync(path.join(__dirname,'../src',item),'utf8')
-      .replace(/^import .*;\s*$/gm,'')
+      .replace(/^import(?:.|\n)*?;\s*$/gm,'')
       .replace(/\bexport (?=(?:async )?function|const )/g,'')+'\n';
   }
   const names=[...all.matchAll(/^(?:async )?function (\w+)\s*\(/gm)].map(m=>m[1]);
