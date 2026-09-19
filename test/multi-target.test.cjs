@@ -144,6 +144,29 @@ test('shared overload winds down the trial instead of cancelling the incumbent',
     assert.equal(f.pool.controlPort.peek().targets.alpha.paused,false);
 });
 
+
+test('launch-budget admission skips alone do not retire a healthy trial',()=>{
+    const f=fixture();
+    f.a.admissionSkips=100;
+    f.pool.trialGuard={incumbent:'alpha',trial:'beta',admitted:f.clock.now-10000,baseline:1000,misses:0,trialMisses:0,
+        fallbacks:0,allocationFails:0,badSince:0};
+    f.pool.slowTicks=[];
+    f.multi.monitorPipelineLoad(f.ns,f.pool,f.clock.now);
+    assert.equal(f.b.retiring,false);
+    assert.equal(f.b.drain,null);
+    assert.equal(f.a.drain,null);
+});
+
+test('real allocator pressure still retires the trial before measured-income damage compounds',()=>{
+    const f=fixture();
+    f.a.stats.allocationFails=4;
+    f.pool.trialGuard={incumbent:'alpha',trial:'beta',admitted:f.clock.now-10000,baseline:1000,misses:0,trialMisses:0,
+        fallbacks:0,allocationFails:0,badSince:0};
+    f.multi.monitorPipelineLoad(f.ns,f.pool,f.clock.now);
+    assert.equal(f.b.retiring,true);
+    assert.match(f.b.retireReason,/shared-load guard/);
+});
+
 test('a target-local circuit breaker is not misclassified as shared overload',()=>{
     const f=fixture();f.a.mode='DRAINING';f.a.stats.recoveries=1;
     f.pool.trialGuard={incumbent:'alpha',trial:'beta',admitted:f.clock.now-10000,baseline:1000,misses:0,trialMisses:0,
