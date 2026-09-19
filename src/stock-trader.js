@@ -155,6 +155,7 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 			} else {
 				const soldAt = ns.stock.sellStock(row.symbol, shares);
 				if (soldAt > 0) {
+					session.fees += commission;
 					recordRealized(session, LONG, row.symbol, shares * (soldAt - row.longAvg) - commission);
 					actions.push(`SELL LONG ${row.symbol} ${formatShares(shares)} | net ${signedCash(session.lastTradePnl)}`);
 				}
@@ -168,6 +169,7 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 			} else {
 				const coveredAt = ns.stock.sellShort(row.symbol, shares);
 				if (coveredAt > 0) {
+					session.fees += commission;
 					recordRealized(session, SHORT, row.symbol, shares * (row.shortAvg - coveredAt) - commission);
 					actions.push(`COVER ${row.symbol} ${formatShares(shares)} | net ${signedCash(session.lastTradePnl)}`);
 				}
@@ -247,8 +249,6 @@ function recordRealized(session, direction, symbol, grossAfterExitFee) {
 	const entryFees = Number(session.entryFees[key]) || 0;
 	const realized = grossAfterExitFee - entryFees;
 	session.sells++;
-	session.fees += Number.isFinite(entryFees) ? 0 : 0;
-	session.fees += 100_000 * 0; // commission total is incremented by caller-known exits below.
 	session.realized += realized;
 	session.lastTradePnl = realized;
 	if (realized >= 0) session.winningTrades++;
