@@ -34,3 +34,23 @@ test('cloud purchase after failed first discovery cannot publish a partial repla
     assert.equal(status.peek().network, null);
     assert.match(status.peek().cloud.error, /discovery unavailable/);
 });
+
+
+test('cloud spending respects a fresh stock cash floor', async () => {
+    const clock = new Clock(), stock = new Port(), fleetStatus = new Port(), api = loadScript('fleet-manager.js', clock);
+    stock.write({type:'stock-status',version:1,generatedAt:clock.now,access:{ok:true},dryRun:false,reserveFloor:900});
+    let purchased=0;
+    const ns={
+        getPortHandle:n=>n===13?stock:fleetStatus,
+        getServerMoneyAvailable:()=>1000,
+        cloud:{getServerLimit:()=>1,getRamLimit:()=>64,getServerNames:()=>[],getServerCost:()=>200,
+            purchaseServer:()=>{purchased++;return 'cloud-00';}},
+    };
+    const cfg={stockPort:13,cloud:{cashFloor:0,cashReserve:0.10,maxAction:0.25,minRam:32,prefix:'cloud'}};
+    const state={purchases:0,upgrades:0,spent:0,reserveFloor:0,stockReserveFloor:0,actionBudget:0,lastAction:'none'};
+    await api.manageOneCloudAction(ns,cfg,state);
+    assert.equal(purchased,0);
+    assert.equal(state.stockReserveFloor,900);
+    assert.equal(state.reserveFloor,900);
+    assert.equal(state.actionBudget,100);
+});
