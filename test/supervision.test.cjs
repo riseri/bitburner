@@ -184,7 +184,7 @@ test('supervisor makes realized stock profit and per-trade profit explicit', () 
         actions:null,services:[],stockAccess:{ok:true,missing:[]}});
     let text=logs.join('\n');
     assert.match(text,/Stocks\s+ACTIVE \| session \+\$42\.00m realized net/);
-    assert.match(text,/avg \+\$7\.00m \/ closed trade/);
+    assert.match(text,/avg \+\$7\.00m \/ closed\s+trade/);
 
     logs.length=0;
     api.renderStocks(ns,stocks,cfg,{ok:true,missing:[]});
