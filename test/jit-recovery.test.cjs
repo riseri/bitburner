@@ -433,6 +433,7 @@ test('dashboard warmup stays human-readable and moves timing jargon to details',
 test('background prep becomes the actionable next-target view instead of a ranking table', () => {
     const f = dashboardFixture(), text = f.render(), status = f.read();
     assert.equal(status.target, 'phantasy');
+    assert.equal(status.targetMode, 'AUTO');
     assert.equal(status.state, 'RUNNING');
     assert.equal(status.background, 'the-hub | WEAKEN | ETA 44m 10s');
     assert.match(status.prepHealth, /security \+88\.000/);
