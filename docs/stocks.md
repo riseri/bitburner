@@ -116,3 +116,46 @@ transactions can influence stock forecasts.
 The initial version intentionally avoids shorts because short APIs require
 additional BitNode 8 / Source-File 8 access. A later version can add short
 positions behind an explicit capability check.
+
+
+## Supervisor integration
+
+The normal long-running deployment is now through `supervisor.js`. Stocks are
+enabled by default:
+
+```text
+run supervisor.js
+```
+
+The supervisor creates a lifecycle record for `stock-trader.js` on
+`PORTS.STOCK_STATUS` (port 13), adopts an existing trader without rewriting its
+arguments, and restarts unexpected crashes with the same bounded lifecycle policy
+used by the other managers.
+
+Market access is a special gate. If WSE, TIX, or 4S TIX access is unavailable,
+the stock service is shown as `BLOCKED` and is **not** repeatedly restarted. When
+the required access becomes available again, normal lifecycle management resumes.
+The trader itself still rechecks access before and after every stock update.
+
+Disable supervised stocks explicitly with:
+
+```text
+run supervisor.js --stocks false
+```
+
+The supervisor dashboard shows stock equity, invested value, cash, shared cash
+floor, open/realized P/L, and the last trade action.
+
+### Shared capital floor
+
+Every healthy non-dry-run trader heartbeat publishes its current absolute reserve
+floor. `fleet-manager.js` reads that status and uses the larger of:
+
+- its own configured cloud cash floor,
+- its percentage cloud reserve,
+- the trader's published stock reserve floor.
+
+This means cloud purchases/upgrades cannot intentionally spend through the
+trader's cash reserve. The shared floor is ignored when the stock heartbeat is
+stale, access is blocked, or the trader is in dry-run mode. No stock script
+controls JIT scheduling or server allocation.
