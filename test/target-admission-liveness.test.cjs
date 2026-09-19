@@ -125,13 +125,18 @@ test('background prep can select work in a tight window without exec', () => {
 });
 
 
-test('pipeline maintenance gets the quiet window before another batch is planned', () => {
+test('only initial trial tuning gets the pre-planning liveness lane', () => {
     const fs = require('node:fs');
     const path = require('node:path');
     const source = fs.readFileSync(path.join(__dirname, '../src/lib/target-pipelines.js'), 'utf8');
     const loopStart = source.indexOf('while (true) {');
-    const maintenance = source.indexOf('servicePipelineMaintenance(ns, pool);', loopStart);
+    const admission = source.indexOf('serviceAdmissionOpportunity(ns, pool);', loopStart);
     const planning = source.indexOf('planPipelineBatch(ns, pool);', loopStart);
-    assert.ok(loopStart >= 0 && maintenance > loopStart && planning > maintenance,
-        'maintenance/tuning must run before planning can consume the quiet window');
+    const maintenance = source.indexOf('servicePipelineMaintenance(ns, pool);', loopStart);
+    assert.ok(loopStart >= 0 && admission > loopStart && planning > admission && maintenance > planning,
+        'admission liveness should run before planning while recovery maintenance keeps original ordering');
+    const service = source.slice(source.indexOf('export function serviceAdmissionOpportunity'),
+        source.indexOf('function serviceBackgroundAndAdmission'));
+    assert.match(service, /p\.trial && p\.mode === "TUNING"/);
+    assert.doesNotMatch(service, /p\.mode === "PREPARING"/);
 });
