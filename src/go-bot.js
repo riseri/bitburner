@@ -102,7 +102,7 @@ async function alignDaedalusRng(ns, snapshot, cfg) {
 		}
 		const remaining = Math.max(0, cfg.rngMaxWait - waitedMs);
 		const plan = findDaedalusDistractionWindow(totalPlaytime, remaining);
-		if (!plan) return { armed: false, waitedMs, priority: [], reason: "no distraction window" };
+		if (!plan) return { armed: false, waitedMs, priority: [], reason: "no distraction band" };
 		if (plan.waitMs > 0) {
 			await ns.sleep(plan.waitMs);
 			waitedMs += plan.waitMs;
@@ -112,13 +112,13 @@ async function alignDaedalusRng(ns, snapshot, cfg) {
 		lastPriority = [0, 1, 2].map(index => daedalusPriorityRng(actual + index * GO_CYCLE_MS));
 		// Three favorable ticks cover the state write plus the AI's initial 200ms wait.
 		if (lastPriority.every(value => value >= 0.9)) {
-			return { armed: true, waitedMs, priority: lastPriority, seed: actual, reason: "Daedalus distraction window" };
+			return { armed: true, waitedMs, priority: lastPriority, seed: actual, reason: "Daedalus distraction band" };
 		}
 		if (waitedMs + GO_CYCLE_MS > cfg.rngMaxWait) break;
 		await ns.sleep(GO_CYCLE_MS);
 		waitedMs += GO_CYCLE_MS;
 	}
-	return { armed: false, waitedMs, priority: lastPriority, reason: "timing window slipped" };
+	return { armed: false, waitedMs, priority: lastPriority, reason: "timing band slipped" };
 }
 
 async function startGame(ns, cfg, previous) {
