@@ -549,6 +549,21 @@ function productive(p, now) {
 		Number.isFinite(p.stats.lastHackAt) && now - p.stats.lastHackAt < 10_000;
 }
 
+function steadyPromotionSupport(pool, now) {
+	if (pool.cfg.maxTargets <= 1 || pool.pipelines.size < pool.cfg.maxTargets) return null;
+	const lanes = [...pool.pipelines.values()];
+	if (lanes.some(p => p.retiring || p.trial || p.mode !== "RUNNING" || p.recovery || p.drain ||
+		!productive(p, now))) return null;
+	return lanes.reduce((weakest, p) =>
+		!weakest || (p.runtime?.plan.expected || Infinity) < (weakest.runtime?.plan.expected || Infinity)
+			? p : weakest, null);
+}
+
+function resetPreparedCandidate(prep, reason) {
+	prep.target = ""; prep.candidate = null; prep.health = null; prep.readyAt = 0; prep.scan = null;
+	prep.retryAt = 0; prep.status = "SCANNING"; prep.reason = reason;
+}
+
 // Check already-prepared opportunities first. After a deployment, the previously
 // prepared richer target may be the initial earner; a useful smaller ready target
 // can still occupy the second slot. Scouting remains incremental, not a full tune.
@@ -601,9 +616,57 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	const anchor = pool.pipelines.get(pool.anchor);
 	const full = pool.pipelines.size >= cfg.maxTargets;
 	if (cfg.maxTargets > 1 && full) {
-		if (cfg.backgroundPrep.active) cancelBackgroundPrep(ns, cfg.backgroundPrep, "target slots occupied");
-		cfg.backgroundPrep.status = "IDLE";
-		cfg.backgroundPrep.reason = "two earning slots occupied; no additional prep";
+		const lanes = [...pool.pipelines.values()];
+		const retiring = lanes.find(p => p.retiring || p.mode === "DRAINING");
+		if (retiring) {
+			pool.note = `Promotion handoff: draining ${retiring.name} before admitting ${cfg.backgroundPrep.target || "prepared target"}`;
+			return;
+		}
+		const support = steadyPromotionSupport(pool, now);
+		if (!support) {
+			if (cfg.backgroundPrep.active) cancelBackgroundPrep(ns, cfg.backgroundPrep,
+				"promotion waits for two stable productive targets");
+			else if (cfg.backgroundPrep.status !== "READY") {
+				cfg.backgroundPrep.status = cfg.backgroundPrep.enabled ? "PAUSED" : "DISABLED";
+				cfg.backgroundPrep.reason = cfg.backgroundPrep.enabled
+					? "promotion waits for two stable productive targets" : "disabled";
+			}
+			pool.note = "Two target slots occupied; waiting for stable lanes before promotion scouting";
+			return;
+		}
+		const activeTargets = new Set(pool.pipelines.keys());
+		tickBackgroundPrep(ns, { state: cfg.backgroundPrep, target: support.name, activeTargets,
+			blockedTargets: pool.blocked, network: pool.network, cfg, runtime: support.runtime, stats: support.stats,
+			healthy: true, allowLaunch: allowPrepLaunch, promotion: true,
+			replacementRate: support.runtime.plan.expected,
+			replacementBatchRate: support.runtime.plan.batchRate,
+			spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
+				now, Infinity, pool.foreign) });
+		const prep = cfg.backgroundPrep;
+		const target = prep.target ? ` ${prep.target}` : "";
+		pool.note = `Promotion prep${target} over ${support.name}: ${prep.status || "WAITING"}` +
+			(prep.reason ? ` | ${prep.reason}` : "");
+		if (prep.status !== "READY" || prep.active || !prep.target) return;
+		const candidatePotential = Number(prep.candidate?.potential) || 0;
+		const threshold = support.runtime.plan.expected * cfg.switchThreshold;
+		if (!(candidatePotential > threshold)) {
+			resetPreparedCandidate(prep,
+				`promotion candidate no longer clears ${support.name} by switch threshold`);
+			return;
+		}
+		if (!allowPrepLaunch) {
+			pool.note = `Promotion target ${prep.target} ready; waiting for a safe drain window`;
+			return;
+		}
+		const survivor = lanes.find(p => p !== support && !p.retiring);
+		if (survivor) pool.anchor = survivor.name;
+		pool.trialGuard = null;
+		prep.reason = `ready to replace ${support.name}; waiting for slot handoff`;
+		beginPipelineDrain(pool, support, {
+			kind: "drain", hard: false,
+			reason: `steady-state promotion to ${prep.target} over ${support.name}`,
+		}, true);
+		pool.note = `Promoting ${prep.target}; retiring ${support.name} after owned work drains`;
 		return;
 	}
 	if (!anchor || anchor.mode !== "RUNNING") return;
