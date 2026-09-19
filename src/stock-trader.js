@@ -58,6 +58,12 @@ export async function main(ns) {
 			sells: 0,
 			fees: 0,
 			realized: 0,
+			lastTradePnl: 0,
+			winningTrades: 0,
+			losingTrades: 0,
+			// Buy commissions are not included in Bitburner's longAvg basis.
+			// Track them per symbol so realized profit is genuinely net of both sides.
+			entryFees: {},
 			last: "Waiting for the first stock update",
 		};
 
@@ -120,18 +126,22 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 	for (const row of rows) {
 		if (!shouldExitLong(row, cfg)) continue;
 		const shares = row.longShares;
-		const saleGain = Math.max(0, shares * row.bid - commission);
-		const realized = saleGain - shares * row.longAvg;
 		if (cfg.dryRun) {
 			actions.push(`WOULD SELL ${row.symbol} ${formatShares(shares)} @ f=${pct(row.forecast)}`);
 			continue;
 		}
 		const soldAt = ns.stock.sellStock(row.symbol, shares);
 		if (!(soldAt > 0)) continue;
+		const entryFees = Number(session.entryFees[row.symbol]) || 0;
+		const realized = shares * (soldAt - row.longAvg) - commission - entryFees;
 		session.sells++;
 		session.fees += commission;
 		session.realized += realized;
-		actions.push(`SELL ${row.symbol} ${formatShares(shares)} | ${signedCash(realized)}`);
+		session.lastTradePnl = realized;
+		if (realized >= 0) session.winningTrades++;
+		else session.losingTrades++;
+		delete session.entryFees[row.symbol];
+		actions.push(`SELL ${row.symbol} ${formatShares(shares)} | net ${signedCash(realized)}`);
 	}
 
 	if (!cfg.dryRun) rows = readMarket(ns, symbols);
@@ -172,6 +182,7 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 		if (!(boughtAt > 0)) continue;
 		session.buys++;
 		session.fees += commission;
+		session.entryFees[row.symbol] = (Number(session.entryFees[row.symbol]) || 0) + commission;
 		buysThisTick++;
 		cash -= cost;
 		exposure += Math.max(0, shares * row.bid - commission);
@@ -225,7 +236,11 @@ function render(ns, market, cfg, session, commission, state) {
 	row("State", `${state} | tick ${session.ticks}`);
 	row("Equity", `${cash(metrics.equity)} | ${cash(metrics.exposure)} invested (${pct(metrics.equity > 0 ? metrics.exposure / metrics.equity : 0)})`);
 	row("Cash", `${cash(metrics.cash)} | reserve ${cash(reserveFloor)}`);
-	row("P/L", `${signedCash(metrics.openPnl)} open | ${signedCash(session.realized)} realized`);
+	row("Open P/L", `${signedCash(metrics.openPnl)} unrealized`);
+	row("Profit total", `${signedCash(session.realized)} realized net | ${session.sells} closed trades`);
+	row("Per trade", session.sells
+		? `avg ${signedCash(session.realized / session.sells)} | last ${signedCash(session.lastTradePnl)} | ${session.winningTrades}W/${session.losingTrades}L`
+		: "No closed trades yet");
 	row("Positions", `${positions} open | ${session.buys} buys | ${session.sells} sells`);
 	if (session.last && session.last !== "none") row("Last action", session.last);
 
@@ -263,6 +278,10 @@ function publishStatus(port, ns, market, cfg, session, commission, state, missin
 		reserveFloor,
 		openPnl: metrics.openPnl,
 		realized: session.realized,
+		lastTradePnl: session.lastTradePnl,
+		avgTradePnl: session.sells ? session.realized / session.sells : 0,
+		winningTrades: session.winningTrades,
+		losingTrades: session.losingTrades,
 		fees: session.fees,
 		buys: session.buys,
 		sells: session.sells,
