@@ -129,16 +129,19 @@ export async function runTargetPipelines(ns, setup, api) {
 			for (const slot of pool.launchBuckets.keys()) if (slot < Math.floor((now - 1000) / BUCKET_MS)) pool.launchBuckets.delete(slot);
 		}
 
+		// Give bounded maintenance/tuning the quiet window before planning another
+		// income batch. Planning first can continuously consume every >50ms gap
+		// and starve second-target tuning even after discovery succeeds.
+		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50) {
+			servicePipelineMaintenance(ns, pool);
+		}
+		serviceAdmissionOpportunity(ns, pool);
 		// Budget is shared, not multiplied by the number of targets. Never queue
 		// new work in front of an already committed due launch or worker event.
 		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 20) {
 			planPipelineBatch(ns, pool);
 		}
 		if (pool.port.empty()) launchPipelineChunks(ns, pool);
-		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50) {
-			servicePipelineMaintenance(ns, pool);
-		}
-		serviceAdmissionOpportunity(ns, pool);
 		if (now - pool.lastMonitor >= 1000) {
 			pool.lastMonitor = now;
 			monitorPipelineLoad(ns, pool, now);
