@@ -4,12 +4,12 @@ export function normalizeStockConfig(flags = {}) {
 		cashFloor: Math.max(0, Number(flags["cash-floor"]) || 0),
 		maxExposure: fraction(flags["max-exposure"] ?? 0.80),
 		maxPosition: fraction(flags["max-position"] ?? 0.25),
-		entryForecast: Number(flags["entry-forecast"] ?? 0.60),
-		exitForecast: Number(flags["exit-forecast"] ?? 0.55),
+		entryForecast: Number(flags["entry-forecast"] ?? 0.55),
+		exitForecast: Number(flags["exit-forecast"] ?? 0.52),
 		minTrade: Math.max(0, Number(flags["min-trade"]) || 25e6),
 		minHoldTicks: Number(flags["min-hold-ticks"] ?? 6),
-		minProfitMultiple: Number(flags["min-profit-multiple"] ?? 1.15),
-		maxBuysPerTick: Number(flags["max-buys-per-tick"] ?? 4),
+		minProfitMultiple: Number(flags["min-profit-multiple"] ?? 1.10),
+		maxBuysPerTick: Number(flags["max-buys-per-tick"] ?? 8),
 		dryRun: asBoolean(flags["dry-run"] ?? false),
 	};
 	if (!(cfg.cashReserve >= 0 && cfg.cashReserve < 1)) throw new Error("cash-reserve must be in [0,1)");
@@ -26,55 +26,112 @@ export function normalizeStockConfig(flags = {}) {
 export function expectedLongEdge(forecast, volatility) {
 	const f = Number(forecast), v = Number(volatility);
 	if (!Number.isFinite(f) || !Number.isFinite(v) || f < 0 || f > 1 || v < 0) return -Infinity;
-	// The native market samples a move magnitude uniformly from 0..volatility.
-	// This is the small-move expected directional return per tick.
+	// Native stock moves sample a magnitude uniformly from 0..volatility.
 	return (2 * f - 1) * v * 0.5;
 }
 
+export function expectedShortEdge(forecast, volatility) {
+	const edge = expectedLongEdge(forecast, volatility);
+	return Number.isFinite(edge) ? -edge : -Infinity;
+}
+
+export function expectedDirectionalEdge(forecast, volatility, direction = "L") {
+	return direction === "S"
+		? expectedShortEdge(forecast, volatility)
+		: expectedLongEdge(forecast, volatility);
+}
+
+export function rankTradeCandidates(rows, cfg, canShort = false) {
+	const shortEntry = 1 - cfg.entryForecast;
+	const candidates = [];
+	for (const row of rows) {
+		const available = Math.max(0, Math.floor(row.maxShares - row.longShares - row.shortShares));
+		if (!available) continue;
+
+		if (row.shortShares === 0 && row.forecast >= cfg.entryForecast) {
+			const edge = expectedLongEdge(row.forecast, row.volatility);
+			if (edge > 0) candidates.push({ ...row, direction: "L", edge });
+		}
+		if (canShort && row.longShares === 0 && row.forecast <= shortEntry) {
+			const edge = expectedShortEdge(row.forecast, row.volatility);
+			if (edge > 0) candidates.push({ ...row, direction: "S", edge });
+		}
+	}
+	return candidates.sort((a, b) =>
+		(b.edge - a.edge)
+		|| (directionalConfidence(b) - directionalConfidence(a))
+		|| a.symbol.localeCompare(b.symbol));
+}
+
+// Kept for callers/tests that only want long candidates.
 export function rankLongCandidates(rows, cfg) {
-	return rows
-		.filter(row => row.shortShares === 0 && row.forecast >= cfg.entryForecast && row.longShares < row.maxShares)
-		.map(row => ({ ...row, edge: expectedLongEdge(row.forecast, row.volatility) }))
-		.filter(row => row.edge > 0)
-		.sort((a, b) => (b.edge - a.edge) || (b.forecast - a.forecast) || a.symbol.localeCompare(b.symbol));
+	return rankTradeCandidates(rows, cfg, false).filter(row => row.direction === "L");
 }
 
 export function shouldExitLong(row, cfg) {
 	return row.longShares > 0 && row.forecast <= cfg.exitForecast;
 }
 
-export function sharesForBudget(row, budget, commission) {
-	const availableShares = Math.max(0, Math.floor(row.maxShares - row.longShares - row.shortShares));
-	const spend = Math.max(0, Number(budget) - commission);
-	if (!availableShares || spend <= 0 || !(row.ask > 0)) return 0;
-	return Math.max(0, Math.min(availableShares, Math.floor(spend / row.ask)));
+export function shouldExitShort(row, cfg) {
+	return row.shortShares > 0 && row.forecast >= (1 - cfg.exitForecast);
 }
 
-export function tradeHasEnoughEdge(row, shares, commission, cfg) {
+export function sharesForBudget(row, budget, commission, direction = "L") {
+	const availableShares = Math.max(0, Math.floor(row.maxShares - row.longShares - row.shortShares));
+	const price = direction === "S" ? row.bid : row.ask;
+	const spend = Math.max(0, Number(budget) - commission);
+	if (!availableShares || spend <= 0 || !(price > 0)) return 0;
+	return Math.max(0, Math.min(availableShares, Math.floor(spend / price)));
+}
+
+export function tradeHasEnoughEdge(row, shares, commission, cfg, direction = "L") {
 	if (!(shares > 0)) return false;
-	const edge = expectedLongEdge(row.forecast, row.volatility);
+	const edge = expectedDirectionalEdge(row.forecast, row.volatility, direction);
 	if (!(edge > 0)) return false;
-	const expectedMoveProfit = shares * row.ask * edge * cfg.minHoldTicks;
+	const entryPrice = direction === "S" ? row.bid : row.ask;
+	const expectedMoveProfit = shares * entryPrice * edge * cfg.minHoldTicks;
 	const roundTripFriction = shares * Math.max(0, row.ask - row.bid) + 2 * commission;
 	return expectedMoveProfit >= roundTripFriction * cfg.minProfitMultiple;
+}
+
+export function allocationScale(edge, bestEdge) {
+	const e = Number(edge), best = Number(bestEdge);
+	if (!(e > 0) || !(best > 0)) return 0;
+	const ratio = Math.max(0, Math.min(1, e / best));
+	// Keep weaker-but-profitable signals meaningful so capital does not sit idle,
+	// while still reserving the largest allocations for the strongest 4S edge.
+	return Math.max(0.55, Math.sqrt(ratio));
+}
+
+export function positionValue(row, direction, commission) {
+	if (direction === "S") {
+		if (!(row.shortShares > 0)) return 0;
+		return Math.max(0, row.shortShares * (2 * row.shortAvg - row.ask) - commission);
+	}
+	if (!(row.longShares > 0)) return 0;
+	return Math.max(0, row.longShares * row.bid - commission);
 }
 
 export function portfolioMetrics(cash, rows, commission) {
 	let longValue = 0, shortValue = 0, openPnl = 0;
 	for (const row of rows) {
 		if (row.longShares > 0) {
-			const value = Math.max(0, row.longShares * row.bid - commission);
+			const value = positionValue(row, "L", commission);
 			longValue += value;
 			openPnl += value - row.longShares * row.longAvg;
 		}
 		if (row.shortShares > 0) {
-			const value = Math.max(0, row.shortShares * (2 * row.shortAvg - row.ask) - commission);
+			const value = positionValue(row, "S", commission);
 			shortValue += value;
 			openPnl += value - row.shortShares * row.shortAvg;
 		}
 	}
 	const exposure = longValue + shortValue;
 	return { cash, longValue, shortValue, exposure, equity: cash + exposure, openPnl };
+}
+
+function directionalConfidence(row) {
+	return row.direction === "S" ? 0.5 - row.forecast : row.forecast - 0.5;
 }
 
 function fraction(value) {
