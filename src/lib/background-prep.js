@@ -5,7 +5,6 @@ const QUIET_MS = 60_000;
 const PRODUCTIVE_MS = 120_000;
 const RETRY_MS = 30_000;
 const SLOT_FILL_HORIZON_MS = 10 * 60_000;
-const SLOT_FILL_MIN_ACTIVE_FRACTION = 0.05;
 const GROW = "background-grow.js";
 const WEAKEN = "background-weaken.js";
 
@@ -114,7 +113,10 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 	// lanes already earn, so a candidate must beat the weaker lane's prepped
 	// steady estimate by the configured switch threshold.
 	if (slotFill) {
-		if (!(potential > activeRate * SLOT_FILL_MIN_ACTIVE_FRACTION)) return null;
+		// An empty slot is not worth filling with a downgrade. Require the same
+		// quality hurdle used for replacement so the second lane starts as an
+		// upgrade candidate, not merely positive additive income.
+		if (!(potential > activeRate * ctx.cfg.switchThreshold)) return null;
 	} else if (promotion) {
 		if (!(potential > replacementRate * ctx.cfg.switchThreshold)) return null;
 	} else if (!(potential > activeRate * ctx.cfg.switchThreshold)) return null;
@@ -160,7 +162,9 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 			Math.max(0, ctx.state.horizon - prepMs - warmupMs) / ctx.state.horizon;
 	}
 	if (!(score > 0) || !Number.isFinite(score)) return null;
-	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill, promotion };
+	const minimumExpected = slotFill ? activeRate
+		: promotion ? replacementRate * ctx.cfg.switchThreshold : 0;
+	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill, promotion, minimumExpected };
 }
 
 function prepBudget(ctx) {
