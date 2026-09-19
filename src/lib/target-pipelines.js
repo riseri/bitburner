@@ -51,6 +51,7 @@ export function createPipelinePool(ns, setup, api) {
 		lastLoop: Date.now(), lagMax: 0, slowTicks: [], lastFleetAt: 0,
 		anchor: setup.target, trialGuard: null, note: "Waiting for productive runtime before admission",
 		lastAdmission: 0, nextAdmission: 0, readyScan: null, nextReadyScan: 0,
+		nextAdmissionService: 0, pendingAdmission: "",
 	};
 	const first = createTargetPipeline(setup.target, setup.cfg, api, ns.pid, 0, setup.runtime, setup.stats);
 	pool.pipelines.set(first.name, first);
@@ -128,6 +129,11 @@ export async function runTargetPipelines(ns, setup, api) {
 			for (const slot of pool.launchBuckets.keys()) if (slot < Math.floor((now - 1000) / BUCKET_MS)) pool.launchBuckets.delete(slot);
 		}
 
+		// Discovery and initial trial tuning get a bounded liveness opportunity
+		// before another incumbent batch is planned. Recovery/repair maintenance
+		// keeps its original ordering so a rebuilding support lane cannot steal
+		// the incumbent's scheduling cadence.
+		serviceAdmissionOpportunity(ns, pool);
 		// Budget is shared, not multiplied by the number of targets. Never queue
 		// new work in front of an already committed due launch or worker event.
 		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 20) {
@@ -136,7 +142,6 @@ export async function runTargetPipelines(ns, setup, api) {
 		if (pool.port.empty()) launchPipelineChunks(ns, pool);
 		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50) {
 			servicePipelineMaintenance(ns, pool);
-			serviceBackgroundAndAdmission(ns, pool);
 		}
 		if (now - pool.lastMonitor >= 1000) {
 			pool.lastMonitor = now;
@@ -447,6 +452,30 @@ function replanIdlePipeline(ns, pool, p, now) {
 	return true;
 }
 
+function servicePipelineTuning(ns, pool, p) {
+	const { api } = pool;
+	if (p.mode !== "TUNING" || Date.now() < p.nextRetry) return false;
+	if (!api.targetHealth(ns, p.name).clean) {
+		p.tuner = null;
+		if (p.trial) beginPipelineDrain(pool, p,
+			{ kind: "drain", hard: true, reason: "prepared candidate became dirty before admission" }, true);
+		else p.mode = "PREPARING";
+		return true;
+	}
+	if (!p.tuner) beginPipelineTuning(ns, pool, p);
+	if (!p.tuner) return true;
+	const step = p.tuner.next(); // at most 32 candidate periods per step
+	if (step.done) {
+		p.tuner = null;
+		if (!step.value) {
+			p.note = "No plan fits shared limits; retrying later";
+			p.nextRetry = Date.now() + (p.idleReplanning ? Math.min(IDLE_REPLAN_MAX_BACKOFF_MS,
+				30_000 * 2 ** Math.min(4, p.idleFailures++)) : 30_000);
+		} else activatePipeline(ns, pool, p, step.value, p.stats.restarts > 0);
+	}
+	return true;
+}
+
 function servicePipelineMaintenance(ns, pool) {
 	const { api } = pool;
 	for (const p of pool.pipelines.values()) {
@@ -492,27 +521,7 @@ function servicePipelineMaintenance(ns, pool) {
 			} else if (p.repair.status === "ERROR") p.note = `Repair stopped: ${p.repair.error}`;
 			return;
 		}
-		if (p.mode === "TUNING" && Date.now() >= p.nextRetry) {
-			if (!api.targetHealth(ns, p.name).clean) {
-				p.tuner = null;
-				if (p.trial) beginPipelineDrain(pool, p,
-					{ kind: "drain", hard: true, reason: "prepared candidate became dirty before admission" }, true);
-				else p.mode = "PREPARING";
-				return;
-			}
-			if (!p.tuner) beginPipelineTuning(ns, pool, p);
-			if (!p.tuner) return;
-			const step = p.tuner.next(); // at most 32 candidate periods per step
-			if (step.done) {
-				p.tuner = null;
-				if (!step.value) {
-					p.note = "No plan fits shared limits; retrying later";
-					p.nextRetry = Date.now() + (p.idleReplanning ? Math.min(IDLE_REPLAN_MAX_BACKOFF_MS,
-						30_000 * 2 ** Math.min(4, p.idleFailures++)) : 30_000);
-				} else activatePipeline(ns, pool, p, step.value, p.stats.restarts > 0);
-			}
-			return;
-		}
+		if (servicePipelineTuning(ns, pool, p)) return;
 		// Elective work must never take down the other earner during a peer's
 		// initial trial, recovery or warmup. Only the affected target is drained.
 		const peerBusy = [...pool.pipelines.values()].some(other => other !== p &&
@@ -550,22 +559,44 @@ function nextReadyCandidate(ns, pool, anchor, now) {
 	if (now < pool.nextReadyScan) return "";
 	pool.readyScan ||= { names: [...pool.network.servers], index: 0, best: null };
 	const scan = pool.readyScan;
-	if (scan.index < scan.names.length) {
+	// Discovery is read-only and cheap. Examine a small bounded slice per tick so
+	// a dense JIT launch lattice cannot turn a 95-host scan into an hours-long job.
+	for (let checked = 0; checked < 8 && scan.index < scan.names.length; checked++) {
 		const name = scan.names[scan.index++];
 		if (name === "home" || pool.pipelines.has(name) || (pool.blocked.get(name) || 0) > now ||
 			!ns.hasRootAccess(name) || ns.getServerMaxMoney(name) <= 0 ||
-			ns.getServerRequiredHackingLevel(name) > ns.getHackingLevel()) return "";
-		if (!pool.api.targetHealth(ns, name).clean) return "";
+			ns.getServerRequiredHackingLevel(name) > ns.getHackingLevel()) continue;
+		if (!pool.api.targetHealth(ns, name).clean) continue;
 		const rate = Math.max(0, pool.cfg.maxBatchRate - anchor.runtime.plan.batchRate);
 		const potential = ns.getServerMaxMoney(name) * pool.cfg.maxSteal * 0.95 * ns.hackAnalyzeChance(name) * rate;
-		if (potential > anchor.runtime.plan.expected * 0.05 && (!scan.best || potential > scan.best.potential)) scan.best = { name, potential };
-		return "";
+		if (potential > anchor.runtime.plan.expected * 0.05 && (!scan.best || potential > scan.best.potential)) {
+			scan.best = { name, potential };
+		}
 	}
+	if (scan.index < scan.names.length) return "";
 	pool.readyScan = null; pool.nextReadyScan = now + 60_000;
 	return scan.best?.name || "";
 }
 
-function serviceBackgroundAndAdmission(ns, pool) {
+export function serviceAdmissionOpportunity(ns, pool) {
+	const now = Date.now();
+	if (!pool.port.empty() || now < (pool.nextAdmissionService || 0)) return false;
+	const slack = nextPipelineLaunch(pool) - now;
+	if (slack <= 5) return false;
+	pool.nextAdmissionService = now + 100;
+	serviceBackgroundAndAdmission(ns, pool, slack > 50);
+	// Only initial trial tuning gets this pre-planning liveness lane. Established
+	// targets in recovery/repair remain on normal maintenance ordering so they
+	// cannot reduce the healthy incumbent's cadence.
+	if (slack > 20) {
+		const trial = [...pool.pipelines.values()].find(p =>
+			p.trial && p.mode === "TUNING" && !p.recovery && !p.drain);
+		if (trial) servicePipelineTuning(ns, pool, trial);
+	}
+	return true;
+}
+
+function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	const { api, cfg } = pool, now = Date.now();
 	const anchor = pool.pipelines.get(pool.anchor);
 	const full = pool.pipelines.size >= cfg.maxTargets;
@@ -585,23 +616,34 @@ function serviceBackgroundAndAdmission(ns, pool) {
 			: "Looking for a ready target; background prep may be needed";
 	}
 	const activeTargets = new Set(pool.pipelines.keys());
-	let name = "";
-	if (cfg.maxTargets > 1 && !full && now >= pool.nextAdmission && productive(anchor, now)) {
+	let name = pool.pendingAdmission || "";
+	if (!name && cfg.maxTargets > 1 && !full && now >= pool.nextAdmission && productive(anchor, now)) {
 		pool.nextAdmission = now + 500;
 		name = nextReadyCandidate(ns, pool, anchor, now);
+		if (name) pool.pendingAdmission = name;
 	}
-	// Complete one cheap ready-target scan before spending time on another prep.
+	// Read-only scouting is allowed in small launch gaps. Background preparation
+	// may also scan/select a candidate there, but it cannot exec a prep worker
+	// until a >50ms scheduler window is available.
 	if (!pool.readyScan && !name) tickBackgroundPrep(ns, { state: cfg.backgroundPrep, target: anchor.name, activeTargets,
 		blockedTargets: pool.blocked, network: pool.network, cfg, runtime: anchor.runtime, stats: anchor.stats,
-		healthy: productive(anchor, now),
+		healthy: productive(anchor, now), allowLaunch: allowPrepLaunch,
 		spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
 			now, Infinity, pool.foreign) });
 	if (!name || cfg.maxTargets === 1 || full || !productive(anchor, now)) return;
-	if (!api.targetHealth(ns, name).clean) return;
+	if (!api.targetHealth(ns, name).clean) {
+		pool.pendingAdmission = "";
+		return;
+	}
 	if (cfg.maxBatchRate - anchor.runtime.plan.batchRate < 0.25) {
 		pool.note = "No spare combined batch-rate budget; prepared target remains READY"; return;
 	}
+	if (cfg.backgroundPrep.active && !allowPrepLaunch) {
+		pool.note = `Ready target ${name}; waiting for a safe admission window`;
+		return;
+	}
 	if (cfg.backgroundPrep.active && !cancelBackgroundPrep(ns, cfg.backgroundPrep, "admitting an earning target")) return;
+	pool.pendingAdmission = "";
 	const p = createTargetPipeline(name, cfg, api, ns.pid, pool.nextOrdinal++);
 	p.control = targetControl(pool, p); p.cfg.prepStates = cfg.prepStates;
 	pool.pipelines.set(p.name, p);
