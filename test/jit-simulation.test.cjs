@@ -55,10 +55,10 @@ test('default dashboard is an operator view and hides startup ranking noise', { 
     sim.run();
     await sim.clock.runUntil(sim.start + 4 * 60_000);
     const logs = sim.summary().logs.map(line => line.trimStart());
-    assert.ok(logs.some(line => line.includes(' INCOME ')), logs.join('\n'));
-    assert.ok(logs.some(line => line.includes(' CURRENT TARGET ')), logs.join('\n'));
-    assert.ok(logs.some(line => line.includes(' NEXT TARGET ')), logs.join('\n'));
-    assert.ok(logs.some(line => line.includes(' FLEET ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('INCOME ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('CURRENT TARGET ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('NEXT TARGET ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('FLEET ')), logs.join('\n'));
     assert.match(logs.find(line => line.startsWith('Income')), /actual.*model.*%/);
     assert.ok(logs.some(line => line.startsWith('Target') && /the-hub/.test(line)), logs.join('\n'));
     assert.ok(!logs.some(line => line.includes('STARTUP TARGET RANKING SNAPSHOT')), logs.join('\n'));
@@ -74,7 +74,7 @@ test('dashboard details retain the startup ranking and engineering diagnostics',
     sim.run();
     await sim.clock.runUntil(sim.start + 2 * 60_000);
     const logs = sim.summary().logs.map(line => line.trimStart());
-    assert.ok(logs.some(line => line.includes(' STARTUP TARGET RANKING SNAPSHOT ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('STARTUP TARGET RANKING SNAPSHOT ')), logs.join('\n'));
     assert.ok(logs.some(line => line.startsWith('Core bonus')), logs.join('\n'));
     assert.ok(logs.some(line => line.startsWith('Restarts')), logs.join('\n'));
     assert.ok(logs.some(line => line.startsWith('Fallback')), logs.join('\n'));
