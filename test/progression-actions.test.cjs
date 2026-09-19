@@ -193,6 +193,16 @@ test('malformed or cyclic network routes fail closed', () => {
     assert.equal(f.protocol.routeBetween({},'home','CSEC').length,0);
 });
 
+test('supervisor shows the run4theh111z path as soon as it is discovered', () => {
+    const f=fixture(),supervisor=loadScript('supervisor.js',f.clock),logs=[];
+    const progression={programsOwned:0,programsTotal:6,backdoorsInstalled:0,backdoorsTotal:4,
+        recommendations:[],backdoors:[{host:'run4theh111z',discovered:true,rooted:false,skillReady:false,
+            ready:false,path:['home','n00dles','run4theh111z']}],nextObjective:{label:'Acquire BruteSSH.exe'}};
+    supervisor.renderNextSteps({...f.ns,print:line=>logs.push(String(line))},{progression,
+        cfg:{augmentationActions:false},goal:{floor:0},augmentation:null,actions:null});
+    assert.match(logs.join('\n'),/BitRunners\s+home -> n00dles -> run4theh111z/);
+});
+
 test('supervisor retains a result after the actor exits and across dashboard redraws', () => {
     const f=fixture(),state=f.dispatch.createActionState();f.plan.objectives=f.plan.objectives.slice(0,1);
     f.dispatch.tickProgressionActions(f.ns,state,f.plan,f.cfg);

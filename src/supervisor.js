@@ -365,6 +365,16 @@ function render(ns, state) {
 	ns.clearLog();
 	dashboardTitle(ns, "BITBURNER AUTOMATION");
 	const goal = readSavings(ns);
+	if (!cfg.dashboardDetails) {
+		renderAttention(ns, { cfg, goal, daemon, fleet, contracts, progression, go, augmentation,
+			services: state.services, stockAccess: state.stockAccess });
+		renderOverview(ns, daemon, fleet);
+		renderNextSteps(ns, { cfg, goal, progression, augmentation, actions: state.actions });
+		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, darknet,
+			actions: state.actions, services: state.services, stockAccess: state.stockAccess });
+		ns.print("  More detail: restart with --dashboard-details true");
+		return;
+	}
 	if (goal.floor > 0 || goal.error) {
 		const funds = ns.getServerMoneyAvailable(HOME);
 		const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
@@ -391,14 +401,6 @@ function render(ns, state) {
 		for (const item of cfg.augmentationPlan.order.slice(0, 8)) dashboardRow(ns, item.name,
 			`${item.faction} | ${cash(item.price)} | rep gap ${Math.ceil(item.repGap)} | prerequisites ${item.prerequisites.join(", ") || "none"}`);
 		dashboardRow(ns, "Basket", `${cash(cfg.augmentationPlan.total)} | ${cfg.augmentationPlan.multiplier === 1 ? "current-price lower bound" : `estimated at ${cfg.augmentationPlan.multiplier}x purchase inflation`}`);
-	}
-
-	if (!cfg.dashboardDetails) {
-		renderOverview(ns, daemon, fleet);
-		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, darknet, actions: state.actions, services: state.services, stockAccess: state.stockAccess });
-		renderAttention(ns, { daemon, fleet, contracts, progression, go, augmentation, services: state.services });
-		ns.print("  Details: restart with --dashboard-details true");
-		return;
 	}
 
 	if (daemon) {
@@ -487,53 +489,84 @@ function renderOverview(ns, daemon, fleet) {
 	}
 }
 
-function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, darknet, actions, services, stockAccess }) {
+function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) {
 	const row = (label, value) => dashboardRow(ns, label, value);
-	dashboardSection(ns, "Automation");
-
-	if (!cfg.stocks) row("Stocks", "Disabled");
-	else if (!stockAccess?.ok) row("Stocks", `Locked: missing ${stockAccess?.missing?.join(", ") || "market access"}`);
-	else if (!stocks) row("Stocks", "Starting / waiting for market snapshot");
-	else row("Stocks", `${stocks.state || "running"} | session ${cashSigned(stocks.realized)} realized net | ${Number(stocks.sells) > 0 ? `avg ${cashSigned(stocks.avgTradePnl)} / closed trade` : "no closed trades yet"}`);
-
-	if (!cfg.contracts) row("Contracts", "Disabled");
-	else if (!contracts) row("Contracts", "Starting / waiting for scan");
-	else row("Contracts", `${Number(contracts.waiting) || 0} waiting | ${Number(contracts.solved) || 0} solved | ${Number(contracts.found) || 0} found`);
-
-	if (!cfg.progression) row("Progression", "Disabled");
-	else if (!progression) row("Progression", "Starting / waiting for snapshot");
-	else if (progression.error) row("Progression", `Blocked: ${progression.error}`);
-	else {
-		const next = progression.nextObjective?.label || "No immediate objective";
-		row("Progression", `${next} | ${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`);
+	const entries = [];
+	if (actions?.current) entries.push(["In progress", actions.current.reason]);
+	else if (progression?.nextObjective?.label) entries.push(["Progression", progression.nextObjective.label]);
+	const bitRunners = progression?.backdoors?.find(target => target.host === "run4theh111z");
+	if (bitRunners?.path?.length) entries.push(["BitRunners", bitRunners.path.join(" -> ")]);
+	if (cfg.augmentationActions && augmentation?.recommendation) entries.push(["Augmentation", augmentation.recommendation]);
+	else if (cfg.augmentationPlan?.order?.length) {
+		const next = cfg.augmentationPlan.order[0];
+		entries.push(["Next augment", `${next.name} from ${next.faction} | ${cash(next.price)}`]);
 	}
-	if (cfg.augmentationActions) row("Aug loop", augmentation
-		? `${augmentation.state} / ${augmentation.phase || "WAIT"} | ${augmentation.action || augmentation.recommendation || "waiting"}`
-		: "Starting / waiting for status");
-	else row("Aug loop", "Planner only; restart with --augmentation-actions true to enable");
-
-	const goService = services?.find(service => service.name === GO_BOT);
-	if (!cfg.go) row("IPvGO", "Disabled");
-	else if (go?.terminal) row("IPvGO", `BLOCKED | ${go.error || "board ownership requires review"}`);
-	else if (!go) row("IPvGO", `${serviceLabel(goService)} | waiting for game status`);
-	else row("IPvGO", `${go.opponent || "unknown"} ${go.size || "?"}x${go.size || "?"} | ${go.state || "RUNNING"} | session ${Number(go.wins) || 0}W/${Number(go.losses) || 0}L | bonus +${Number(go.bonusPercent || 0).toFixed(3)}%`);
-	if (!cfg.darknet) row("Darknet", "Disabled");
-	else if (!darknet) row("Darknet", "Starting / waiting for status");
-	else if (!darknet.unlocked) row("Darknet", "Locked: saving for DarkscapeNavigator.exe");
-	else row("Darknet", `${darknet.authenticated}/${darknet.known} authenticated | ${darknet.activeAgents} active agents | ${darknet.caches} caches`);
-
-	if (actions?.current) row("Active action", `${actions.current.state.toUpperCase()}: ${actions.current.reason}`);
-	if (services?.length) {
-		const summary = services.map(service => {
-			const name = service.name.replace("-manager.js", "").replace(".js", "");
-			return `${name} ${serviceLabel(service)}`;
-		}).join(" | ");
-		row("Services", summary);
-	}
+	if (goal?.error) entries.push(["Savings", goal.error]);
+	else if (Number(goal?.floor) > 0) entries.push(["Savings", `${goal.label} | target ${cash(goal.floor)}`]);
+	if (!entries.length) entries.push(["Status", "No player action needed right now"]);
+	dashboardSection(ns, "Next up");
+	for (const [label, value] of entries) row(label, value);
 }
 
-function renderAttention(ns, { daemon, fleet, contracts, progression, go, augmentation, services }) {
+function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, darknet, actions, services, stockAccess }) {
+	const row = (label, value) => dashboardRow(ns, label, value);
+	const status = (state, value) => `[${state}] ${value}`;
+	const disabled = [];
+	dashboardSection(ns, "Automation");
+
+	if (!cfg.stocks) disabled.push("stocks");
+	else if (!stockAccess?.ok) row("Stocks", status("LOCKED", `missing ${stockAccess?.missing?.join(", ") || "market access"}`));
+	else if (!stocks) row("Stocks", status("WAIT", "starting; waiting for market snapshot"));
+	else row("Stocks", status("OK", `session ${cashSigned(stocks.realized)} net | ${Number(stocks.sells) > 0 ? `avg ${cashSigned(stocks.avgTradePnl)} per trade` : "no closed trades"}`));
+
+	if (!cfg.contracts) disabled.push("contracts");
+	else if (!contracts) row("Contracts", status("WAIT", "starting; waiting for scan"));
+	else if (contracts.error) row("Contracts", status("BLOCKED", contracts.error));
+	else row("Contracts", status("OK", `${Number(contracts.waiting) || 0} waiting | ${Number(contracts.solved) || 0} solved`));
+
+	if (!cfg.progression) disabled.push("progression");
+	else if (!progression) row("Progression", status("WAIT", "starting; waiting for snapshot"));
+	else if (progression.error) row("Progression", status("BLOCKED", progression.error));
+	else {
+		row("Progression", status("OK", `${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`));
+	}
+	if (cfg.augmentationActions) row("Aug loop", augmentation
+		? status(augmentation.error ? "BLOCKED" : "OK", `${augmentation.state} / ${augmentation.phase || "WAIT"} | ${augmentation.action || augmentation.recommendation || "waiting"}`)
+		: status("WAIT", "starting; waiting for status"));
+	else disabled.push("augmentation actions");
+
+	const goService = services?.find(service => service.name === GO_BOT);
+	if (!cfg.go) disabled.push("IPvGO");
+	else if (go?.terminal) row("IPvGO", status("BLOCKED", go.error || "board ownership requires review"));
+	else if (!go) row("IPvGO", status("WAIT", `${serviceLabel(goService)}; waiting for game status`));
+	else row("IPvGO", status("OK", `${go.opponent || "unknown"} ${go.size || "?"}x${go.size || "?"} | ${Number(go.wins) || 0}W/${Number(go.losses) || 0}L | +${Number(go.bonusPercent || 0).toFixed(3)}%`));
+	if (!cfg.darknet) disabled.push("darknet");
+	else if (!darknet) row("Darknet", status("WAIT", "starting; waiting for status"));
+	else if (!darknet.unlocked) row("Darknet", status("LOCKED", "saving for DarkscapeNavigator.exe"));
+	else row("Darknet", status("OK", `${darknet.authenticated}/${darknet.known} authenticated | ${darknet.activeAgents} agents | ${darknet.caches} caches`));
+
+	if (actions?.current) row("Active action", status("RUN", actions.current.reason));
+	const diagnostics = cfg.utilityJobs?.find(job => job.type === "diagnostics");
+	if (diagnostics) {
+		const state = ["ERROR", "CONFLICT"].includes(diagnostics.state) ? "BLOCKED"
+			: diagnostics.state === "READY" ? "OK" : "WAIT";
+		row("Diagnostics", status(state, diagnostics.message));
+	}
+	if (services?.length) {
+		const ready = services.filter(service => service.state === "RUNNING").length;
+		const pending = services.filter(service => service.state !== "RUNNING")
+			.map(service => `${service.name.replace("-manager.js", "").replace(".js", "")} ${serviceLabel(service)}`);
+		row("Services", pending.length
+			? status("WAIT", `${ready}/${services.length} running | ${pending.join(" | ")}`)
+			: status("OK", `all ${services.length} running`));
+	}
+	if (disabled.length) row("Off", disabled.join(" | "));
+}
+
+function renderAttention(ns, { cfg, goal, daemon, fleet, contracts, progression, go, augmentation, services }) {
 	const notices = [];
+	if (goal?.error) notices.push(["Savings", goal.error]);
+	if (cfg?.telemetryError) notices.push(["Telemetry", cfg.telemetryError]);
 	if (daemon?.reason && ["RECOVERING", "DRAINING"].includes(String(daemon.state).toUpperCase())) notices.push(["Money engine", daemon.reason]);
 	if (daemon?.mode === "reconfigure" && daemon.reason) notices.push(["Money engine", daemon.reason]);
 	if (fleet?.cloud?.error) notices.push(["Fleet", fleet.cloud.error]);
@@ -541,8 +574,14 @@ function renderAttention(ns, { daemon, fleet, contracts, progression, go, augmen
 	if (progression?.error) notices.push(["Progression", progression.error]);
 	if (go?.terminal && go.error) notices.push(["IPvGO", go.error]);
 	if (augmentation?.error) notices.push(["Aug loop", augmentation.error]);
+	for (const job of cfg?.utilityJobs || []) {
+		if (["ERROR", "CONFLICT"].includes(job.state)) notices.push([job.type === "diagnostics" ? "Diagnostics" : "Augmentations", job.message]);
+		if (job.type === "diagnostics") {
+			for (const issue of (job.report?.issues || []).slice(0, 2)) notices.push(["Warning", issue]);
+		}
+	}
 
-	const recentService = services?.filter(service => service.lastEvent)
+	const recentService = services?.filter(service => service.lastEvent && !["RUNNING", "STARTING"].includes(service.state))
 		.sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
 	if (recentService && !(recentService.name === GO_BOT && go?.terminal) && Date.now() - Number(recentService.lastEventAt || 0) < 60_000) {
 		notices.push(["Recovery", `${recentService.name}: ${recentService.lastEvent}`]);
@@ -674,13 +713,15 @@ function renderProgression(ns, progression, cfg, actions = null) {
 	for (const recommendation of (progression.recommendations || []).slice(0, cfg.dashboardDetails ? 4 : 1)) row("Recommendation", recommendation);
 	row("Unlocks", `${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} program unlocks | ` +
 		`${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} faction backdoors`);
+	const bitRunners = progression.backdoors?.find(target => target.host === "run4theh111z");
+	if (bitRunners?.path?.length) row("BitRunners", bitRunners.path.join(" -> "));
 	if (cfg.dashboardDetails) {
 		row("BitNode", `BN${Number(progression.currentNode) || "?"}`);
 		row("Singularity", progression.singularity?.available ? `Available (${progression.singularity.source})` : "Locked; requires BN4 or Source-File 4");
 		row("Source Files", formatSourceFiles(progression.sourceFiles));
 		row("TOR router", progression.torOwned ? "Owned" : "Not owned");
 		const ready = progression.backdoors?.find(target => target.ready);
-		if (ready?.path?.length) row("Route", ready.path.join(" -> "));
+		if (ready?.path?.length && ready.host !== bitRunners?.host) row("Route", ready.path.join(" -> "));
 	}
 	if (cfg.progressionActions) {
 		const actor = progressionActorProcess(ns);

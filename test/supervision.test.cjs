@@ -183,8 +183,8 @@ test('supervisor makes realized stock profit and per-trade profit explicit', () 
     api.renderAutomationSummary(ns,{cfg,stocks,contracts:null,progression:null,go:null,
         actions:null,services:[],stockAccess:{ok:true,missing:[]}});
     let text=logs.join('\n');
-    assert.match(text,/Stocks\s+ACTIVE \| session \+\$42\.00m realized net/);
-    assert.match(text,/avg \+\$7\.00m \/ closed\s+trade/);
+    assert.match(text,/Stocks\s+\[OK\] session \+\$42\.00m net/);
+    assert.match(text,/avg \+\$7\.00m per trade/);
 
     logs.length=0;
     api.renderStocks(ns,stocks,cfg,{ok:true,missing:[]});
