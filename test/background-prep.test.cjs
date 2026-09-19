@@ -87,19 +87,21 @@ test('security 100 is an explicitly labeled finite upper-bound candidate', () =>
 });
 
 
-test('empty second-slot acquisition accepts additive income below the replacement threshold', () => {
+test('empty second-slot acquisition rejects inferior lanes and admits only upgrade-quality candidates', () => {
     const f = fixture();
     f.servers.modest = { max: 1.5e6, money: 1.35e6, min: 5, sec: 5, required: 60 };
-    const replacement = f.prep.estimateBackgroundCandidate(f.ns, 'modest', f.ctx);
-    assert.equal(replacement, null, 'ordinary replacement scoring still requires switch-threshold upside');
+    f.servers.strong = { max: 5e6, money: 4.5e6, min: 5, sec: 5, required: 60 };
 
     f.ctx.slotFill = true;
     f.ctx.availableBatchRate = 1;
-    const additive = f.prep.estimateBackgroundCandidate(f.ns, 'modest', f.ctx);
-    assert.ok(additive, 'a useful additive second earner should be eligible');
-    assert.equal(additive.slotFill, true);
-    assert.ok(additive.potential > f.ctx.runtime.plan.expected * 0.05);
-    assert.ok(additive.potential < f.ctx.runtime.plan.expected * f.cfg.switchThreshold);
+    assert.equal(f.prep.estimateBackgroundCandidate(f.ns, 'modest', f.ctx), null,
+        'a second lane below the switch-threshold quality gate must be rejected');
+
+    const strong = f.prep.estimateBackgroundCandidate(f.ns, 'strong', f.ctx);
+    assert.ok(strong, 'an upgrade-quality second target should remain eligible');
+    assert.equal(strong.slotFill, true);
+    assert.ok(strong.potential > f.ctx.runtime.plan.expected * f.cfg.switchThreshold);
+    assert.equal(strong.minimumExpected, f.ctx.runtime.plan.expected);
 });
 
 test('empty second-slot scoring prefers near-term earnings over a slow two-hour whale', () => {
