@@ -231,7 +231,7 @@ test('stock trader never auto-buys access or mutates unrelated services',()=>{
   for(const re of [
     /purchaseWseAccount\s*\(/,
     /purchaseTixApi\s*\(/,
-    /purchase4SMarketData/,,,
+    /purchase4SMarketData/,
     /ns\.(run|exec|kill|scriptKill|killall)\s*\(/,
     /ns\.singularity/,
   ]) assert.doesNotMatch(source,re);
