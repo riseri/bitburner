@@ -182,7 +182,7 @@ function searchReply(board, history, komi, widths, context) {
 }
 
 function budgetExceeded(context) {
-	if ((context.nodes & 15) !== 0) return false;
+	if (context.nodes % context.quantum !== 0) return false;
 	const now = context.now(), delta = Math.max(0, now - context.lastNow);
 	context.cpuMs += delta; context.lastNow = now;
 	return context.cpuMs >= context.budget;
@@ -200,13 +200,16 @@ export async function chooseGoMove(board, valid, options = {}) {
 		throw new Error("Malformed legal-move mask");
 	}
 	const now = options.now || Date.now, yieldControl = options.yieldControl || (async () => {});
-	const budget = Math.min(120, Math.max(1, options.thinkMs ?? 35));
+	const budget = Math.min(120, Math.max(1, options.thinkMs ?? 8));
 	const komi = Number.isFinite(options.komi) ? options.komi : 5.5;
 	const history = Array.isArray(options.history) ? options.history.map(String).slice(0, 128) : [];
 	const opponentPassed = Boolean(options.opponentPassed);
-	const widths = board.length === 5 ? { root: 10, white: 6, black: 5 }
-		: board.length === 7 ? { root: 8, white: 5, black: 4 }
-			: { root: 6, white: 4, black: 3 };
+	const fast = budget <= 10;
+	const widths = board.length === 5
+		? fast ? { root: 8, white: 3, black: 2 } : { root: 10, white: 6, black: 5 }
+		: board.length === 7
+			? fast ? { root: 6, white: 3, black: 2 } : { root: 8, white: 5, black: 4 }
+			: fast ? { root: 5, white: 2, black: 2 } : { root: 6, white: 4, black: 3 };
 	const roots = orderedMoves(board, "X", history, komi, widths.root, valid);
 	if (!roots.length) return { x: null, y: null, reason: "pass: no legal move", considered: 0, replies: 0, nodes: 0, cpuMs: 0, limited: false, projected: scoreArea(board, komi).margin };
 
@@ -216,7 +219,7 @@ export async function chooseGoMove(board, valid, options = {}) {
 			considered: 0, replies: 0, nodes: 0, cpuMs: 0, limited: false, projected: currentArea.margin };
 	}
 
-	const start = now(), context = { now, lastNow: start, budget, cpuMs: 0, nodes: 0 };
+	const start = now(), context = { now, lastNow: start, budget, cpuMs: 0, nodes: 0, quantum: fast ? 4 : 16 };
 	let best = null, considered = 0, replies = 0;
 	for (const root of roots) {
 		const nextHistory = [board.join(""), ...history];
