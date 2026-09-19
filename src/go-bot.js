@@ -4,14 +4,14 @@ import { GO_STATE_FILE, GO_OPPONENTS, goConfig, readGoSnapshot, snapshotKey, rea
 /** Standalone IPvGO player. Never launched by the supervisor or deployed to the fleet. @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([["opponent", "Daedalus"], ["size", 5], ["games", 0],
-		["takeover", false], ["interval", 500], ["think-ms", 15]]);
+		["takeover", false], ["interval", 500], ["think-ms", 35]]);
 	ns.disableLog("ALL");
 	try {
 		if (ns.getHostname() !== "home") throw new Error("Run go-bot.js on home only");
 		if (ns.ps("home").some(p => p.filename === ns.getScriptName() && p.pid !== ns.pid)) {
 			throw new Error("Only one go-bot.js may play at a time");
 		}
-		const cfg = goConfig(flags), session = { games: 0, wins: 0, losses: 0, moves: 0, last: "Starting", analysis: null };
+		const cfg = goConfig(flags), session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, last: "Starting", analysis: null };
 		let snapshot = readGoSnapshot(ns);
 		const decision = mayStartGo(snapshot, readGoRecord(ns), cfg.takeover);
 		if (decision === "new") snapshot = await startGame(ns, cfg, snapshot);
@@ -24,6 +24,7 @@ export async function main(ns) {
 				session.games++;
 				const won = snapshot.game.blackScore >= snapshot.game.whiteScore;
 				if (won) session.wins++; else session.losses++;
+				session.margin += snapshot.game.blackScore - snapshot.game.whiteScore;
 				session.last = `${won ? "Won" : "Lost"} ${snapshot.game.blackScore} to ${snapshot.game.whiteScore} vs ${snapshot.opponent}`;
 				await saveGoRecord(ns, snapshot, "complete", { lastResult: session.last });
 				renderGo(ns, snapshot, session, "GAME COMPLETE");
@@ -46,8 +47,13 @@ export async function main(ns) {
 				await ns.sleep(cfg.interval);
 				assertSameGo(ns, snapshot);
 				const valid = ns.go.analysis.getValidMoves();
-				action = await chooseGoMove(snapshot.board, valid, { thinkMs: cfg.thinkMs,
-					yieldControl: () => ns.sleep(5) });
+				action = await chooseGoMove(snapshot.board, valid, {
+					thinkMs: cfg.thinkMs,
+					komi: snapshot.game.komi,
+					history: snapshot.history,
+					opponentPassed: snapshot.game.previousMove === null && snapshot.history.length > 0,
+					yieldControl: () => ns.sleep(5),
+				});
 				session.analysis = action;
 				assertSameGo(ns, snapshot);
 				// The local model is not the referee. Recheck the live mask, including superko.
@@ -102,10 +108,12 @@ function renderGo(ns, snapshot, session, state) {
 	ns.print(`  Opponent       ${snapshot.opponent} | ${snapshot.board.length}x${snapshot.board.length}`);
 	ns.print(`  Score          You ${snapshot.game.blackScore} | Opponent ${snapshot.game.whiteScore} (includes komi)`);
 	ns.print(`  This session   ${session.games} games | ${session.wins} wins | ${session.losses} losses | ${session.moves} turns played`);
+	if (session.games) ns.print(`  Score margin    ${(session.margin / session.games).toFixed(2)} avg points/game`);
 	ns.print(`  Last action    ${session.last}`);
 	if (session.analysis) {
 		const a = session.analysis;
-		ns.print(`  Analysis       ${a.considered} candidates, ${a.replies} capture replies | ${a.cpuMs.toFixed(1)}ms CPU estimate${a.limited ? " | budget reached" : ""}`);
+		ns.print(`  Analysis       ${a.considered} roots | ${a.nodes ?? a.replies} search nodes | ${a.cpuMs.toFixed(1)}ms CPU estimate${a.limited ? " | budget reached" : ""}`);
+		ns.print(`  Projection     ${Number(a.projected ?? 0).toFixed(1)} immediate area margin`);
 	}
 	if (stats) {
 		ns.print(`  Game records   ${stats.wins} wins | ${stats.losses} losses | streak ${stats.winStreak}`);
