@@ -367,13 +367,14 @@ function dashboardFixture() {
     return { clock, api, ns, logs, stats, cfg, network, runtime, running, targets, cloud, batches, supervisor, render, read };
 }
 
-test('dashboard puts actual income before target rankings and bounds the normal view', () => {
+test('dashboard puts live operator signal first and hides startup ranking by default', () => {
     const f = dashboardFixture(), text = f.render();
-    assert.ok(text.indexOf('Income 60s') < text.indexOf('TARGETS / NEXT 10M'));
-    assert.match(text, /\$587\.74m\/s/);
-    assert.match(text, /2\.267\/s actual \| 2\.268\/s model/);
-    assert.match(text, /232 paid batches/);
-    assert.ok(f.logs.length <= 38, `normal view grew to ${f.logs.length} lines`);
+    assert.ok(text.indexOf('INCOME') < text.indexOf('NEXT TARGET'));
+    assert.match(text, /Income\s+\$587\.74m\/s actual \| \$580\.34m\/s model/);
+    assert.match(text, /Throughput\s+2\.267\/2\.268 batches\/s actual\/model/);
+    assert.match(text, /232 paid/);
+    assert.doesNotMatch(text, /STARTUP TARGET RANKING SNAPSHOT/);
+    assert.ok(f.logs.length <= 30, `normal view grew to ${f.logs.length} lines`);
     assert.ok(f.logs.every(line => line.length <= 78));
     assert.doesNotMatch(text, /\bNaN\b|\bInfinity\b|\bundefined\b/);
     assert.doesNotMatch(text, /DETAILS \/ SESSION/);
@@ -384,10 +385,10 @@ test('dashboard retains current and session scopes without duplicating lifetime 
     f.stats.misses.G = 999; f.stats.driftMax = 60.82; f.stats.restarts = 2;
     const compact = f.render();
     assert.doesNotMatch(compact, /G:999/);
-    assert.match(compact, /Pipe misses\s+H:0 W1:0 G:0 W2:0/);
-    assert.match(compact, /Restarts\s+2 session/);
+    assert.match(compact, /Scheduler\s+0 misses \| 0 local \| 0 fallback \| 2 restarts/);
     const detailed = f.render({ cfg: { dashboardDetails: true } });
     assert.match(detailed, /G:999/);
+    assert.match(detailed, /Restarts\s+2 session/);
     assert.match(detailed, /max 60\.82ms/);
     assert.match(detailed, /gap 100ms \| period 441ms \| lead 600ms/);
     assert.match(detailed, /required 20ms/);
@@ -398,9 +399,10 @@ test('dashboard recovery overrides historical LIVE and preserves a wrapped fault
     const f = dashboardFixture();
     const reason = 'G invocation rejected: the target security is above the planned minimum; waiting for remaining weaken work before retrying';
     const text = f.render({ recovery: { deadline: f.clock.now + 4000, reason } });
-    assert.match(text, /State\s+RECOVERING/);
-    assert.match(text, /Hack status\s+PAUSED/);
-    assert.doesNotMatch(text, /Hack status\s+LIVE/);
+    assert.match(text, /Mode\s+AUTO \| PAUSED/);
+    assert.doesNotMatch(text, /Mode\s+AUTO \| LIVE/);
+    assert.equal(f.read().state, 'RECOVERING');
+    assert.match(f.read().hackStatus, /^PAUSED/);
     assert.equal(f.read().reason, reason);
     assert.ok(f.logs.every(line => line.length <= 78));
     f.render({ drain: { reason } });
@@ -413,34 +415,35 @@ test('dashboard warmup does not claim LIVE or stable timing before any completio
     f.stats.pipeline.driftCount = 0; f.stats.pipeline.driftSum = 0; f.stats.pipeline.driftMax = 0;
     f.batches.set('1', { phases: { H: { complete: false, skipped: false } }, landing: { H: f.clock.now + 78_000 } });
     const text = f.render();
-    assert.match(text, /Hack status\s+ETA 1m 18s/);
-    assert.match(text, /spacing n\/a/);
+    assert.match(text, /Mode\s+AUTO \| ETA 1m 18s/);
+    assert.doesNotMatch(text, /^\s*Timing/m);
     assert.doesNotMatch(text, /\bLIVE\b|\bHealthy\b|\bInfinity\b|\bNaN\b/);
 });
 
-test('dashboard isolates background target health, estimates and RAM from active fields', () => {
+test('dashboard isolates next-target health, estimates and RAM from the active lane', () => {
     const f = dashboardFixture(), text = f.render(), status = f.read();
     assert.equal(status.target, 'phantasy');
     assert.equal(status.state, 'RUNNING');
-    assert.equal(status.background, 'the-hub | WEAKEN | ETA 44m 10s');
+    assert.equal(status.background, 'the-hub | WEAKEN | wave ETA 44m 10s');
     assert.match(status.prepHealth, /security \+88\.000/);
     assert.match(status.prepModel, /UPPER BOUND/);
-    assert.match(status.security, /^7\.278 \/ 7\.000/);
-    assert.match(status.ramOnline, /^207\.84 TB \/ 25\.03 PB/);
-    assert.match(text, /home 8 \(1\.438x\) \| fleet 1\.000x RAM-weighted/);
+    assert.match(status.health, /security \+0\.278/);
+    assert.match(status.ramOnline, /^207\.84 TB \/ 25\.03 PB used/);
+    assert.doesNotMatch(text, /Core bonus/);
     f.cfg.backgroundPrep = { enabled: false, status: 'DISABLED', reason: 'disabled' };
-    assert.match(f.render(), /Background\s+none \| DISABLED/);
+    assert.match(f.render(), /Status\s+DISABLED \| disabled/);
 });
 
-test('dashboard supervisor parses old and new target tables without changing rate units', () => {
+test('dashboard supervisor parses compact income and detailed target tables without changing rate units', () => {
     const f = dashboardFixture(); f.render();
-    const compact = f.read();
-    assert.equal(compact.income60, '$587.74m/s');
-    assert.equal(compact.targets.length, 4);
-    assert.equal(compact.targets[0].name, 'phantasy');
-    assert.equal(compact.targets[0].selected, true);
-    assert.equal(compact.targets[0].effective, '$504.03m/s');
-    assert.equal(compact.targets[1].prep, '2m 54s');
+    assert.equal(f.read().income60, '$587.74m/s');
+    f.render({ cfg: { dashboardDetails: true } });
+    const detailed = f.read();
+    assert.equal(detailed.targets.length, 5);
+    assert.equal(detailed.targets[0].name, 'phantasy');
+    assert.equal(detailed.targets[0].selected, true);
+    assert.equal(detailed.targets[0].effective, '$504.03m/s');
+    assert.equal(detailed.targets[1].prep, '2m 54s');
     const legacy = f.supervisor.parseTargets(['> phantasy $504.03m/s steady:  $580.34m/s S:49.7% P:441ms prep:0ms']);
     assert.equal(legacy[0].name, 'phantasy'); assert.equal(legacy[0].steady, '$580.34m/s');
     assert.equal(legacy[0].prep, '0ms');
@@ -482,7 +485,7 @@ test('dashboard rendering is read-only and supervisor overview consumes the new 
         fleetHealth:{healthy:true}, contractHealth:{healthy:true}, progressionHealth:{healthy:true},
     });
     assert.match(f.logs.join('\n'), /Income 60s\s+\$587\.74m\/s/);
-    assert.match(f.logs.join('\n'), /the-hub \| WEAKEN/);
+    assert.match(f.logs.join('\n'), /the-hub \| WEAKEN \| wave ETA/);
     assert.ok(f.logs.every(line=>line.length<=78));
 });
 
