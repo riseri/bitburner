@@ -1,0 +1,58 @@
+name: Apply tested idle recovery
+on:
+  push:
+    branches: [fix/post-augment-scheduler-liveness]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: startsWith(github.event.head_commit.message, 'Apply tested idle pipeline')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify and apply exact source edits
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, gzip, hashlib, json
+          raw = gzip.decompress(base64.b64decode(Path('.github/idle-source.b64').read_text().strip()))
+          assert hashlib.sha256(raw).hexdigest() == 'b4b8d3ff805c4ac366331c4bce81eb79047db390398ff77697a2f69c7a5c9c5d'
+          changes = json.loads(raw)
+          assert {c['path'] for c in changes} == {'src/daemon.js', 'src/lib/target-pipelines.js'}
+          def blob(text):
+              data = text.encode()
+              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
+          for change in changes:
+              path = Path(change['path'])
+              text = path.read_text()
+              assert blob(text) == change['before'], f'Baseline changed: {path}'
+              for edit in reversed(change['edits']):
+                  text = text[:edit['start']] + edit['text'] + text[edit['end']:]
+              assert blob(text) == change['after'], f'Result mismatch: {path}'
+              path.write_text(text)
+          expected = {
+              'src/daemon.js': '098008ad699be0690b285084a9fc0375a7f550ba',
+              'src/lib/target-pipelines.js': '3173a4f2a93523bc360cd5705672a6de4cd134c1',
+              'test/scheduler-liveness.test.cjs': 'c62cfbcd852f600d091e10476f9af6d3be00ebaa',
+              'test/scheduler-liveness-simulation.test.cjs': '1c70b5b630ee245e4a372a86e78e0e0de9f5fdb6',
+              'docs/post-augmentation-liveness.md': '970493eb77a2963ba48978a3056733d275400cda',
+          }
+          for name, sha in expected.items():
+              assert blob(Path(name).read_text()) == sha, f'Transfer mismatch: {name}'
+              print(f'Verified {name}: {sha}')
+          PY
+      - name: All regression and simulation tests
+        run: npm test
+      - name: Commit tested fix and remove temporary transport
+        run: |
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/idle-source.b64 .github/workflows/reset-debug-snapshot.yml .github/workflows/apply-idle-recovery.yml
+          git add src/daemon.js src/lib/target-pipelines.js
+          git commit -m 'Recover idle JIT pipelines without productive-time deadlock'
+          git push origin HEAD:fix/post-augment-scheduler-liveness
