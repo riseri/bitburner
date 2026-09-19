@@ -338,7 +338,7 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, 
 	if (!cfg.stocks) row("Stocks", "Disabled");
 	else if (!stockAccess?.ok) row("Stocks", `Locked: missing ${stockAccess?.missing?.join(", ") || "market access"}`);
 	else if (!stocks) row("Stocks", "Starting / waiting for market snapshot");
-	else row("Stocks", `${stocks.state || "running"} | ${cashSigned(stocks.realized)} realized net | avg ${cashSigned(stocks.avgTradePnl)} / closed trade`);
+	else row("Stocks", `${stocks.state || "running"} | session ${cashSigned(stocks.realized)} realized net | avg ${cashSigned(stocks.avgTradePnl)} / closed trade`);
 
 	if (!cfg.contracts) row("Contracts", "Disabled");
 	else if (!contracts) row("Contracts", "Starting / waiting for scan");
@@ -467,7 +467,7 @@ function renderStocks(ns, stocks, cfg, access) {
 	row("Portfolio", `${cash(stocks.equity)} equity | ${cash(stocks.exposure)} invested`);
 	row("Cash", `${cash(stocks.cash)} | shared floor ${cash(stocks.reserveFloor)}`);
 	row("Open P/L", `${cashSigned(stocks.openPnl)} unrealized`);
-	row("Profit total", `${cashSigned(stocks.realized)} realized net | ${Number(stocks.sells) || 0} closed trades`);
+	row("Profit total", `${cashSigned(stocks.realized)} realized net this session | ${Number(stocks.sells) || 0} closed trades`);
 	row("Per trade", Number(stocks.sells) > 0
 		? `avg ${cashSigned(stocks.avgTradePnl)} | last ${cashSigned(stocks.lastTradePnl)} | ${Number(stocks.winningTrades) || 0}W/${Number(stocks.losingTrades) || 0}L`
 		: "No closed trades yet");
