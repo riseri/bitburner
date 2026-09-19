@@ -5,7 +5,7 @@ const path=require('node:path');
 const vm=require('node:vm');
 
 function load(){
-  const files=['lib/stock-strategy.js','stock-trader.js'];
+  const files=['lib/ports.js','lib/stock-strategy.js','stock-trader.js'];
   let all='';
   for(const item of files){
     all+=fs.readFileSync(path.join(__dirname,'../src',item),'utf8')
@@ -21,6 +21,7 @@ const api=load();
 
 function fixture(overrides={}){
   const logs=[],terminal=[],calls=[];
+  const status={items:[],clear(){this.items.length=0;},write(v){this.items=[v];},peek(){return this.items[0]??'NULL PORT DATA';}};
   const access={wse:true,tix:true,fourS:true,...overrides.access};
   let cash=overrides.cash??1e12;
   const commission=100_000;
@@ -43,6 +44,7 @@ function fixture(overrides={}){
     print:s=>logs.push(s),
     clearLog:()=>{logs.length=0;},
     getServerMoneyAvailable:()=>cash,
+    getPortHandle:()=>status,
     stock:{
       hasWseAccount:()=>access.wse,
       hasTixApiAccess:()=>access.tix,
@@ -82,8 +84,20 @@ function fixture(overrides={}){
       },
     },
   };
-  return {ns,access,stocks,logs,terminal,calls,get cash(){return cash;},get updates(){return updates;}};
+  return {ns,access,stocks,logs,terminal,calls,status,get cash(){return cash;},get updates(){return updates;}};
 }
+
+test('stock trader publishes supervisor heartbeat and capital floor',async()=>{
+  const f=fixture({flags:{ticks:1}});
+  await api.main(f.ns);
+  const status=f.status.peek();
+  assert.equal(status.type,'stock-status');
+  assert.equal(status.version,1);
+  assert.equal(status.producerPid,42);
+  assert.equal(status.access.ok,true);
+  assert.ok(status.reserveFloor>0);
+  assert.ok(status.equity>=status.cash);
+});
 
 test('stock trader refuses to start without required market access',async()=>{
   for(const missing of ['wse','tix','fourS']){
