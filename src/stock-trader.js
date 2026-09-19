@@ -1,12 +1,4 @@
-import {
-	normalizeStockConfig,
-	expectedLongEdge,
-	rankLongCandidates,
-	shouldExitLong,
-	sharesForBudget,
-	tradeHasEnoughEdge,
-	portfolioMetrics,
-} from "lib/stock-strategy.js";
+import { normalizeStockConfig, expectedLongEdge, rankLongCandidates, shouldExitLong, sharesForBudget, tradeHasEnoughEdge, portfolioMetrics } from "lib/stock-strategy.js";
 
 const HOME = "home";
 const LONG = "L";
