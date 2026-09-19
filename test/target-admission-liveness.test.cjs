@@ -146,8 +146,8 @@ test('multi dashboard exposes second-target prep instead of mislabeling it as re
     const fs = require('node:fs');
     const path = require('node:path');
     const daemon = fs.readFileSync(path.join(__dirname, '../src/daemon.js'), 'utf8');
-    assert.match(daemon, /Background prep \/ second target/);
-    assert.match(daemon, /held for second-target prep/);
+    assert.match(daemon, /dashboardSection\(ns, "Next target"\)/);
+    assert.match(daemon, /renderNextTarget\(ns, background, backgroundRam, now\)/);
     assert.match(daemon, /backgroundPrep: background \?/);
     assert.match(daemon, /repairRam = Math\.max\(0, prepRam - backgroundRam\)/);
     assert.doesNotMatch(daemon, /row\("Repair RAM", `\$\{formatRam\(prepRam\)\} held separately`\)/);
