@@ -20,7 +20,10 @@ export async function main(ns) {
 		}
 
 		const statusPort = Number(flags.port);
-		if (!Number.isSafeInteger(statusPort) || statusPort <= 0) throw new Error("port must be a positive integer");
+		const reservedPorts = Object.values(PORTS).filter(port => port !== PORTS.GO_STATUS);
+		if (!Number.isSafeInteger(statusPort) || statusPort <= 0 || reservedPorts.includes(statusPort)) {
+			throw new Error("port must be a positive status port that does not collide with other automation channels");
+		}
 		status = ns.getPortHandle(statusPort);
 		status.clear();
 
