@@ -33,7 +33,7 @@ test('stock strategy ranks stronger 4S long edges first',()=>{
     {symbol:'DDD',forecast:0.59,volatility:0.05,shortShares:0,longShares:0,maxShares:1e6},
   ];
   const ranked=api.rankLongCandidates(rows,cfg);
-  assert.deepEqual(ranked.map(r=>r.symbol),['AAA','BBB']);
+  assert.deepEqual(Array.from(ranked,r=>r.symbol),['AAA','BBB']);
   assert.ok(ranked[0].edge>ranked[1].edge);
 });
 
