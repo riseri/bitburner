@@ -41,3 +41,41 @@ for (const scenario of [
         console.log(`${scenario.name}: ${JSON.stringify({ paid: summary.paid, income60: summary.income60, security: summary.security, steps: summary.steps })}`);
     });
 }
+
+
+test('default dashboard is an operator view and hides startup ranking noise', { timeout: 60_000 }, async () => {
+    const sim = new NetscriptSimulation({
+        target: 'phantasy', weakenTime: 5_000, levelPerMinute: 0,
+        mainServer: { max: 600e6, money: 600e6, sec: 7, min: 7, required: 30 },
+        flags: { target: 'phantasy', 'max-targets': 1, 'dashboard-details': false },
+        backgroundTargets: {
+            'the-hub': { max: 4.96e9, money: 400e6, sec: 20, min: 12, required: 300, weakenTime: 15_000, chance: .8 },
+        },
+    });
+    sim.run();
+    await sim.clock.runUntil(sim.start + 4 * 60_000);
+    const logs = sim.summary().logs.map(line => line.trimStart());
+    assert.ok(logs.some(line => line.includes(' INCOME ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.includes(' CURRENT TARGET ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.includes(' NEXT TARGET ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.includes(' FLEET ')), logs.join('\n'));
+    assert.match(logs.find(line => line.startsWith('Income')), /actual.*model.*%/);
+    assert.ok(logs.some(line => line.startsWith('Target') && /the-hub/.test(line)), logs.join('\n'));
+    assert.ok(!logs.some(line => line.includes('STARTUP TARGET RANKING SNAPSHOT')), logs.join('\n'));
+    assert.ok(!logs.some(line => line.startsWith('Core bonus')), logs.join('\n'));
+    assert.ok(!logs.some(line => line.startsWith('Budget skips')), logs.join('\n'));
+});
+
+test('dashboard details retain the startup ranking and engineering diagnostics', { timeout: 60_000 }, async () => {
+    const sim = new NetscriptSimulation({
+        weakenTime: 5_000, levelPerMinute: 0,
+        flags: { target: 'auto', 'max-targets': 1, 'dashboard-details': true },
+    });
+    sim.run();
+    await sim.clock.runUntil(sim.start + 2 * 60_000);
+    const logs = sim.summary().logs.map(line => line.trimStart());
+    assert.ok(logs.some(line => line.includes(' STARTUP TARGET RANKING SNAPSHOT ')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('Core bonus')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('Restarts')), logs.join('\n'));
+    assert.ok(logs.some(line => line.startsWith('Fallback')), logs.join('\n'));
+});
