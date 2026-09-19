@@ -17,7 +17,6 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 	const port = ns.getPortHandle(Number(portArg));
 	const controlPort = controlNumber > 0 ? ns.getPortHandle(controlNumber) : null;
 	const minSecurity = ns.getServerMinSecurityLevel(target);
-	const latestStart = landAt - plannedDuration;
 	if (!Number.isFinite(landAt) || !Number.isFinite(plannedDuration) || plannedDuration <= 0) {
 		throw new Error("Invalid JIT worker deadline/duration");
 	}
@@ -43,6 +42,11 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 		const duration = getDuration(target);
 		const delay = landAt - Date.now() - duration;
 		if (!prep && security > minSecurity + 0.001) {
+			// A fresh run can gain many hacking levels while this worker is alive,
+			// making the clean action shorter than planned. Preserve that new wait
+			// headroom, but never let security-inflated duration shorten the original
+			// clean-start window while the target is temporarily dirty.
+			const latestStart = landAt - Math.min(plannedDuration, duration);
 			if (now < latestStart) {
 				await ns.sleep(Math.max(1, Math.min(20, latestStart - now)));
 				continue;

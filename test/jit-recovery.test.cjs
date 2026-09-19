@@ -210,6 +210,32 @@ test('worker waits through a dirty interval and starts only after security is cl
     assert.equal(f.port.items.find(e => e.type === 'done').drift, 0);
 });
 
+test('skill growth preserves newly available wait headroom before a dirty start', async () => {
+    const clock = new Clock(), start = clock.now, port = new Port(), control = new Port();
+    control.write({ type: 'jit-control', paused: false });
+    const helper = loadScript('lib/jit-worker.js', clock), calls = [];
+    const ns = {
+        args: ['foodnstuff', start + 1600, '1', 20, 'W2', 'chunk', 30, 15, 1000, start],
+        disableLog() {}, getPortHandle: n => n === 20 ? port : control,
+        getServerMinSecurityLevel: () => 3,
+        getServerSecurityLevel: () => clock.now < start + 700 ? 3.1 : 3,
+        getServerMoneyAvailable: () => 50e6,
+        sleep: ms => clock.sleep(ms),
+    };
+    let ended = false;
+    const work = helper.runJitWorker(ns, () => 800, async (_target, options) => {
+        calls.push({ started: clock.now, options });
+        await clock.sleep(800 + options.additionalMsec);
+        return 1;
+    }).then(() => ended = true);
+    await clock.runUntil(start + 3000); await work;
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].started, start + 700);
+    assert.equal(calls[0].options.additionalMsec, 100);
+    assert.equal(port.items.find(e => e.type === 'done').drift, 0);
+    assert.equal(ended, true);
+});
+
 test('39 minute duration inflation is classified, without invoking the invalid action', async () => {
     const f = await runWorker('W1', { dirtyForever: true });
     assert.equal(f.calls.length, 0);
