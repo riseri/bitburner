@@ -363,7 +363,7 @@ function publishStatus(port, ns, market, cfg, session, commission, state, missin
 	port.clear();
 	port.write({
 		type: "stock-status",
-		version: 2,
+		version: 1,
 		producerPid: ns.pid,
 		generatedAt: Date.now(),
 		heartbeatIntervalMs: 10_000,
