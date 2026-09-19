@@ -206,6 +206,18 @@ test('IPvGO a passed manual turn is not mistaken for an untouched opening',()=>{
     const f=fixture();f.play('X');
     assert.throws(()=>api.mayStartGo(api.readGoSnapshot(f.ns),null,false),/Unowned/);
 });
+test('IPvGO arms a Daedalus distraction window before committing moves',async()=>{
+    const f=fixture();let playtime=0;
+    const getPlayer=f.ns.getPlayer,baseSleep=f.ns.sleep;
+    f.ns.getPlayer=()=>({...getPlayer(),totalPlaytime:playtime});
+    f.ns.sleep=async ms=>{if(ms>=200)playtime+=Math.floor(ms/200)*200;return baseSleep(ms);};
+    await api.main(f.ns);
+    assert.deepEqual(f.terminal,[]);
+    const log=f.logs.join('\n');
+    assert.match(log,/RNG rig\s+\d+\/\d+ armed/);
+    assert.match(log,/Daedalus RNG\s+0\.9/);
+});
+
 test('IPvGO validates every requested ordinary board size with a mocked complete game',async()=>{
     for(const size of [7,9,13]) {
         const f=fixture({size});await api.main(f.ns);
