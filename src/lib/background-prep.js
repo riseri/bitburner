@@ -4,6 +4,8 @@ const TICK_MS = 500;
 const QUIET_MS = 60_000;
 const PRODUCTIVE_MS = 120_000;
 const RETRY_MS = 30_000;
+const SLOT_FILL_HORIZON_MS = 10 * 60_000;
+const SLOT_FILL_MIN_ACTIVE_FRACTION = 0.05;
 const GROW = "background-grow.js";
 const WEAKEN = "background-weaken.js";
 
@@ -93,10 +95,20 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 	const upperBound = h.sec >= 100;
 	const chance = upperBound ? 1 : Math.min(1,
 		ns.hackAnalyzeChance(name) * (100 - h.min) / (100 - h.sec));
-	const period = Math.max(ctx.runtime.plan.period, 4 * ctx.cfg.gap + 20);
-	const potential = h.max * ctx.cfg.maxSteal * 0.95 * chance * 1000 / period;
+	const slotFill = Boolean(ctx.slotFill);
 	const activeRate = ctx.runtime.plan.expected;
-	if (!(potential > activeRate * ctx.cfg.switchThreshold)) return null;
+	const freeRate = Number(ctx.availableBatchRate);
+	const period = slotFill
+		? Math.max(4 * ctx.cfg.gap + 20, 1000 / Math.max(0.25,
+			Number.isFinite(freeRate) && freeRate > 0 ? freeRate : 1000 / ctx.runtime.plan.period))
+		: Math.max(ctx.runtime.plan.period, 4 * ctx.cfg.gap + 20);
+	const potential = h.max * ctx.cfg.maxSteal * 0.95 * chance * 1000 / period;
+	// Filling an empty second lane is additive. It does not need to beat the
+	// incumbent by the replacement threshold; even a modest second earner is
+	// useful while richer long-prep targets remain future options.
+	if (slotFill) {
+		if (!(potential > activeRate * SLOT_FILL_MIN_ACTIVE_FRACTION)) return null;
+	} else if (!(potential > activeRate * ctx.cfg.switchThreshold)) return null;
 
 	const budget = prepBudget(ctx);
 	const wSlots = Math.floor(budget / ns.getScriptRam(WEAKEN, "home"));
@@ -118,10 +130,23 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 			(repairWaves - 1) * minW);
 	}
 	const warmupMs = minW + ctx.cfg.lead + 250;
-	const score = (potential - activeRate) *
-		Math.max(0, ctx.state.horizon - prepMs - warmupMs) / ctx.state.horizon;
+	let score;
+	if (slotFill) {
+		// Acquisition should optimize money available soon, not the best two-hour
+		// replacement. Prefer candidates that start paying inside ten minutes.
+		// If every candidate is slower, retain a tiny fallback score so the
+		// fastest meaningful option can still make progress.
+		const horizon = Math.min(ctx.state.horizon, SLOT_FILL_HORIZON_MS);
+		const earningMs = horizon - prepMs - warmupMs;
+		score = earningMs > 0
+			? potential * earningMs / horizon
+			: potential * 0.01 / (1 + (prepMs + warmupMs) / horizon);
+	} else {
+		score = (potential - activeRate) *
+			Math.max(0, ctx.state.horizon - prepMs - warmupMs) / ctx.state.horizon;
+	}
 	if (!(score > 0) || !Number.isFinite(score)) return null;
-	return { name, potential, score, prepMs, warmupMs, upperBound };
+	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill };
 }
 
 function prepBudget(ctx) {
