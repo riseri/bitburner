@@ -4,19 +4,24 @@ import { GO_STATE_FILE, GO_OPPONENTS, GO_CYCLE_MS, goConfig, readGoSnapshot, sna
 /** Standalone IPvGO player. Never launched by the supervisor or deployed to the fleet. @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([["opponent", "Daedalus"], ["size", 5], ["games", 0],
-		["takeover", false], ["interval", 500], ["think-ms", 35], ["rng-snipe", true], ["rng-max-wait", 10_000]]);
+		["takeover", false], ["interval", 25], ["think-ms", 8], ["rng-snipe", false], ["rng-max-wait", 10_000]]);
 	ns.disableLog("ALL");
 	try {
 		if (ns.getHostname() !== "home") throw new Error("Run go-bot.js on home only");
 		if (ns.ps("home").some(p => p.filename === ns.getScriptName() && p.pid !== ns.pid)) {
 			throw new Error("Only one go-bot.js may play at a time");
 		}
-		const cfg = goConfig(flags), session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, last: "Starting", analysis: null,
+		const cfg = goConfig(flags), session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, score: 0, gameMs: 0,
+			startedAt: Date.now(), gameStartedAt: Date.now(), startBonus: 0, last: "Starting", analysis: null,
 			rng: null, rngAttempts: 0, rngSnipes: 0, rngWaitMs: 0 };
 		let snapshot = readGoSnapshot(ns);
 		const decision = mayStartGo(snapshot, readGoRecord(ns), cfg.takeover);
 		if (decision === "new") snapshot = await startGame(ns, cfg, snapshot);
 		else if (snapshot.game.currentPlayer === "Black") await saveGoRecord(ns, snapshot, "ready");
+		session.bonusOpponent = snapshot.opponent;
+		session.startBonus = Number(ns.go.analysis.getStats()[snapshot.opponent]?.bonusPercent) || 0;
+		session.startedAt = Date.now();
+		session.gameStartedAt = Date.now();
 		let turns = 0;
 
 		while (true) {
@@ -26,12 +31,20 @@ export async function main(ns) {
 				const won = snapshot.game.blackScore >= snapshot.game.whiteScore;
 				if (won) session.wins++; else session.losses++;
 				session.margin += snapshot.game.blackScore - snapshot.game.whiteScore;
+				session.score += snapshot.game.blackScore;
+				session.gameMs += Math.max(0, Date.now() - session.gameStartedAt);
 				session.last = `${won ? "Won" : "Lost"} ${snapshot.game.blackScore} to ${snapshot.game.whiteScore} vs ${snapshot.opponent}`;
 				await saveGoRecord(ns, snapshot, "complete", { lastResult: session.last });
 				renderGo(ns, snapshot, session, "GAME COMPLETE");
 				if (cfg.games && session.games >= cfg.games) return;
-				await ns.sleep(Math.max(1_000, cfg.interval));
-				snapshot = await startGame(ns, cfg, snapshot); turns = 0;
+				await ns.sleep(Math.max(250, cfg.interval));
+				snapshot = await startGame(ns, cfg, snapshot);
+				if (snapshot.opponent !== session.bonusOpponent) {
+					session.bonusOpponent = snapshot.opponent;
+					session.startBonus = Number(ns.go.analysis.getStats()[snapshot.opponent]?.bonusPercent) || 0;
+					session.startedAt = Date.now();
+				}
+				session.gameStartedAt = Date.now(); turns = 0;
 				continue;
 			}
 			if (++turns > snapshot.board.length ** 2 * 8) throw new Error("Turn limit reached; leaving the unfinished board intact");
@@ -53,7 +66,7 @@ export async function main(ns) {
 					komi: snapshot.game.komi,
 					history: snapshot.history,
 					opponentPassed: snapshot.game.previousMove === null && snapshot.history.length > 0,
-					yieldControl: () => ns.sleep(5),
+					yieldControl: () => ns.sleep(1),
 				});
 				session.analysis = action;
 				assertSameGo(ns, snapshot);
@@ -145,7 +158,12 @@ function renderGo(ns, snapshot, session, state) {
 	ns.print(`  Opponent       ${snapshot.opponent} | ${snapshot.board.length}x${snapshot.board.length}`);
 	ns.print(`  Score          You ${snapshot.game.blackScore} | Opponent ${snapshot.game.whiteScore} (includes komi)`);
 	ns.print(`  This session   ${session.games} games | ${session.wins} wins | ${session.losses} losses | ${session.moves} turns played`);
-	if (session.games) ns.print(`  Score margin    ${(session.margin / session.games).toFixed(2)} avg points/game`);
+	if (session.games) {
+		ns.print(`  Score margin    ${(session.margin / session.games).toFixed(2)} avg points/game`);
+		const avgGameMs = session.gameMs / session.games;
+		const scorePerMinute = session.gameMs > 0 ? session.score / (session.gameMs / 60_000) : 0;
+		ns.print(`  Farm pace       ${(avgGameMs / 1000).toFixed(1)}s/game | ${scorePerMinute.toFixed(1)} black score/min`);
+	}
 	ns.print(`  Last action    ${session.last}`);
 	if (session.analysis) {
 		const a = session.analysis;
@@ -161,6 +179,9 @@ function renderGo(ns, snapshot, session, state) {
 	if (stats) {
 		ns.print(`  Game records   ${stats.wins} wins | ${stats.losses} losses | streak ${stats.winStreak}`);
 		ns.print(`  Actual bonus   +${Number(stats.bonusPercent).toFixed(3)}% ${stats.bonusDescription}`);
+		const elapsedHours = Math.max(1, Date.now() - session.startedAt) / 3_600_000;
+		const bonusRate = (Number(stats.bonusPercent) - session.startBonus) / elapsedHours;
+		ns.print(`  Bonus pace      ${bonusRate >= 0 ? "+" : ""}${bonusRate.toFixed(3)}%/hour this session`);
 		ns.print(`  Favor credit   ${stats.rep} rep-equivalent (game-reported cumulative credit, not current faction rep)`);
 	}
 	ns.print(`  Membership     ${member ? "Joined opponent faction; qualifying win streaks can award favor" : "Not joined; node-power bonus still applies, direct faction favor does not"}`);

@@ -64,7 +64,7 @@ export function goConfig(flags) {
 	if (!GO_OPPONENTS.includes(cfg.opponent)) throw new Error(`Choose an ordinary opponent: ${GO_OPPONENTS.join(", ")}`);
 	if (![5, 7, 9, 13].includes(cfg.size)) throw new Error("size must be 5, 7, 9, or 13");
 	if (!Number.isSafeInteger(cfg.games) || cfg.games < 0) throw new Error("games must be a nonnegative integer (0 means continuous)");
-	if (!Number.isFinite(cfg.interval) || cfg.interval < 100 || cfg.interval > 60_000) throw new Error("interval must be 100..60000 ms");
+	if (!Number.isFinite(cfg.interval) || cfg.interval < 0 || cfg.interval > 60_000) throw new Error("interval must be 0..60000 ms");
 	if (!Number.isFinite(cfg.thinkMs) || cfg.thinkMs < 1 || cfg.thinkMs > 100) throw new Error("think-ms must be 1..100");
 	if (!Number.isFinite(cfg.rngMaxWait) || cfg.rngMaxWait < 0 || cfg.rngMaxWait > 60_000) throw new Error("rng-max-wait must be 0..60000 ms");
 	return cfg;
