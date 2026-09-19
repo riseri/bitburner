@@ -78,9 +78,9 @@ point stops with its board intact rather than looping indefinitely.
 | `--size` | `5` | New board size: 5, 7, 9, or 13 |
 | `--games` | `0` | Verified game completions before exit; 0 = continuous |
 | `--takeover` | `false` | Explicitly adopt the unfinished starting game |
-| `--interval` | `500` | Delay between player turns, 100..60000 ms |
-| `--think-ms` | `35` | Cooperative adversarial-search budget, 1..100 ms |
-| `--rng-snipe` | `true` | For Daedalus, time moves into the AI's documented distraction RNG branch |
+| `--interval` | `25` | Delay before our turn, 0..60000 ms |
+| `--think-ms` | `8` | Cooperative adversarial-search budget, 1..100 ms |
+| `--rng-snipe` | `false` | Experimental Daedalus timing exploit; disabled by default because live results were worse |
 | `--rng-max-wait` | `10000` | Maximum cooperative wall-clock wait per move for an RNG window |
 
 Other supported opponents are `Netburners`, `Slum Snakes`, `The Black Hand`,
@@ -128,7 +128,7 @@ history, but never overrides the game's live legality decision.
 
 ### Daedalus RNG timing
 
-Daedalus has an additional default-on optimization. The native AI seeds a
+Daedalus has an optional timing experiment. The native AI seeds a
 Wichmann-Hill RNG from `Player.totalPlaytime` after its initial think delay, and
 uses the third random sample to decide whether to run its normal priority policy.
 A value at or above 0.9 sends Daedalus through the less-directed fallback path.
@@ -141,11 +141,18 @@ playtime, then commits only if at least three favorable ticks remain. Four ticks
 provide margin for timer ordering, state persistence, and the AI's initial wait.
 
 This does not use `ns.go.cheat`, testing-board mutation, busy waiting, or scheduler
-integration. The tradeoff is slower wall-clock Go games: a favorable window can
-take several seconds. Use `--rng-snipe false` to compare ordinary play.
+integration. However, a live 20-game trial with the timing exploit enabled went
+9-11 with a -2.00 average margin while adding about 25.5 minutes of deliberate
+waits. It is therefore disabled by default and retained only behind
+`--rng-snipe true` for experiments.
 
-Search yields with `ns.sleep(5)` between root variations. The reported CPU
-estimate excludes those deliberate sleeps. The default 35 ms budget is
+The default farm profile uses a 25 ms turn interval, an 8 ms search budget, narrow
+5x5 search widths, and `ns.sleep(1)` cooperative yields. This bounds our own
+latency aggressively. The native opponent still performs internal 200 ms waits
+during AI evaluation, so the whole turn cannot be made instantaneous through
+normal Netscript.
+
+The reported CPU estimate excludes deliberate sleeps. The default 8 ms budget is
 cooperative, not a hard realtime guarantee: one board operation, garbage
 collection, or native AI work can exceed it.
 Larger boards cost more. Separate scripts share the game's JavaScript runtime,
@@ -177,11 +184,14 @@ produced a 40% Daedalus win rate over 25 user-observed games. The adversarial-se
 revision then produced 10 wins and 10 losses with a -0.05 average score margin in
 a live 20-game trial, showing that the synthetic benchmark overstated its edge.
 
-The RNG timing layer is based on the actual native seed source, game-cycle clock,
-and Daedalus 0.9 distraction threshold. It still needs a fresh live A/B trial:
-run Daedalus with RNG sniping enabled, then repeat with `--rng-snipe false`.
-The goal is a material improvement over the 50% / -0.05 live baseline, not a
-synthetic win-rate claim.
+The RNG timing layer correctly predicted and armed the native seed condition, but
+a live 20-game trial produced 9 wins and 11 losses with a -2.00 average margin,
+worse than the 50% / -0.05 non-sniped baseline. The default now favors throughput:
+RNG timing is off, player pacing is 25 ms, and the search budget is 8 ms.
+
+The dashboard reports average game duration, black score per minute, and session
+bonus-percent gain per hour so future tuning is judged by farming throughput
+rather than synthetic opponent win rates.
 
 Official references checked on 2026-09-19:
 - [Go API](https://github.com/bitburner-official/bitburner-src/blob/dev/markdown/bitburner.go.md)
