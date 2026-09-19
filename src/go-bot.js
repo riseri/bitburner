@@ -67,7 +67,7 @@ export async function main(ns) {
 					session.rngAttempts++;
 					if (session.rng.armed) session.rngSnipes++;
 					session.rngWaitMs += session.rng.waitedMs;
-				} else session.rng = null;
+				} else if (snapshot.opponent !== "Daedalus" || !cfg.rngSnipe) session.rng = null;
 				assertSameGo(ns, snapshot);
 				session.last = action.x === null ? action.reason : `(${action.x}, ${action.y}) ${action.reason}`;
 				await saveGoRecord(ns, snapshot, "pending", { action: { x: action.x, y: action.y } });
