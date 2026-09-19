@@ -138,14 +138,25 @@ test('custom service heartbeat interval is respected independently of scan caden
     f.tick(60000);assert.equal(f.service.state,'RUNNING');assert.equal(f.killed.length,0);
 });
 
+test('informational status channels never restart a live service for stale status', () => {
+    const f=fixture('go-bot.js',['--port',12],'go-status');
+    f.service.heartbeatRequired=false;
+    f.tick();
+    f.port.write({type:'go-status',producerPid:f.service.pid,generatedAt:f.clock.now,state:'WAITING FOR OPPONENT'});
+    f.tick(900000);
+    assert.equal(f.service.state,'RUNNING');
+    assert.equal(f.killed.length,0);
+});
+
+
 
 test('new dependent managers and daemon follow an adopted custom fleet port', () => {
     const api=loadScript('supervisor.js',new Clock());
-    const services=api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',12,'--cloud',false]}]},
+    const services=api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',11,'--cloud',false]}]},
         {contracts:true,progression:true},['--background-prep',false]);
     for(const name of ['daemon.js','contract-manager.js','progression-manager.js']) {
         const args=services.find(s=>s.name===name).args;
-        assert.equal(args[args.indexOf('--fleet-port')+1],12,name);
+        assert.equal(args[args.indexOf('--fleet-port')+1],11,name);
     }
 });
 
@@ -161,6 +172,36 @@ test('supervisor wires stock trader to the dedicated status port', () => {
     const fleet=services.find(s=>s.name==='fleet-manager.js');
     assert.equal(fleet.args[fleet.args.indexOf('--stock-port')+1],13);
 });
+
+test('supervisor manages exactly one Go bot on its informational status port', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    const services=api.createManagedServices({ps:()=>[]},
+        {contracts:false,progression:false,stocks:false,go:true},[]);
+    const go=services.filter(s=>s.name==='go-bot.js');
+    assert.equal(go.length,1);
+    assert.equal(go[0].port,12);
+    assert.equal(go[0].heartbeatType,'go-status');
+    assert.equal(go[0].heartbeatRequired,false);
+    assert.deepEqual(go[0].args,['--port',12]);
+});
+
+test('Go safety stops block automatic restart instead of replaying uncertain state', () => {
+    const clock=new Clock(),api=loadScript('supervisor.js',clock),status=new Port();
+    const service=api.createManagedServices({ps:()=>[]},
+        {contracts:false,progression:false,stocks:false,go:true},[])
+        .find(s=>s.name==='go-bot.js');
+    service.pid=42;
+    status.write({type:'go-status',terminal:true,producerPid:42,generatedAt:clock.now,error:'interrupted request'});
+    const ns={ps:()=>[],getPortHandle:()=>status};
+    const stopped=api.goSafetyStop(ns,service);
+    assert.equal(stopped.error,'interrupted request');
+    api.blockGoService(ns,service,stopped);
+    assert.equal(service.state,'BLOCKED');
+    assert.equal(service.pid,42);
+    assert.equal(service.nextStartAt,Infinity);
+    assert.match(service.lastEvent,/interrupted request/);
+});
+
 
 test('missing market access blocks stock service without restart backoff', () => {
     const clock=new Clock(),api=loadScript('supervisor.js',clock),status=new Port();
@@ -179,16 +220,17 @@ test('missing market access blocks stock service without restart backoff', () =>
 test('an inconsistent existing daemon/fleet pair fails before starting dependents', () => {
     const api=loadScript('supervisor.js',new Clock());
     assert.throws(()=>api.createManagedServices({ps:()=>[
-        {filename:'fleet-manager.js',pid:9,args:['--port',12]},
+        {filename:'fleet-manager.js',pid:9,args:['--port',11]},
         {filename:'daemon.js',pid:10,args:[]},
     ]},{contracts:true,progression:true},[]),/different fleet ports/);
 });
 
-test('action channel is reserved from fleet and daemon configuration', () => {
+test('reserved automation channels are rejected by fleet and daemon configuration', () => {
     const clock=new Clock(),api=loadScript('supervisor.js',clock),daemon=loadScript('daemon.js',clock);
     assert.throws(()=>api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',14]}]}, {}, []),/reserved/);
     assert.throws(()=>api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',13]}]}, {}, []),/reserved/);
-    for(const config of [{port:14,fleetPort:19,controlPort:15},{port:20,fleetPort:14,controlPort:15},{port:20,fleetPort:19,controlPort:14},{port:13,fleetPort:19,controlPort:15}]) {
+    assert.throws(()=>api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',12]}]}, {}, []),/reserved/);
+    for(const config of [{port:14,fleetPort:19,controlPort:15},{port:20,fleetPort:14,controlPort:15},{port:20,fleetPort:19,controlPort:14},{port:13,fleetPort:19,controlPort:15},{port:12,fleetPort:19,controlPort:15}]) {
         assert.throws(()=>daemon.validateDaemonPorts(config),/reserved/);
     }
 });
