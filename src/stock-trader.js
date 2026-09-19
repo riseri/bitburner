@@ -237,7 +237,7 @@ function render(ns, market, cfg, session, commission, state) {
 	row("Equity", `${cash(metrics.equity)} | ${cash(metrics.exposure)} invested (${pct(metrics.equity > 0 ? metrics.exposure / metrics.equity : 0)})`);
 	row("Cash", `${cash(metrics.cash)} | reserve ${cash(reserveFloor)}`);
 	row("Open P/L", `${signedCash(metrics.openPnl)} unrealized`);
-	row("Profit total", `${signedCash(session.realized)} realized net | ${session.sells} closed trades`);
+	row("Profit total", `${signedCash(session.realized)} realized net this session | ${session.sells} closed trades`);
 	row("Per trade", session.sells
 		? `avg ${signedCash(session.realized / session.sells)} | last ${signedCash(session.lastTradePnl)} | ${session.winningTrades}W/${session.losingTrades}L`
 		: "No closed trades yet");
