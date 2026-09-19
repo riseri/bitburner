@@ -4635,18 +4635,17 @@ function renderSchedulerDashboard(ns, pool) {
 		renderDashboard(ns, p.name, p.runtime, pool.network, p.cfg, p.stats, p.queue,
 			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
 			p.drain, p.recovery, pool.foreign);
-		const slotPressure = p.admissionReason || p.stats.allocationFails || p.admissionSkips;
+		const slotPressure = p.admissionReason || p.stats.allocationFails;
 		if (p.cfg.dashboardDetails) {
 			if (slotPressure || p.idleRetunes || pool.cfg.maxTargets > 1) dashboardSection(ns, "Scheduler diagnostics");
 			if (slotPressure) dashboardRow(ns, "Batch slots",
 				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
 			if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
 			if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
-		} else if (slotPressure || p.idleRetunes) {
+		} else if (slotPressure) {
 			dashboardSection(ns, "Scheduler attention");
-			if (slotPressure) dashboardRow(ns, "Batch slots",
+			dashboardRow(ns, "Batch slots",
 				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
-			if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
 		}
 		return;
 	}
@@ -4677,14 +4676,14 @@ function renderSchedulerDashboard(ns, pool) {
 
 	const problemRows = rows.filter(p => !["LIVE", "WARMUP"].includes(p.mode) ||
 		hasDashboardCounters(p.misses) || p.local || p.fallback || p.restarts ||
-		p.admissionReason || p.allocationFails || p.admissionSkips);
+		p.admissionReason || p.allocationFails);
 	if (problemRows.length || pool.cloudState.error) {
 		dashboardSection(ns, "Attention");
 		for (const p of problemRows) {
 			if (!["LIVE", "WARMUP"].includes(p.mode) && p.note) row(p.target, `${p.mode}: ${p.note}`);
 			if (hasDashboardCounters(p.misses)) row(`${p.target} misses`, dashboardCounters(p.misses));
 			if (p.local || p.fallback || p.restarts) row(`${p.target} recovery`, `${p.local} local | ${p.fallback} fallback | ${p.restarts} rebuilds`);
-			if (p.admissionReason || p.allocationFails || p.admissionSkips) row(`${p.target} slots`, `${p.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+			if (p.admissionReason || p.allocationFails) row(`${p.target} slots`, `${p.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
 		}
 		if (pool.cloudState.error) row("Cloud error", pool.cloudState.error);
 	}
