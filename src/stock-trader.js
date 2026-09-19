@@ -1,5 +1,6 @@
 import { normalizeStockConfig, expectedLongEdge, rankLongCandidates, shouldExitLong, sharesForBudget, tradeHasEnoughEdge, portfolioMetrics } from "lib/stock-strategy.js";
 import { PORTS } from "lib/ports.js";
+import { dashboardSection, dashboardRow } from "lib/dashboard.js";
 
 const HOME = "home";
 const LONG = "L";
@@ -215,25 +216,30 @@ function render(ns, market, cfg, session, commission, state) {
 	const elapsedMin = Math.max(1, Date.now() - session.startedAt) / 60_000;
 	const candidates = rankLongCandidates(rows, cfg).slice(0, 5);
 	const positions = rows.filter(row => row.longShares > 0 || row.shortShares > 0).length;
+	const row = (label, value) => dashboardRow(ns, label, value);
 
 	ns.clearLog();
-	ns.print("STOCK PRINTER :: 4S LONG");
-	ns.print(`  State          ${state} | tick ${session.ticks}`);
-	ns.print(`  Cash           ${cash(metrics.cash)} | reserve ${cash(reserveFloor)}`);
-	ns.print(`  Portfolio      ${cash(metrics.equity)} | invested ${cash(metrics.exposure)} (${pct(metrics.equity > 0 ? metrics.exposure / metrics.equity : 0)})`);
-	ns.print(`  Open P/L       ${signedCash(metrics.openPnl)} | positions ${positions}`);
-	ns.print(`  Realized       ${signedCash(session.realized)} | ${signedCash(session.realized / elapsedMin)}/min`);
-	ns.print(`  Trades         ${session.buys} buys | ${session.sells} sells | fees ${cash(session.fees)}`);
-	ns.print(`  Last           ${session.last}`);
-	ns.print("  TOP 4S SIGNALS");
-	if (!candidates.length) ns.print("    none above entry threshold");
-	for (const row of candidates) {
-		const edge = expectedLongEdge(row.forecast, row.volatility);
-		const held = row.longShares > 0 ? ` | held ${formatShares(row.longShares)}` : "";
-		ns.print(`    ${row.symbol.padEnd(5)} f ${pct(row.forecast).padStart(7)} | vol ${pct(row.volatility).padStart(7)} | edge ${pct(edge).padStart(7)}/tick${held}`);
+	ns.print("STOCK TRADER :: 4S LONG");
+
+	dashboardSection(ns, "Portfolio");
+	row("State", `${state} | tick ${session.ticks}`);
+	row("Equity", `${cash(metrics.equity)} | ${cash(metrics.exposure)} invested (${pct(metrics.equity > 0 ? metrics.exposure / metrics.equity : 0)})`);
+	row("Cash", `${cash(metrics.cash)} | reserve ${cash(reserveFloor)}`);
+	row("P/L", `${signedCash(metrics.openPnl)} open | ${signedCash(session.realized)} realized`);
+	row("Positions", `${positions} open | ${session.buys} buys | ${session.sells} sells`);
+	if (session.last && session.last !== "none") row("Last action", session.last);
+
+	dashboardSection(ns, "Best signals");
+	if (!candidates.length) row("Status", "No symbols above the entry threshold");
+	for (const candidate of candidates) {
+		const edge = expectedLongEdge(candidate.forecast, candidate.volatility);
+		const held = candidate.longShares > 0 ? ` | held ${formatShares(candidate.longShares)}` : "";
+		row(candidate.symbol, `forecast ${pct(candidate.forecast)} | volatility ${pct(candidate.volatility)} | edge ${pct(edge)}/tick${held}`);
 	}
-	ns.print(`  Safety         WSE + TIX + 4S TIX required | exposure <= ${pct(cfg.maxExposure)} | reserve >= ${pct(cfg.cashReserve)}`);
-	ns.print("                 Missing access stops trading without liquidating positions.");
+
+	dashboardSection(ns, "Guardrails");
+	row("Exposure", `max ${pct(cfg.maxExposure)} | reserve ${pct(cfg.cashReserve)} minimum`);
+	row("Access", "WSE + TIX + 4S TIX required; missing access stops trading safely");
 }
 
 function publishStatus(port, ns, market, cfg, session, commission, state, missing = []) {

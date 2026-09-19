@@ -5,7 +5,7 @@ const path=require('node:path');
 const vm=require('node:vm');
 
 function load(){
-  const files=['lib/ports.js','lib/stock-strategy.js','stock-trader.js'];
+  const files=['lib/ports.js','lib/dashboard.js','lib/stock-strategy.js','stock-trader.js'];
   let all='';
   for(const item of files){
     all+=fs.readFileSync(path.join(__dirname,'../src',item),'utf8')

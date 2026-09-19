@@ -4,10 +4,10 @@ const vm = require('node:vm');
 const root = path.join(__dirname, '..');
 
 function loadGo(file = 'go-bot.js', extra = {}) {
-    const sandbox = { console, Date, ...extra };
+    const sandbox = { console, Date, PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15, PROGRESSION_ACTION: 14, STOCK_STATUS: 13, GO_STATUS: 12 }, ...extra };
     vm.createContext(sandbox);
     let all = '';
-    for (const item of ['lib/go-strategy.js', 'lib/go-session.js', 'go-bot.js']) {
+    for (const item of ['lib/dashboard.js', 'lib/go-strategy.js', 'lib/go-session.js', 'go-bot.js']) {
         all += fs.readFileSync(path.join(root, 'src', item), 'utf8')
             .replace(/^import .*;\s*$/gm, '').replace(/\bexport (?=(?:async )?function|const )/g, '') + '\n';
         if (file === item) break;

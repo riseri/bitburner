@@ -6,10 +6,7 @@ loop. Live income appears before forecasts or target rankings.
 
 ## Default view
 
-The daemon groups income, the active target and current pipeline, fleet capacity,
-background preparation, and four ranked targets. The supervisor is a compact
-overview of income, current pipeline health, background prep, fleet, contracts,
-progression and service health. Its target table is in the details view.
+The daemon keeps its parser-compatible operational telemetry for recovery and supervisor reads. The supervisor is the human-facing default: a compact Overview with income, target state, RAM, background prep and fleet capacity, followed by a single Automation summary for stocks, contracts, progression and managed services. An Attention section appears only when something needs intervention. Target rankings and low-level counters remain in the details view.
 
 Current pipeline misses, drift and recovery are separate from session restart
 counts. Historical event text is labeled as history, not an active alarm. A
@@ -54,9 +51,10 @@ gap/period/lead, thread sizing, operation durations, RAM reservations and cloud
 spending. This is a presentation setting only: no scheduling or recovery policy
 changes with the view.
 
-After merging, sync all of `src`, including the new `lib/dashboard.js`, before the
-usual one-time supervisor/daemon restart. The helper is imported only by the two
-home controllers; remote HGW and background workers are unchanged.
+After merging, sync all of `src`, including `lib/dashboard.js`, before the usual
+one-time supervisor/daemon restart. Dashboard helpers are used by the supervisor,
+daemon and human-facing standalone/service panels; remote HGW and background workers
+are unchanged.
 
 ## Tests
 
@@ -65,3 +63,14 @@ They cover layout order/width, current vs session counters, warmup, recovery,
 background isolation, legacy and compact target tables, prep, wrapped errors,
 read-only rendering and the supervisor overview. In-game font/layout and
 Netscript RAM analysis are not emulated by these tests.
+
+
+## Standalone dashboards
+
+Standalone automation windows use the same section-and-row presentation helpers:
+
+- `stock-trader.js` groups portfolio state, best 4S signals, and guardrails.
+- `go-bot.js` groups the live game, decision search, rewards, Daedalus timing, and safety, while publishing the same state to the supervisor.
+- `contract-manager.js` groups scanner status, blockers, and the small set of contracts currently waiting for action.
+
+The intent is to keep the first screen useful at a glance while retaining verbose diagnostics behind explicit detail modes or within the service that owns them.
