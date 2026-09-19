@@ -18,7 +18,7 @@ test('IPvGO finds a four-cycle Daedalus distraction window within ten seconds',(
         assert.equal(plan.priority.length,4);
         assert.ok(plan.priority.every(v=>v>=0.9),JSON.stringify(plan.priority));
         for(let i=0;i<4;i++){
-            assert.equal(plan.priority[i],api.daedalusPriorityRng(plan.seedStart+i*api.GO_CYCLE_MS));
+            assert.equal(plan.priority[i],api.daedalusPriorityRng(plan.seedStart+i*200));
         }
     }
 });
