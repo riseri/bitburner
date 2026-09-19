@@ -1,4 +1,5 @@
 import { PORTS } from "lib/ports.js";
+import { dashboardSection, dashboardRow } from "lib/dashboard.js";
 import { SOLVERS, solveContractAsync } from "contract-solvers.js";
 import { contractFiles, contractIdentity, solverRevision, readValidation, readQuarantine, readReceipts, validationBlocker, isContractDummy, contractBoolean, saveContractJson } from "lib/contract-safety.js";
 
@@ -194,14 +195,30 @@ function publish(ns, port, state) {
 	port.clear();
 	port.write({ type: "contract-status", generatedAt: Date.now(), ...state,
 		contracts: state.contracts.map(entry => ({ ...entry })), blockers: { ...state.blockers } });
+
+	const row = (label, value) => dashboardRow(ns, label, value);
 	ns.clearLog();
 	ns.print("CODING CONTRACTS");
-	ns.print(`  ${state.waiting} waiting | ${state.solved} solved | ${state.found} unique files seen this session`);
-	ns.print(`  ${state.scanning ? "Scanning" : "Idle"} | ${state.scans} scans | validation required before submissions`);
-	if (state.error) ns.print(`  WARNING: ${state.error}`);
-	for (const [reason, count] of Object.entries(state.blockers)) ns.print(`  ${count} ${reason || "checking"}`);
-	for (const entry of state.contracts.filter(e => e.status === "waiting").slice(0, 8)) {
-		ns.print(`  ${entry.host}/${entry.file}: ${entry.type} (${entry.reason || "checking"})`);
+
+	dashboardSection(ns, "Status");
+	row("Scanner", `${state.scanning ? "SCANNING" : "IDLE"} | ${state.scans} scans`);
+	row("Contracts", `${state.waiting} waiting | ${state.solved} solved | ${state.found} found this session`);
+	row("Safety", "Solvers must be validated before submissions");
+	if (state.lastReward && state.lastReward !== "none") row("Last reward", state.lastReward);
+	if (state.error) row("Warning", state.error);
+
+	const blockers = Object.entries(state.blockers).filter(([, count]) => Number(count) > 0);
+	if (blockers.length) {
+		dashboardSection(ns, "Blocked");
+		for (const [reason, count] of blockers) row(String(count), reason || "checking");
 	}
-	ns.print(`  Last reward: ${state.lastReward}`);
+
+	const waiting = state.contracts.filter(entry => entry.status === "waiting").slice(0, 6);
+	if (waiting.length) {
+		dashboardSection(ns, "Waiting contracts");
+		for (const entry of waiting) row(entry.host, `${entry.file} | ${entry.type} | ${entry.reason || "checking"}`);
+		const hidden = state.waiting - waiting.length;
+		if (hidden > 0) row("More", `${hidden} additional waiting contract${hidden === 1 ? "" : "s"}`);
+	}
 }
+
