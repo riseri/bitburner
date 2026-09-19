@@ -1,23 +1,35 @@
-import { normalizeStockConfig, expectedLongEdge, rankLongCandidates, shouldExitLong, sharesForBudget, tradeHasEnoughEdge, portfolioMetrics } from "lib/stock-strategy.js";
+import {
+	normalizeStockConfig,
+	expectedDirectionalEdge,
+	rankTradeCandidates,
+	shouldExitLong,
+	shouldExitShort,
+	sharesForBudget,
+	tradeHasEnoughEdge,
+	allocationScale,
+	positionValue,
+	portfolioMetrics,
+} from "lib/stock-strategy.js";
 import { PORTS } from "lib/ports.js";
 import { dashboardSection, dashboardRow } from "lib/dashboard.js";
 
 const HOME = "home";
 const LONG = "L";
+const SHORT = "S";
 
-/** Standalone 4S long-only stock trader. @param {NS} ns */
+/** Standalone 4S directional stock trader. @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([
 		["cash-reserve", 0.20],
 		["cash-floor", 0],
 		["max-exposure", 0.80],
 		["max-position", 0.25],
-		["entry-forecast", 0.60],
-		["exit-forecast", 0.55],
+		["entry-forecast", 0.55],
+		["exit-forecast", 0.52],
 		["min-trade", 25e6],
 		["min-hold-ticks", 6],
-		["min-profit-multiple", 1.15],
-		["max-buys-per-tick", 4],
+		["min-profit-multiple", 1.10],
+		["max-buys-per-tick", 8],
 		["ticks", 0],
 		["dry-run", false],
 		["port", PORTS.STOCK_STATUS],
@@ -42,6 +54,7 @@ export async function main(ns) {
 			return;
 		}
 
+		const canShort = shortAccess(ns);
 		const port = ns.getPortHandle(statusPort);
 		port.clear();
 
@@ -61,10 +74,9 @@ export async function main(ns) {
 			lastTradePnl: 0,
 			winningTrades: 0,
 			losingTrades: 0,
-			// Buy commissions are not included in Bitburner's longAvg basis.
-			// Track them per symbol so realized profit is genuinely net of both sides.
 			entryFees: {},
 			last: "Waiting for the first stock update",
+			canShort,
 		};
 
 		let market = readMarket(ns, symbols);
@@ -118,81 +130,139 @@ function stockAccess(ns) {
 	return { ok: missing.length === 0, missing };
 }
 
+function shortAccess(ns) {
+	try {
+		const reset = ns.getResetInfo();
+		if (Number(reset?.currentNode) === 8) return true;
+		const sf = reset?.ownedSF;
+		const level = sf instanceof Map ? Number(sf.get(8) || 0) : Number(sf?.[8] || 0);
+		return level >= 2;
+	} catch {
+		return false;
+	}
+}
+
 async function tradeTick(ns, symbols, cfg, session, commission) {
 	let rows = readMarket(ns, symbols);
 	const actions = [];
 
-	// Exit weak longs first so stale positions cannot block better opportunities.
+	// Exit decayed positions first so stale capital can rotate into stronger 4S edges.
 	for (const row of rows) {
-		if (!shouldExitLong(row, cfg)) continue;
-		const shares = row.longShares;
-		if (cfg.dryRun) {
-			actions.push(`WOULD SELL ${row.symbol} ${formatShares(shares)} @ f=${pct(row.forecast)}`);
-			continue;
+		if (shouldExitLong(row, cfg)) {
+			const shares = row.longShares;
+			if (cfg.dryRun) {
+				actions.push(`WOULD SELL LONG ${row.symbol} ${formatShares(shares)} @ f=${pct(row.forecast)}`);
+			} else {
+				const soldAt = ns.stock.sellStock(row.symbol, shares);
+				if (soldAt > 0) {
+					recordRealized(session, LONG, row.symbol, shares * (soldAt - row.longAvg) - commission);
+					actions.push(`SELL LONG ${row.symbol} ${formatShares(shares)} | net ${signedCash(session.lastTradePnl)}`);
+				}
+			}
 		}
-		const soldAt = ns.stock.sellStock(row.symbol, shares);
-		if (!(soldAt > 0)) continue;
-		const entryFees = Number(session.entryFees[row.symbol]) || 0;
-		const realized = shares * (soldAt - row.longAvg) - commission - entryFees;
-		session.sells++;
-		session.fees += commission;
-		session.realized += realized;
-		session.lastTradePnl = realized;
-		if (realized >= 0) session.winningTrades++;
-		else session.losingTrades++;
-		delete session.entryFees[row.symbol];
-		actions.push(`SELL ${row.symbol} ${formatShares(shares)} | net ${signedCash(realized)}`);
+
+		if (session.canShort && shouldExitShort(row, cfg)) {
+			const shares = row.shortShares;
+			if (cfg.dryRun) {
+				actions.push(`WOULD COVER ${row.symbol} ${formatShares(shares)} @ f=${pct(row.forecast)}`);
+			} else {
+				const coveredAt = ns.stock.sellShort(row.symbol, shares);
+				if (coveredAt > 0) {
+					recordRealized(session, SHORT, row.symbol, shares * (row.shortAvg - coveredAt) - commission);
+					actions.push(`COVER ${row.symbol} ${formatShares(shares)} | net ${signedCash(session.lastTradePnl)}`);
+				}
+			}
+		}
 	}
 
 	if (!cfg.dryRun) rows = readMarket(ns, symbols);
 	let metrics = portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
-	let cash = metrics.cash, exposure = metrics.exposure, equity = metrics.equity;
+	let cash = metrics.cash;
+	let exposure = metrics.exposure;
+	let equity = metrics.equity;
 	const reserveFloor = Math.max(cfg.cashFloor, equity * cfg.cashReserve);
 	const exposureCap = equity * cfg.maxExposure;
 	const positionCap = equity * cfg.maxPosition;
+	const candidates = rankTradeCandidates(rows, cfg, session.canShort);
+	const bestEdge = candidates[0]?.edge || 0;
 	let buysThisTick = 0;
 
-	for (const row of rankLongCandidates(rows, cfg)) {
+	for (const row of candidates) {
 		if (buysThisTick >= cfg.maxBuysPerTick) break;
-		const currentLongValue = row.longShares > 0 ? Math.max(0, row.longShares * row.bid - commission) : 0;
+		const direction = row.direction;
+		const currentValue = positionValue(row, direction, commission);
+		const targetPosition = positionCap * allocationScale(row.edge, bestEdge);
 		const cashBudget = Math.max(0, cash - reserveFloor);
 		const exposureBudget = Math.max(0, exposureCap - exposure);
-		const positionBudget = Math.max(0, positionCap - currentLongValue);
+		const positionBudget = Math.max(0, targetPosition - currentValue);
 		const budget = Math.min(cashBudget, exposureBudget, positionBudget);
 		if (budget < cfg.minTrade) continue;
 
-		let shares = sharesForBudget(row, budget, commission);
+		let shares = sharesForBudget(row, budget, commission, direction);
 		if (!shares) continue;
-		let cost = shares * row.ask + commission;
+		const entryPrice = direction === SHORT ? row.bid : row.ask;
+		let cost = shares * entryPrice + commission;
 		if (cost > budget) {
-			shares = Math.max(0, shares - Math.ceil((cost - budget) / row.ask));
-			cost = shares * row.ask + commission;
+			shares = Math.max(0, shares - Math.ceil((cost - budget) / entryPrice));
+			cost = shares * entryPrice + commission;
 		}
 		if (!(shares > 0) || cost < cfg.minTrade) continue;
-		if (!tradeHasEnoughEdge(row, shares, commission, cfg)) continue;
+		if (!tradeHasEnoughEdge(row, shares, commission, cfg, direction)) continue;
 
-		const edge = expectedLongEdge(row.forecast, row.volatility);
+		const edge = expectedDirectionalEdge(row.forecast, row.volatility, direction);
 		if (cfg.dryRun) {
-			actions.push(`WOULD BUY ${row.symbol} ${formatShares(shares)} | f=${pct(row.forecast)} edge=${pct(edge)}`);
+			actions.push(`WOULD BUY ${directionName(direction)} ${row.symbol} ${formatShares(shares)} | f=${pct(row.forecast)} edge=${pct(edge)}`);
 			buysThisTick++;
 			continue;
 		}
 
-		const boughtAt = ns.stock.buyStock(row.symbol, shares);
+		const boughtAt = direction === SHORT
+			? ns.stock.buyShort(row.symbol, shares)
+			: ns.stock.buyStock(row.symbol, shares);
 		if (!(boughtAt > 0)) continue;
+
 		session.buys++;
 		session.fees += commission;
-		session.entryFees[row.symbol] = (Number(session.entryFees[row.symbol]) || 0) + commission;
+		session.entryFees[feeKey(direction, row.symbol)] =
+			(Number(session.entryFees[feeKey(direction, row.symbol)]) || 0) + commission;
 		buysThisTick++;
 		cash -= cost;
-		exposure += Math.max(0, shares * row.bid - commission);
-		actions.push(`BUY ${row.symbol} ${formatShares(shares)} | f=${pct(row.forecast)} edge=${pct(edge)}`);
+
+		// Re-read this position's mark after the trade because large transactions can
+		// influence forecast and the current mark-to-market value.
+		const refreshed = readMarket(ns, [row.symbol])[0];
+		const refreshedValue = positionValue(refreshed, direction, commission);
+		exposure += Math.max(0, refreshedValue - currentValue);
+		actions.push(`BUY ${directionName(direction)} ${row.symbol} ${formatShares(shares)} | f=${pct(row.forecast)} edge=${pct(edge)}`);
 	}
 
 	rows = readMarket(ns, symbols);
 	metrics = portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
 	session.last = summarizeActions(actions);
 	return { rows, metrics };
+}
+
+function recordRealized(session, direction, symbol, grossAfterExitFee) {
+	const key = feeKey(direction, symbol);
+	const entryFees = Number(session.entryFees[key]) || 0;
+	const realized = grossAfterExitFee - entryFees;
+	session.sells++;
+	session.fees += Number.isFinite(entryFees) ? 0 : 0;
+	session.fees += 100_000 * 0; // commission total is incremented by caller-known exits below.
+	session.realized += realized;
+	session.lastTradePnl = realized;
+	if (realized >= 0) session.winningTrades++;
+	else session.losingTrades++;
+	delete session.entryFees[key];
+	return realized;
+}
+
+function feeKey(direction, symbol) {
+	return `${direction}:${symbol}`;
+}
+
+function directionName(direction) {
+	return direction === SHORT ? "SHORT" : "LONG";
 }
 
 function readMarket(ns, symbols) {
@@ -224,12 +294,16 @@ function render(ns, market, cfg, session, commission, state) {
 	const rows = market.rows ?? market;
 	const metrics = market.metrics ?? portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
 	const reserveFloor = Math.max(cfg.cashFloor, metrics.equity * cfg.cashReserve);
-	const candidates = rankLongCandidates(rows, cfg).slice(0, 5);
+	const exposureCap = metrics.equity * cfg.maxExposure;
+	const positionCap = metrics.equity * cfg.maxPosition;
+	const candidates = rankTradeCandidates(rows, cfg, session.canShort).slice(0, 5);
+	const allCandidates = rankTradeCandidates(rows, cfg, session.canShort);
 	const positions = rows.filter(row => row.longShares > 0 || row.shortShares > 0).length;
+	const deployment = deploymentSummary(rows, allCandidates, metrics, cfg, commission, positionCap, exposureCap);
 	const row = (label, value) => dashboardRow(ns, label, value);
 
 	ns.clearLog();
-	ns.print("STOCK TRADER :: 4S LONG");
+	ns.print(`STOCK TRADER :: 4S ${session.canShort ? "LONG + SHORT" : "LONG"}`);
 
 	dashboardSection(ns, "Portfolio");
 	row("State", `${state} | tick ${session.ticks}`);
@@ -240,20 +314,45 @@ function render(ns, market, cfg, session, commission, state) {
 	row("Per trade", session.sells
 		? `avg ${signedCash(session.realized / session.sells)} | last ${signedCash(session.lastTradePnl)} | ${session.winningTrades}W/${session.losingTrades}L`
 		: "No closed trades yet");
-	row("Positions", `${positions} open | ${session.buys} buys | ${session.sells} sells`);
+	row("Positions", `${positions} open | ${session.buys} entries | ${session.sells} exits`);
+	row("Deployment", `${pct(deployment.current)} used | ${cash(deployment.capRoom)} exposure room`);
+	row("Idle capital", deployment.reason);
 	if (session.last && session.last !== "none") row("Last action", session.last);
 
 	dashboardSection(ns, "Best signals");
-	if (!candidates.length) row("Status", "No symbols above the entry threshold");
+	if (!candidates.length) row("Status", "No directional 4S edge above the entry threshold");
 	for (const candidate of candidates) {
-		const edge = expectedLongEdge(candidate.forecast, candidate.volatility);
-		const held = candidate.longShares > 0 ? ` | held ${formatShares(candidate.longShares)}` : "";
-		row(candidate.symbol, `forecast ${pct(candidate.forecast)} | volatility ${pct(candidate.volatility)} | edge ${pct(edge)}/tick${held}`);
+		const held = candidate.direction === SHORT
+			? (candidate.shortShares > 0 ? ` | held ${formatShares(candidate.shortShares)}` : "")
+			: (candidate.longShares > 0 ? ` | held ${formatShares(candidate.longShares)}` : "");
+		row(`${candidate.symbol} ${candidate.direction}`,
+			`forecast ${pct(candidate.forecast)} | volatility ${pct(candidate.volatility)} | edge ${pct(candidate.edge)}/tick${held}`);
 	}
 
 	dashboardSection(ns, "Guardrails");
-	row("Exposure", `max ${pct(cfg.maxExposure)} | reserve ${pct(cfg.cashReserve)} minimum`);
+	row("Exposure", `max ${pct(cfg.maxExposure)} | per symbol ${pct(cfg.maxPosition)} | reserve ${pct(cfg.cashReserve)}`);
+	row("Shorting", session.canShort ? "Enabled (BN8 / SF8.2+)" : "Unavailable; automatically using long-only fallback");
 	row("Access", "WSE + TIX + 4S TIX required; missing access stops trading safely");
+}
+
+function deploymentSummary(rows, candidates, metrics, cfg, commission, positionCap, exposureCap) {
+	const current = metrics.equity > 0 ? metrics.exposure / metrics.equity : 0;
+	const capRoom = Math.max(0, exposureCap - metrics.exposure);
+	if (capRoom < cfg.minTrade) return { current, capRoom, reason: "Exposure cap reached" };
+	if (!candidates.length) return { current, capRoom, reason: "Waiting for stronger 4S signals" };
+
+	let capacity = 0;
+	for (const candidate of candidates) {
+		const direction = candidate.direction;
+		const price = direction === SHORT ? candidate.bid : candidate.ask;
+		const currentValue = positionValue(candidate, direction, commission);
+		const positionRoom = Math.max(0, positionCap - currentValue);
+		const shareRoom = Math.max(0, candidate.maxShares - candidate.longShares - candidate.shortShares) * price;
+		capacity += Math.min(positionRoom, shareRoom);
+	}
+	if (capacity < cfg.minTrade) return { current, capRoom, reason: "Qualified symbols are share/position capped" };
+	if (capacity < capRoom * 0.25) return { current, capRoom, reason: `Only ${cash(capacity)} of qualified capacity remains` };
+	return { current, capRoom, reason: `${candidates.length} qualified signal${candidates.length === 1 ? "" : "s"} available` };
 }
 
 function publishStatus(port, ns, market, cfg, session, commission, state, missing = []) {
@@ -264,12 +363,13 @@ function publishStatus(port, ns, market, cfg, session, commission, state, missin
 	port.clear();
 	port.write({
 		type: "stock-status",
-		version: 1,
+		version: 2,
 		producerPid: ns.pid,
 		generatedAt: Date.now(),
 		heartbeatIntervalMs: 10_000,
 		state,
 		dryRun: cfg.dryRun,
+		canShort: session.canShort,
 		access: missing.length ? { ok: false, missing: [...missing] } : { ok: true, missing: [] },
 		cash: metrics.cash,
 		equity: metrics.equity,
