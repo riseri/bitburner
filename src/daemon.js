@@ -4635,10 +4635,19 @@ function renderSchedulerDashboard(ns, pool) {
 		renderDashboard(ns, p.name, p.runtime, pool.network, p.cfg, p.stats, p.queue,
 			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
 			p.drain, p.recovery, pool.foreign);
-		if (p.admissionReason || p.stats.allocationFails || p.admissionSkips) dashboardRow(ns, "Batch slots",
-			`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
-		if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
-		if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
+		const slotPressure = p.admissionReason || p.stats.allocationFails || p.admissionSkips;
+		if (p.cfg.dashboardDetails) {
+			if (slotPressure || p.idleRetunes || pool.cfg.maxTargets > 1) dashboardSection(ns, "Scheduler diagnostics");
+			if (slotPressure) dashboardRow(ns, "Batch slots",
+				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+			if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
+			if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
+		} else if (slotPressure || p.idleRetunes) {
+			dashboardSection(ns, "Scheduler attention");
+			if (slotPressure) dashboardRow(ns, "Batch slots",
+				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+			if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
+		}
 		return;
 	}
 	const row = (label, value) => dashboardRow(ns, label, value);
