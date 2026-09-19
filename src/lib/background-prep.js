@@ -220,6 +220,11 @@ function stepPrep(ns, ctx, now) {
 		return;
 	}
 	state.readyAt = 0;
+	if (ctx.allowLaunch === false) {
+		state.status = "WAITING_SCHEDULER";
+		state.reason = "candidate selected; waiting for a safe scheduler window";
+		return;
+	}
 	state.status = "WAITING_RAM";
 	state.reason = "waiting for unreserved capacity";
 	if (!ctx.network.hosts.length) return;
