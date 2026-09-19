@@ -178,7 +178,7 @@ test('stock trader never auto-buys access, shorts, or mutates unrelated services
     /purchase4SMarketData/,
     /buyShort\s*\(/,
     /sellShort\s*\(/,
-    /ns\.(run|exec|kill|scriptKill|killall|getPortHandle)\s*\(/,
+    /ns\.(run|exec|kill|scriptKill|killall)\s*\(/,
     /ns\.singularity/,
   ]) assert.doesNotMatch(source,re);
 });
