@@ -11,6 +11,7 @@ const PROGRESSION = "progression-manager.js";
 const PROGRESSION_PURCHASE = "progression-purchase.js";
 const PROGRESSION_BACKDOOR = "progression-backdoor.js";
 const STOCK_TRADER = "stock-trader.js";
+const GO_BOT = "go-bot.js";
 const CONTRACT_SELFTEST = "contract-selftest.js";
 
 /** @param {NS} ns */
@@ -25,6 +26,7 @@ export async function main(ns) {
 		["progression-cash-reserve", 0.10],
 		["stocks", true],
 		["stock-cash-reserve", 0.20],
+		["go", true],
 		["contract-selftest", false],
 		["interval", 5_000],
 	]);
@@ -43,6 +45,7 @@ export async function main(ns) {
 		progressionCashReserve: clampFraction(flags["progression-cash-reserve"]),
 		stocks: asBoolean(flags.stocks),
 		stockCashReserve: clampFraction(flags["stock-cash-reserve"]),
+		go: asBoolean(flags.go),
 		contractSelftest: asBoolean(flags["contract-selftest"]),
 		interval: Math.max(1_000, Number(flags.interval) || 5_000),
 	};
@@ -51,6 +54,7 @@ export async function main(ns) {
 	if (cfg.contracts) required.push(CONTRACTS);
 	if (cfg.progression) required.push(PROGRESSION);
 	if (cfg.stocks) required.push(STOCK_TRADER);
+	if (cfg.go) required.push(GO_BOT);
 	if (cfg.progression && cfg.progressionActions) {
 		required.push(PROGRESSION_PURCHASE, PROGRESSION_BACKDOOR);
 	}
@@ -76,8 +80,18 @@ export async function main(ns) {
 	while (true) {
 		const stockGate = stockAccess(ns);
 		for (const service of services) {
-			if (service.name === STOCK_TRADER && !stockGate.ok) blockStockService(ns, service, stockGate);
-			else tickService(ns, service);
+			if (service.name === STOCK_TRADER && !stockGate.ok) {
+				blockStockService(ns, service, stockGate);
+				continue;
+			}
+			if (service.name === GO_BOT) {
+				const stopped = goSafetyStop(ns, service);
+				if (stopped) {
+					blockGoService(ns, service, stopped);
+					continue;
+				}
+			}
+			tickService(ns, service);
 		}
 		const snapshot = name => {
 			const service = services.find(item => item.name === name);
@@ -85,9 +99,10 @@ export async function main(ns) {
 		};
 		cfg.fleetStatusPort = services.find(service => service.name === FLEET).port;
 		const fleetStatus = snapshot(FLEET), contractStatus = snapshot(CONTRACTS),
-			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER);
+			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER),
+			goStatus = snapshot(GO_BOT);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
-		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, stockAccess: stockGate });
+		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, stockAccess: stockGate });
 		await ns.sleep(cfg.interval);
 	}
 }
@@ -106,7 +121,7 @@ function createManagedServices(ns, cfg, daemonArgs) {
 		"--cloud-prefix", readArgument(managedDaemonArgs, "--cloud-prefix", "cloud")];
 	const fleetPort = Number(readArgument(existingFleet?.args ?? fleetArgs, "--port", PORTS.FLEET_STATUS));
 	const reserved = [PORTS.WORKER_EVENTS, PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS,
-		PORTS.PROGRESSION_STATUS, PORTS.JIT_CONTROL, PORTS.PROGRESSION_ACTION, PORTS.STOCK_STATUS];
+		PORTS.PROGRESSION_STATUS, PORTS.JIT_CONTROL, PORTS.PROGRESSION_ACTION, PORTS.STOCK_STATUS, PORTS.GO_STATUS];
 	if (!Number.isSafeInteger(fleetPort) || fleetPort <= 0 || reserved.includes(fleetPort)) {
 		throw new Error("Fleet status port must not collide with a reserved automation channel");
 	}
@@ -121,6 +136,9 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	if (cfg.progression) services.push(createService(PROGRESSION, ["--fleet-port", fleetPort], "progression-status", PORTS.PROGRESSION_STATUS));
 	if (cfg.stocks) services.push(createService(STOCK_TRADER,
 		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve], "stock-status", PORTS.STOCK_STATUS));
+	// Go publishes status for the dashboard, but slow opponent API calls are allowed to wait indefinitely.
+	// Process liveness owns restart decisions; the generic heartbeat watchdog does not.
+	if (cfg.go) services.push(createService(GO_BOT, ["--port", PORTS.GO_STATUS], "go-status", PORTS.GO_STATUS, false));
 	return services;
 }
 
@@ -162,6 +180,32 @@ function blockStockService(ns, service, access, now = Date.now()) {
 	return service;
 }
 
+function goSafetyStop(ns, service) {
+	if (!service?.port) return null;
+	const status = ns.getPortHandle(service.port).peek();
+	if (status?.type !== "go-status" || status.terminal !== true || !status.producerPid) return null;
+	const process = findProcess(ns, GO_BOT);
+	const ownerPid = process?.pid || service.pid;
+	return ownerPid && status.producerPid === ownerPid ? status : null;
+}
+
+function blockGoService(ns, service, status) {
+	const process = findProcess(ns, GO_BOT);
+	if (process && process.pid !== status.producerPid) return service;
+	if (process) {
+		service.pid = process.pid;
+		service.args = [...process.args];
+		service.threads = process.threads || 1;
+	}
+	service.state = "BLOCKED";
+	service.nextStartAt = Infinity;
+	service.healthySince = null;
+	service.staleSince = null;
+	service.lastEvent = `Go safety stop: ${status.error || "board ownership requires review"}`;
+	service.lastEventAt = Number(status.generatedAt) || Date.now();
+	return service;
+}
+
 function isRunning(ns, script) {
 	return ns.ps(HOME).some(process => process.filename === script);
 }
@@ -184,20 +228,21 @@ async function runOnce(ns, script) {
 function progressionActorProcess(ns) { return actorProcesses(ns)[0] ?? null; }
 
 function render(ns, state) {
-	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, fleetHealth, contractHealth, progressionHealth } = state;
+	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, fleetHealth, contractHealth, progressionHealth } = state;
 	const daemon = readDaemonDashboard(ns);
 	const fleet = fleetStatus?.type === "fleet-status" ? fleetStatus : null;
 	const contracts = contractStatus?.type === "contract-status" ? contractStatus : null;
 	const progression = progressionStatus?.type === "progression-status" ? progressionStatus : null;
 	const stocks = stockStatus?.type === "stock-status" ? stockStatus : null;
+	const go = goStatus?.type === "go-status" ? goStatus : null;
 
 	ns.clearLog();
 	ns.print("BITBURNER AUTOMATION");
 
 	if (!cfg.dashboardDetails) {
 		renderOverview(ns, daemon, fleet);
-		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, actions: state.actions, services: state.services, stockAccess: state.stockAccess });
-		renderAttention(ns, { daemon, fleet, contracts, progression, services: state.services });
+		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, actions: state.actions, services: state.services, stockAccess: state.stockAccess });
+		renderAttention(ns, { daemon, fleet, contracts, progression, go, services: state.services });
 		ns.print("  Details: restart with --dashboard-details true");
 		return;
 	}
@@ -223,6 +268,7 @@ function render(ns, state) {
 	renderStocks(ns, stocks, cfg, state.stockAccess);
 	renderContracts(ns, contracts, cfg);
 	renderProgression(ns, progression, cfg, state.actions);
+	renderGoStatus(ns, go, cfg, state.services);
 	dashboardSection(ns, "Services");
 	if (state.services) {
 		for (const service of state.services) {
@@ -285,7 +331,7 @@ function renderOverview(ns, daemon, fleet) {
 	}
 }
 
-function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, actions, services, stockAccess }) {
+function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, actions, services, stockAccess }) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Automation");
 
@@ -306,6 +352,12 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, acti
 		row("Progression", `${next} | ${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`);
 	}
 
+	const goService = services?.find(service => service.name === GO_BOT);
+	if (!cfg.go) row("IPvGO", "Disabled");
+	else if (go?.terminal) row("IPvGO", `BLOCKED | ${go.error || "board ownership requires review"}`);
+	else if (!go) row("IPvGO", `${serviceLabel(goService)} | waiting for game status`);
+	else row("IPvGO", `${go.opponent || "unknown"} ${go.size || "?"}x${go.size || "?"} | ${go.state || "RUNNING"} | session ${Number(go.wins) || 0}W/${Number(go.losses) || 0}L | bonus +${Number(go.bonusPercent || 0).toFixed(3)}%`);
+
 	if (actions?.current) row("Active action", `${actions.current.state.toUpperCase()}: ${actions.current.reason}`);
 	if (services?.length) {
 		const summary = services.map(service => {
@@ -316,17 +368,18 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, acti
 	}
 }
 
-function renderAttention(ns, { daemon, fleet, contracts, progression, services }) {
+function renderAttention(ns, { daemon, fleet, contracts, progression, go, services }) {
 	const notices = [];
 	if (daemon?.reason && ["RECOVERING", "DRAINING"].includes(String(daemon.state).toUpperCase())) notices.push(["Money engine", daemon.reason]);
 	if (daemon?.mode === "reconfigure" && daemon.reason) notices.push(["Money engine", daemon.reason]);
 	if (fleet?.cloud?.error) notices.push(["Fleet", fleet.cloud.error]);
 	if (contracts?.error) notices.push(["Contracts", contracts.error]);
 	if (progression?.error) notices.push(["Progression", progression.error]);
+	if (go?.terminal && go.error) notices.push(["IPvGO", go.error]);
 
 	const recentService = services?.filter(service => service.lastEvent)
 		.sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
-	if (recentService && Date.now() - Number(recentService.lastEventAt || 0) < 60_000) {
+	if (recentService && !(recentService.name === GO_BOT && go?.terminal) && Date.now() - Number(recentService.lastEventAt || 0) < 60_000) {
 		notices.push(["Recovery", `${recentService.name}: ${recentService.lastEvent}`]);
 	}
 
@@ -463,6 +516,29 @@ function renderProgression(ns, progression, cfg, actions = null) {
 		const actor = progressionActorProcess(ns);
 		if (actor) row("Action", actor.filename === PROGRESSION_BACKDOOR ? "Installing faction backdoor" : "Buying TOR / port program");
 	}
+}
+
+function renderGoStatus(ns, go, cfg, services) {
+	const row = (label, value) => dashboardRow(ns, label, value);
+	dashboardSection(ns, "IPvGO");
+	if (!cfg.go) { row("Status", "Disabled"); return; }
+	const service = services?.find(item => item.name === GO_BOT);
+	if (!go) {
+		row("Status", `${serviceLabel(service)} | waiting for game status`);
+		return;
+	}
+	if (go.terminal) {
+		row("Status", "BLOCKED");
+		row("Reason", go.error || "Board ownership requires review");
+		return;
+	}
+	row("Game", `${go.opponent || "unknown"} | ${go.size || "?"}x${go.size || "?"} | ${go.state || "RUNNING"}`);
+	row("Session", `${Number(go.games) || 0} games | ${Number(go.wins) || 0} wins | ${Number(go.losses) || 0} losses | ${Number(go.moves) || 0} moves`);
+	if (Number.isFinite(Number(go.blackScore)) && Number.isFinite(Number(go.whiteScore))) {
+		row("Score", `you ${Number(go.blackScore)} | opponent ${Number(go.whiteScore)}`);
+	}
+	row("Bonus", `+${Number(go.bonusPercent || 0).toFixed(3)}% | streak ${Number(go.winStreak) || 0}`);
+	if (go.last) row("Last action", go.last);
 }
 
 function renderHealth(ns, daemon, details = false) {
