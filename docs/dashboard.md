@@ -6,7 +6,7 @@ loop. Live income appears before forecasts or target rankings.
 
 ## Default view
 
-The daemon keeps its parser-compatible operational telemetry for recovery and supervisor reads. The supervisor is the human-facing default: a compact Overview with income, target state, RAM, background prep and fleet capacity, followed by a single Automation summary for stocks, contracts, progression and managed services. An Attention section appears only when something needs intervention. Target rankings and low-level counters remain in the details view.
+The daemon is also summary-first now. Its normal view shows the current target, live state, measured/model income, target health, pipeline size, RAM use, and the background/next target. Low-level recovery counters, timing, thread sizing, fleet internals, and the full auto-target ranking are hidden unless `--dashboard-details true` is enabled. The supervisor remains the broader human-facing overview across hacking, stocks, contracts, progression, IPvGO, and managed services.
 
 Current pipeline misses, drift and recovery are separate from session restart
 counts. Historical event text is labeled as history, not an active alarm. A
@@ -14,11 +14,7 @@ mid-batch target money/security dip is displayed without declaring the pipeline
 broken. Warmup, paused recovery and draining take precedence over historical
 Hack completions. Normal zero counters are not a claim of universal stability.
 
-The target table distinguishes the estimated next-ten-minute average from the
-steady rate. It is a planning snapshot, not a continually recomputed ranking.
-The background candidate's potential/upper bound is labeled separately and is
-not added to current income. Core bonus shows home separately from the
-RAM-weighted fleet estimate so home upgrades are visible.
+The default daemon no longer prints the old four-row `TARGETS / NEXT 10M / PLANNING SNAPSHOT` table. When background preparation is active, that target is shown directly as the actionable next target with ETA, health, potential and held RAM. When background prep is disabled or has no candidate, the daemon shows only the best alternative candidate. The full ranking remains available in details as `AUTO TARGET RANKING / DETAILS`, where the next-ten-minute and steady-state rates are explicitly labeled.
 
 Long reasons and action descriptions wrap instead of running off the right edge.
 Table names are shortened to fit their columns; scheduling still uses full names.
@@ -46,10 +42,11 @@ The daemon can also accept `--dashboard-details true` when run on its own; do no
 start it beside an already-supervised daemon.
 
 Details retain the short income window, completed/paid/recovered batches,
-allocator failures, session misses and recovery, loop lag, required spacing,
-gap/period/lead, thread sizing, operation durations, RAM reservations and cloud
-spending. This is a presentation setting only: no scheduling or recovery policy
-changes with the view.
+allocator failures, current/session misses and recovery, drift and loop lag,
+required spacing, gap/period/lead, thread sizing, operation durations, RAM
+reservations, cloud/fleet internals, background-prep diagnostics, and the full
+auto-target ranking. This is a presentation setting only: no scheduling or
+recovery policy changes with the view.
 
 After merging, sync all of `src`, including `lib/dashboard.js`, before the usual
 one-time supervisor/daemon restart. Dashboard helpers are used by the supervisor,

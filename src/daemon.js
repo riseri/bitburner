@@ -4390,6 +4390,23 @@ function renderTargetAnalysis(ns, target, targetAnalysis, limit = 4) {
 	})), limit);
 }
 
+function nextTargetCandidate(target, targetAnalysis = []) {
+	return targetAnalysis.find(entry => entry.name !== target && Number(entry.score) > 0) ??
+		targetAnalysis.find(entry => entry.name !== target) ?? null;
+}
+
+function renderNextCandidate(ns, target, targetAnalysis) {
+	const entry = nextTargetCandidate(target, targetAnalysis);
+	if (!entry) return;
+	dashboardSection(ns, "Next target");
+	const prep = entry.prepMs === 0 ? "ready" : `prep ${dashboardTime(entry.prepMs)}`;
+	dashboardRow(ns, "Candidate", `${entry.name} | ${cash(entry.score)}/s next 10m | ${cash(entry.steady)}/s steady | ${prep}`);
+}
+
+function hasDashboardCounters(counters = {}) {
+	return ["H", "W1", "G", "W2"].some(phase => (Number(counters[phase]) || 0) > 0);
+}
+
 function nextPendingHackLanding(batches) {
 	let next = Infinity;
 
@@ -4435,6 +4452,8 @@ function renderDashboard(
 	const money = ns.getServerMoneyAvailable(target);
 	const minSec = ns.getServerMinSecurityLevel(target);
 	const sec = ns.getServerSecurityLevel(target);
+	const moneyPct = 100 * money / Math.max(1, maxMoney);
+	const secDelta = Math.max(0, sec - minSec);
 	const totalRam = network.hosts.reduce((sum, host) => sum + host.maxRam, 0);
 	const workerRam = totalRunningRam(running);
 	const prepRam = backgroundPrepRam(cfg.backgroundPrep);
@@ -4450,64 +4469,66 @@ function renderDashboard(
 		: Number.isFinite(pending)
 			? pending > now ? `ETA ${dashboardTime(pending - now)}` : `DUE +${dashboardTime(now - pending)}`
 			: "WAITING";
+	const state = drain ? "DRAINING" : recovery ? "RECOVERING" : "RUNNING";
 	const row = (label, value) => dashboardRow(ns, label, value);
+	const prep = cfg.backgroundPrep;
 
 	ns.clearLog();
 	ns.print(`JIT DAEMON :: ${target} :: hacking ${ns.getHackingLevel()}`);
-	row("Target", cfg.requestedTarget === "auto" ? "AUTO" : "LOCKED");
-	row("State", drain ? "DRAINING" : recovery ? "RECOVERING" : "RUNNING");
+
+	dashboardSection(ns, "Current run");
+	row("Selection", cfg.requestedTarget === "auto" ? "AUTO" : "LOCKED");
+	row("State", state);
 	row("Hack status", hackStatus);
 	if (drain || recovery) row("Reason", (drain || recovery).reason);
-
-	dashboardSection(ns, "Income");
 	row("Income 60s", `${cash(income60)}/s`);
-	row("Model", `${cash(p.expected)}/s (estimate)`);
-	row("Run total", `${cash(stats.money)} earned | ${stats.profitable} paid batches`);
-	row("Batch rate", `${batch60.toFixed(3)}/s actual | ${p.batchRate.toFixed(3)}/s model`);
-
-	dashboardSection(ns, "Target & current pipeline");
-	row("Money", `${bar(money / Math.max(1, maxMoney), 12)} ${cash(money)} / ${cash(maxMoney)}`);
-	row("Security", `${sec.toFixed(3)} / ${minSec.toFixed(3)} (+${Math.max(0, sec - minSec).toFixed(3)})`);
-	row("Pipeline", `${running.size} running | ${queue.length} queued`);
-	row("Pipe misses", dashboardCounters(pipe.misses));
-	row("Pipe drift", `avg ${(pipe.driftCount ? pipe.driftSum / pipe.driftCount : 0).toFixed(2)}ms` +
-		` | max ${pipe.driftMax.toFixed(2)}ms | spacing ${Number.isFinite(pipe.minSpacing) ? `${pipe.minSpacing.toFixed(1)}ms` : "n/a"}`);
-	row("Pipe recovery", `${pipe.softRecoveries} local | ${pipe.recoveries} fallback`);
-	row("Restarts", `${stats.restarts} session | ${stats.resyncs} safety resyncs`);
-
-	dashboardSection(ns, "Fleet");
+	row("Model", `${cash(p.expected)}/s estimate`);
+	row("Money", `${moneyPct.toFixed(1)}% | ${cash(money)} / ${cash(maxMoney)}`);
+	row("Security", `+${secDelta.toFixed(3)} | ${sec.toFixed(3)} / ${minSec.toFixed(3)}`);
+	row("Pipeline", `${running.size} running | ${queue.length} queued | ${batch60.toFixed(3)} batches/s`);
 	row("RAM online", `${formatRam(usedRam)} / ${formatRam(totalRam)} (${(100 * usedRam / Math.max(1, totalRam)).toFixed(1)}%)`);
-	row("Network", `${network.rooted}/${network.servers.length} rooted | ${network.hosts.length} worker hosts`);
-	row("Cloud", `${cloudState.count}/${cloudState.limit} servers | ${formatRam(cloudState.totalRam)}` +
-		`${cloudState.nextAction === "fleet maxed" ? " | MAXED" : ""}`);
-	const home = network.hosts.find(host => host.name === HOME);
-	row("Core bonus", `${home ? `home ${home.cores} (${coreBonus(home.cores).toFixed(3)}x)` : "home n/a"}` +
-		` | fleet ${runtime.averageCoreBonus.toFixed(3)}x RAM-weighted`);
-	if (cloudState.error) row("Cloud error", cloudState.error);
-	else if (cloudState.nextAction && cloudState.nextAction !== "fleet maxed") row("Cloud next", cloudState.nextAction);
 
-	dashboardSection(ns, "Background prep / separate target");
-	const prep = cfg.backgroundPrep;
-	const eta = prep?.active ? ` | ETA ${dashboardTime(Math.max(0, prep.active.finishAt - now))}` : "";
-	row("Background", `${prep?.target || "none"} | ${prep?.status || "DISABLED"}${eta}`);
-	if (prep?.health) row("Prep health", `money ${(100 * prep.health.money / Math.max(1, prep.health.max)).toFixed(1)}%` +
-		` | security +${Math.max(0, prep.health.sec - prep.health.min).toFixed(3)}`);
-	if (prep?.candidate) row("Prep model", `${cash(prep.candidate.potential)}/s ${prep.candidate.upperBound ? "UPPER BOUND" : "potential estimate"}`);
-	if (prep?.target || prepRam) row("Prep RAM", `${formatRam(prepRam)} held | ${prep.preemptions} preemptions | ${prep.failures} failures`);
-	if (prep?.error || prep?.reason) row("Prep note", prep.error || prep.reason);
+	if (prep?.target || prep?.candidate || prep?.status && prep.status !== "DISABLED") {
+		dashboardSection(ns, "Next target");
+		const eta = prep?.active ? ` | ETA ${dashboardTime(Math.max(0, prep.active.finishAt - now))}` : "";
+		row("Background", `${prep?.target || "candidate pending"} | ${prep?.status || "PLANNING"}${eta}`);
+		if (prep?.health) row("Prep health", `money ${(100 * prep.health.money / Math.max(1, prep.health.max)).toFixed(1)}% | security +${Math.max(0, prep.health.sec - prep.health.min).toFixed(3)}`);
+		if (prep?.candidate) row("Potential", `${cash(prep.candidate.potential)}/s ${prep.candidate.upperBound ? "upper bound" : "estimate"}`);
+		if (prepRam > 0) row("Prep RAM", `${formatRam(prepRam)} held`);
+		if (prep?.error) row("Prep note", prep.error);
+		else if (prep?.reason) row("Prep note", prep.reason);
+	} else if (cfg.requestedTarget === "auto") {
+		renderNextCandidate(ns, target, targetAnalysis);
+	}
 
-	if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, cfg.dashboardDetails ? 6 : 4);
-	if (stats.lastReason && stats.lastReason !== "none") {
-		dashboardSection(ns, "Last event / session history");
-		row("Last", stats.lastReason);
+	const pipelineNeedsAttention = hasDashboardCounters(pipe.misses) ||
+		(Number(pipe.softRecoveries) || 0) > 0 || (Number(pipe.recoveries) || 0) > 0 ||
+		(Number(stats.restarts) || 0) > 0 || (Number(stats.resyncs) || 0) > 0 ||
+		Boolean(cloudState.error) || Boolean(prep?.error);
+	if (pipelineNeedsAttention) {
+		dashboardSection(ns, "Attention");
+		if (hasDashboardCounters(pipe.misses)) row("Pipe misses", dashboardCounters(pipe.misses));
+		if ((Number(pipe.softRecoveries) || 0) > 0 || (Number(pipe.recoveries) || 0) > 0) {
+			row("Pipe recovery", `${pipe.softRecoveries} local | ${pipe.recoveries} fallback`);
+		}
+		if ((Number(stats.restarts) || 0) > 0 || (Number(stats.resyncs) || 0) > 0) {
+			row("Restarts", `${stats.restarts} session | ${stats.resyncs} safety resyncs`);
+		}
+		if (cloudState.error) row("Cloud error", cloudState.error);
+		if (prep?.error) row("Prep error", prep.error);
 	}
 
 	if (cfg.dashboardDetails) {
-		dashboardSection(ns, "Details / session totals unless marked current");
+		dashboardSection(ns, "Session diagnostics");
+		row("Run total", `${cash(stats.money)} earned | ${stats.profitable} paid batches`);
+		row("Batch rate", `${batch60.toFixed(3)}/s actual | ${p.batchRate.toFixed(3)}/s model`);
 		row("Income 10s", `${cash(incomeRate(stats, 10_000, now))}/s`);
 		row("Batches", `${stats.scheduled} scheduled | ${stats.completed} completed | ${stats.recovered} recovered`);
-		row("Paid batches", stats.profitable);
 		row("Allocator", `${stats.allocationFails} skipped slots | worst streak ${stats.maxConsecutiveAllocationFails} | expired slots ${stats.expiredSlots}`);
+		row("Pipe misses", dashboardCounters(pipe.misses));
+		row("Pipe drift", `avg ${(pipe.driftCount ? pipe.driftSum / pipe.driftCount : 0).toFixed(2)}ms | max ${pipe.driftMax.toFixed(2)}ms | spacing ${Number.isFinite(pipe.minSpacing) ? `${pipe.minSpacing.toFixed(1)}ms` : "n/a"}`);
+		row("Pipe recovery", `${pipe.softRecoveries} local | ${pipe.recoveries} fallback`);
+		row("Restarts", `${stats.restarts} session | ${stats.resyncs} safety resyncs`);
 		row("Misses", dashboardCounters(stats.misses));
 		row("Exec failures", dashboardCounters(stats.execFails));
 		row("Recovery", `${stats.softRecoveries} local | ${stats.softRecoverySuccesses} restored | H skips ${stats.suppressedHackChunks}`);
@@ -4523,11 +4544,32 @@ function renderDashboard(
 		row("Worker RAM", `${formatRam(workerRam)} JIT | ${formatRam(prepRam)} prep`);
 		row("Capacity", `${formatRam(poolProfile(ns, network.hosts, cfg, running).capacity)} now | ${formatRam(runtime.capacity)} tuned`);
 		row("Reservations", reservations.length);
+
+		dashboardSection(ns, "Fleet diagnostics");
+		row("Network", `${network.rooted}/${network.servers.length} rooted | ${network.hosts.length} worker hosts`);
+		row("Cloud", `${cloudState.count}/${cloudState.limit} servers | ${formatRam(cloudState.totalRam)}${cloudState.nextAction === "fleet maxed" ? " | MAXED" : ""}`);
+		const home = network.hosts.find(host => host.name === HOME);
+		row("Core bonus", `${home ? `home ${home.cores} (${coreBonus(home.cores).toFixed(3)}x)` : "home n/a"} | fleet ${runtime.averageCoreBonus.toFixed(3)}x RAM-weighted`);
 		row("Cloud RAM", `${formatRam(cloudState.minRam)} min | ${formatRam(cloudState.maxRam)} max | ${formatRam(cloudState.ramLimit)} cap`);
 		row("Cloud spend", `${cash(cloudState.spent)} | ${cloudState.purchases} buys | ${cloudState.upgrades} upgrades | ${(cfg.cloud.cashReserve * 100).toFixed(0)}% reserve`);
-		if (prep?.candidate) row("Prep estimate", `${dashboardTime(prep.candidate.prepMs)} initial prep | ${dashboardTime(prep.horizon)} horizon`);
+		if (cloudState.error) row("Cloud error", cloudState.error);
+		else if (cloudState.nextAction && cloudState.nextAction !== "fleet maxed") row("Cloud next", cloudState.nextAction);
+
+		if (prep?.candidate || prep?.target || prepRam > 0) {
+			dashboardSection(ns, "Background prep diagnostics");
+			if (prep?.candidate) row("Prep model", `${cash(prep.candidate.potential)}/s ${prep.candidate.upperBound ? "UPPER BOUND" : "potential estimate"}`);
+			row("Prep RAM", `${formatRam(prepRam)} held | ${prep?.preemptions ?? 0} preemptions | ${prep?.failures ?? 0} failures`);
+			if (prep?.candidate) row("Prep estimate", `${dashboardTime(prep.candidate.prepMs)} initial prep | ${dashboardTime(prep.horizon)} horizon`);
+			if (prep?.error || prep?.reason) row("Prep note", prep.error || prep.reason);
+		}
+
+		if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, 6);
+		if (stats.lastReason && stats.lastReason !== "none") {
+			dashboardSection(ns, "Session history");
+			row("Last", stats.lastReason);
+		}
 	} else {
-		ns.print("  More diagnostics: --dashboard-details true");
+		ns.print("  Details: restart with --dashboard-details true");
 	}
 }
 
@@ -4593,62 +4635,87 @@ function renderSchedulerDashboard(ns, pool) {
 		renderDashboard(ns, p.name, p.runtime, pool.network, p.cfg, p.stats, p.queue,
 			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
 			p.drain, p.recovery, pool.foreign);
-		if (p.admissionReason || p.stats.allocationFails || p.admissionSkips) dashboardRow(ns, "Batch slots",
-			`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
-		if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
-		if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
+		const slotPressure = p.admissionReason || p.stats.allocationFails;
+		if (p.cfg.dashboardDetails) {
+			if (slotPressure || p.idleRetunes || pool.cfg.maxTargets > 1) dashboardSection(ns, "Scheduler diagnostics");
+			if (slotPressure) dashboardRow(ns, "Batch slots",
+				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+			if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
+			if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
+		} else if (slotPressure) {
+			dashboardSection(ns, "Scheduler attention");
+			dashboardRow(ns, "Batch slots",
+				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+		}
 		return;
 	}
 	const row = (label, value) => dashboardRow(ns, label, value);
 	ns.clearLog();
 	ns.print(`JIT DAEMON :: MULTI :: hacking ${ns.getHackingLevel()}`);
+
+	dashboardSection(ns, "Overview");
 	row("Target slots", `${rows.length}/${pool.cfg.maxTargets} | priority ${pool.anchor}`);
-	dashboardSection(ns, "Combined income / measured");
 	row("Income 60s", `${cash(snapshot.income60)}/s`);
-	row("Model", `${cash(snapshot.model)}/s estimate; warmup is not income`);
-	row("Run total", `${cash(snapshot.earned)} earned across all target epochs`);
-	row("Admission", pool.note);
-	dashboardSection(ns, "Background prep / second target");
-	row("Background", `${background?.target || "none"} | ${background?.status || "DISABLED"}` +
-		(background?.active ? ` | ETA ${dashboardTime(backgroundEta)}` : ""));
-	if (background?.health) row("Prep health",
-		`money ${(100 * background.health.money / Math.max(1, background.health.max)).toFixed(1)}%` +
-		` | security +${Math.max(0, background.health.sec - background.health.min).toFixed(3)}`);
-	if (background?.candidate) row("Prep model",
-		`${cash(background.candidate.potential)}/s ${background.candidate.upperBound ? "UPPER BOUND" : "potential estimate"}`);
-	if (backgroundRam > 0) row("Prep RAM", `${formatRam(backgroundRam)} held for second-target prep`);
-	if (background?.reason) row("Prep note", background.reason);
-	dashboardSection(ns, "Independent target pipelines");
+	row("Model", `${cash(snapshot.model)}/s estimate`);
+	row("Run total", `${cash(snapshot.earned)} earned`);
+	row("RAM online", `${formatRam(usedRam)} / ${formatRam(totalRam)} (${(100 * usedRam / Math.max(1, totalRam)).toFixed(1)}%)`);
+
+	if (background?.target || background?.candidate || background?.status && background.status !== "DISABLED") {
+		dashboardSection(ns, "Next target");
+		row("Background", `${background?.target || "candidate pending"} | ${background?.status || "PLANNING"}${background?.active ? ` | ETA ${dashboardTime(backgroundEta)}` : ""}`);
+		if (background?.health) row("Prep health", `money ${(100 * background.health.money / Math.max(1, background.health.max)).toFixed(1)}% | security +${Math.max(0, background.health.sec - background.health.min).toFixed(3)}`);
+		if (background?.candidate) row("Potential", `${cash(background.candidate.potential)}/s ${background.candidate.upperBound ? "upper bound" : "estimate"}`);
+		if (backgroundRam > 0) row("Prep RAM", `${formatRam(backgroundRam)} held`);
+		if (background?.reason) row("Prep note", background.reason);
+	}
+
+	dashboardSection(ns, "Active targets");
 	for (const p of rows) {
-		row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s actual`);
-		row("Plan", `${cash(p.model)}/s estimate | ${p.batchRate.toFixed(3)}/${p.modelBatchRate.toFixed(3)} batches/s actual/model`);
-		if (p.mode === "WARMUP") row("First hack", `ETA ${dashboardTime(p.eta)}`);
-		row("Health", `money ${(100 * p.money / Math.max(1, p.maxMoney)).toFixed(1)}% | security +${(p.security - p.minSecurity).toFixed(3)}`);
-		row("Pipe misses", dashboardCounters(p.misses));
-		row("Pipe recovery", `${p.local} local | ${p.fallback} fallback | ${p.restarts} target rebuilds`);
-		row("Workers", `${p.running} running | ${p.queued} queued | ${formatRam(p.workerRam)}`);
-		if (["DRAINING", "RECOVERING", "RETIRING", "PREPARING", "TUNING", "IDLE"].includes(p.mode)) row("Reason", p.note);
-		if (p.admissionReason || p.allocationFails || p.admissionSkips) row("Batch slots",
-			`${p.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
-		if (p.idleRetunes) row("Idle replans", p.idleRetunes);
-		if (pool.cfg.dashboardDetails) {
+		row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s | money ${(100 * p.money / Math.max(1, p.maxMoney)).toFixed(1)}% | sec +${Math.max(0, p.security - p.minSecurity).toFixed(3)}`);
+	}
+
+	const problemRows = rows.filter(p => !["LIVE", "WARMUP"].includes(p.mode) ||
+		hasDashboardCounters(p.misses) || p.local || p.fallback || p.restarts ||
+		p.admissionReason || p.allocationFails);
+	if (problemRows.length || pool.cloudState.error) {
+		dashboardSection(ns, "Attention");
+		for (const p of problemRows) {
+			if (!["LIVE", "WARMUP"].includes(p.mode) && p.note) row(p.target, `${p.mode}: ${p.note}`);
+			if (hasDashboardCounters(p.misses)) row(`${p.target} misses`, dashboardCounters(p.misses));
+			if (p.local || p.fallback || p.restarts) row(`${p.target} recovery`, `${p.local} local | ${p.fallback} fallback | ${p.restarts} rebuilds`);
+			if (p.admissionReason || p.allocationFails) row(`${p.target} slots`, `${p.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+		}
+		if (pool.cloudState.error) row("Cloud error", pool.cloudState.error);
+	}
+
+	if (pool.cfg.dashboardDetails) {
+		dashboardSection(ns, "Target diagnostics");
+		for (const p of rows) {
+			row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s actual`);
+			row("Plan", `${cash(p.model)}/s estimate | ${p.batchRate.toFixed(3)}/${p.modelBatchRate.toFixed(3)} batches/s actual/model`);
+			if (p.mode === "WARMUP") row("First hack", `ETA ${dashboardTime(p.eta)}`);
+			row("Workers", `${p.running} running | ${p.queued} queued | ${formatRam(p.workerRam)}`);
+			row("Pipe misses", dashboardCounters(p.misses));
+			row("Pipe recovery", `${p.local} local | ${p.fallback} fallback | ${p.restarts} target rebuilds`);
 			row("Timing", `gap ${p.gap}ms | period ${dashboardTime(p.period)} | lead ${p.lead}ms`);
 			row("Drift", `max ${p.drift.toFixed(2)}ms | spacing ${p.spacing === null ? "n/a" : `${p.spacing.toFixed(1)}ms`}`);
-			row("Admission skips", `${p.admissionSkips} load limited | ${p.allocationFails} RAM failures`);
+			row("Admission", `${p.admissionSkips} load limited | ${p.allocationFails} RAM failures | ${p.admissionReason || "accepting"}`);
 			row("Target earned", `${cash(p.earned)} | ${p.paid} paid batches`);
 		}
+
+		dashboardSection(ns, "Fleet diagnostics");
+		row("Network", `${pool.network.rooted}/${pool.network.servers.length} rooted | ${pool.network.hosts.length} worker hosts`);
+		row("Cloud", `${pool.cloudState.count}/${pool.cloudState.limit} servers | ${formatRam(pool.cloudState.totalRam)}`);
+		const homeCores = pool.network.hosts.find(host => host.name === HOME)?.cores || 1;
+		row("Home cores", `${homeCores} (${coreBonus(homeCores).toFixed(3)}x growth/weaken bonus)`);
+		row("Budget", `${pool.cfg.maxBatchRate} batches/s | ${pool.cfg.maxLaunches} planned launches/s | ${pool.cfg.maxWorkers} worker slots`);
+		row("Loop lag", `max ${pool.lagMax.toFixed(1)}ms session`);
+		if (repairRam > 0) row("Repair RAM", `${formatRam(repairRam)} held by target recovery`);
+		if (pool.history.length) row("Last retired", `${pool.history.at(-1).name}: ${pool.history.at(-1).retireReason}`);
+		if (pool.targetAnalysis?.length) renderTargetAnalysis(ns, pool.anchor, pool.targetAnalysis, 6);
+	} else {
+		ns.print("  Details: restart with --dashboard-details true");
 	}
-	dashboardSection(ns, "Shared fleet & workload limits");
-	row("RAM online", `${formatRam(usedRam)} / ${formatRam(totalRam)} (${(100 * usedRam / Math.max(1, totalRam)).toFixed(1)}%)`);
-	row("Network", `${pool.network.rooted}/${pool.network.servers.length} rooted | ${pool.network.hosts.length} worker hosts`);
-	row("Cloud", `${pool.cloudState.count}/${pool.cloudState.limit} servers | ${formatRam(pool.cloudState.totalRam)}`);
-	const homeCores = pool.network.hosts.find(host => host.name === HOME)?.cores || 1;
-	row("Home cores", `${homeCores} (${coreBonus(homeCores).toFixed(3)}x growth/weaken bonus)`);
-	row("Budget", `${pool.cfg.maxBatchRate} batches/s | ${pool.cfg.maxLaunches} planned launches/s | ${pool.cfg.maxWorkers} worker slots`);
-	row("Loop lag", `max ${pool.lagMax.toFixed(1)}ms session`);
-	if (repairRam > 0) row("Repair RAM", `${formatRam(repairRam)} held by target recovery`);
-	if (pool.history.length) row("Last retired", `${pool.history.at(-1).name}: ${pool.history.at(-1).retireReason}`);
-	if (!pool.cfg.dashboardDetails) ns.print("  More diagnostics: --dashboard-details true");
 }
 
 function renderPrep(
@@ -4665,23 +4732,27 @@ function renderPrep(
 	const byPhase = new Map();
 	for (const chunk of chunks) byPhase.set(chunk.phase, (byPhase.get(chunk.phase) ?? 0) + chunk.threads);
 	const row = (label, value) => dashboardRow(ns, label, value);
+
 	ns.clearLog();
 	ns.print(`JIT DAEMON :: PREP :: ${target}`);
-	dashboardSection(ns, "Active target preparation");
+	dashboardSection(ns, "Preparing target");
 	row("Stage", stage);
 	row("Wave", `#${wave} | ETA ${dashboardTime(end ? Math.max(0, end - Date.now()) : 0)}`);
-	row("Income", stage === "READY" ? "Prepared; initial pipeline warmup is next" : "Active target is preparing; no hacking income yet");
-	row("Money", `${bar(money / Math.max(1, maxMoney), 12)} ${cash(money)} / ${cash(maxMoney)}`);
-	row("Security", `${sec.toFixed(3)} / ${minSec.toFixed(3)} (+${Math.max(0, sec - minSec).toFixed(3)})`);
+	row("Money", `${(100 * money / Math.max(1, maxMoney)).toFixed(1)}% | ${cash(money)} / ${cash(maxMoney)}`);
+	row("Security", `+${Math.max(0, sec - minSec).toFixed(3)} | ${sec.toFixed(3)} / ${minSec.toFixed(3)}`);
 	if (byPhase.size) row("Threads", [...byPhase].map(([phase, threads]) => `${phase.replace("PREP-", "")}:${threads}`).join("  "));
 	if (requiredEffective > 0) {
 		row("Grow need", `${Math.ceil(requiredEffective)} eq threads | ${Math.ceil(waveEffective)} this wave`);
 		row("Waves left", `~${wavesLeft} | ~${projectedMultiplier.toFixed(2)}x growth this wave`);
 	}
-	dashboardSection(ns, "Fleet");
-	row("RAM", `${formatRam(usedRam)} / ${formatRam(totalRam)}`);
+	row("RAM online", `${formatRam(usedRam)} / ${formatRam(totalRam)} (${(100 * usedRam / Math.max(1, totalRam)).toFixed(1)}%)`);
 	row("Network", `${network.rooted}/${network.servers.length} rooted | ${network.hosts.length} hosts`);
-	if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, cfg.dashboardDetails ? 6 : 4);
+
+	if (cfg.dashboardDetails && cfg.requestedTarget === "auto") {
+		renderTargetAnalysis(ns, target, targetAnalysis, 6);
+	} else if (!cfg.dashboardDetails) {
+		ns.print("  Details: restart with --dashboard-details true");
+	}
 }
 
 /* =========================================================

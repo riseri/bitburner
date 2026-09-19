@@ -97,6 +97,11 @@ test('stock trader publishes supervisor heartbeat and capital floor',async()=>{
   assert.equal(status.access.ok,true);
   assert.ok(status.reserveFloor>0);
   assert.ok(status.equity>=status.cash);
+  assert.equal(status.realized,0);
+  assert.equal(status.avgTradePnl,0);
+  assert.equal(status.lastTradePnl,0);
+  assert.equal(status.winningTrades,0);
+  assert.equal(status.losingTrades,0);
 });
 
 test('stock trader refuses to start without required market access',async()=>{
@@ -145,6 +150,36 @@ test('stock trader exits weak longs before allocating new capital',async()=>{
   assert.ok(f.stocks.AAA.pos[0]>0);
   assert.ok(f.calls.indexOf('sell:CCC')<f.calls.indexOf('buy:AAA'));
 });
+
+test('stock trader reports actual net realized profit total and per closed trade',async()=>{
+  const startingCash=1e12;
+  const f=fixture({
+    cash:startingCash,
+    flags:{ticks:2,'max-buys-per-tick':1},
+    onUpdate:async({stocks,updates})=>{
+      if(updates===2){
+        stocks.AAA.forecast=0.52;
+        stocks.AAA.bid=120;
+        stocks.BBB.forecast=0.52;
+      }
+    },
+  });
+  await api.main(f.ns);
+  const status=f.status.peek();
+  assert.equal(status.sells,1);
+  assert.equal(status.winningTrades,1);
+  assert.equal(status.losingTrades,0);
+  assert.equal(status.realized,status.lastTradePnl);
+  assert.equal(status.realized,status.avgTradePnl);
+  assert.equal(status.realized,f.cash-startingCash,
+    'realized net should match actual cash profit after both buy and sell commissions');
+  const log=f.logs.join('\n');
+  assert.match(log,/Profit total\s+\+/);
+  assert.match(log,/Per trade\s+avg \+/);
+  assert.match(log,/1W\/0L/);
+  assert.match(log,/SELL AAA .* net \+/);
+});
+
 
 test('stock trader dry-run never mutates cash or positions',async()=>{
   const f=fixture({flags:{'dry-run':true}});

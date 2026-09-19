@@ -173,6 +173,27 @@ test('supervisor wires stock trader to the dedicated status port', () => {
     assert.equal(fleet.args[fleet.args.indexOf('--stock-port')+1],13);
 });
 
+test('supervisor makes realized stock profit and per-trade profit explicit', () => {
+    const api=loadScript('supervisor.js',new Clock()), logs=[];
+    const ns={print:value=>logs.push(String(value))};
+    const stocks={state:'ACTIVE',equity:1.2e12,exposure:4e11,cash:8e11,reserveFloor:2e11,
+        openPnl:12e6,realized:42e6,lastTradePnl:9e6,avgTradePnl:7e6,
+        winningTrades:5,losingTrades:1,buys:8,sells:6,fees:1.4e6,positions:2,last:'SELL AAA'};
+    const cfg={stocks:true,contracts:false,progression:false,go:false,dashboardDetails:true};
+    api.renderAutomationSummary(ns,{cfg,stocks,contracts:null,progression:null,go:null,
+        actions:null,services:[],stockAccess:{ok:true,missing:[]}});
+    let text=logs.join('\n');
+    assert.match(text,/Stocks\s+ACTIVE \| session \+\$42\.00m realized net/);
+    assert.match(text,/avg \+\$7\.00m \/ closed\s+trade/);
+
+    logs.length=0;
+    api.renderStocks(ns,stocks,cfg,{ok:true,missing:[]});
+    text=logs.join('\n');
+    assert.match(text,/Profit total\s+\+\$42\.00m realized net this session/);
+    assert.match(text,/Per trade\s+avg \+\$7\.00m \| last \+\$9\.00m \| 5W\/1L/);
+});
+
+
 test('supervisor manages exactly one Go bot on its informational status port', () => {
     const api=loadScript('supervisor.js',new Clock());
     const services=api.createManagedServices({ps:()=>[]},

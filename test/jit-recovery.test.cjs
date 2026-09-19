@@ -367,30 +367,41 @@ function dashboardFixture() {
     return { clock, api, ns, logs, stats, cfg, network, runtime, running, targets, cloud, batches, supervisor, render, read };
 }
 
-test('dashboard puts actual income before target rankings and bounds the normal view', () => {
+test('daemon default dashboard is summary-first and hides the ranking spreadsheet', () => {
     const f = dashboardFixture(), text = f.render();
-    assert.ok(text.indexOf('Income 60s') < text.indexOf('TARGETS / NEXT 10M'));
-    assert.match(text, /\$587\.74m\/s/);
-    assert.match(text, /2\.267\/s actual \| 2\.268\/s model/);
-    assert.match(text, /232 paid batches/);
-    assert.ok(f.logs.length <= 38, `normal view grew to ${f.logs.length} lines`);
+    assert.match(text, /CURRENT RUN/);
+    assert.match(text, /Income 60s\s+\$587\.74m\/s/);
+    assert.match(text, /Money\s+53\.0% \| \$317\.88m \/ \$600\.00m/);
+    assert.match(text, /Pipeline\s+1 running \| 182 queued \| 2\.267 batches\/s/);
+    assert.match(text, /NEXT TARGET/);
+    assert.match(text, /Background\s+the-hub \| WEAKEN \| ETA 44m 10s/);
+    assert.doesNotMatch(text, /AUTO TARGET RANKING|Run total|Batch rate|Pipe drift|Core bonus/);
+    assert.ok(f.logs.length <= 22, `normal view grew to ${f.logs.length} lines`);
     assert.ok(f.logs.every(line => line.length <= 78));
     assert.doesNotMatch(text, /\bNaN\b|\bInfinity\b|\bundefined\b/);
-    assert.doesNotMatch(text, /DETAILS \/ SESSION/);
 });
 
-test('dashboard retains current and session scopes without duplicating lifetime diagnostics by default', () => {
+test('daemon details restores session telemetry and the full auto-target ranking', () => {
     const f = dashboardFixture();
     f.stats.misses.G = 999; f.stats.driftMax = 60.82; f.stats.restarts = 2;
     const compact = f.render();
-    assert.doesNotMatch(compact, /G:999/);
-    assert.match(compact, /Pipe misses\s+H:0 W1:0 G:0 W2:0/);
-    assert.match(compact, /Restarts\s+2 session/);
+    assert.doesNotMatch(compact, /G:999|Pipe drift|AUTO TARGET RANKING/);
     const detailed = f.render({ cfg: { dashboardDetails: true } });
+    assert.match(detailed, /SESSION DIAGNOSTICS/);
     assert.match(detailed, /G:999/);
     assert.match(detailed, /max 60\.82ms/);
+    assert.match(detailed, /2\.267\/s actual \| 2\.268\/s model/);
+    assert.match(detailed, /232 paid batches/);
     assert.match(detailed, /gap 100ms \| period 441ms \| lead 600ms/);
     assert.match(detailed, /required 20ms/);
+    assert.match(detailed, /AUTO TARGET RANKING \/ DETAILS/);
+    assert.match(detailed, /home 8 \(1\.438x\) \| fleet 1\.000x RAM-weighted/);
+    const status = f.read();
+    assert.equal(status.targets.length, 5);
+    assert.equal(status.targets[0].name, 'phantasy');
+    assert.equal(status.targets[0].selected, true);
+    assert.equal(status.targets[0].effective, '$504.03m/s');
+    assert.equal(status.targets[1].prep, '2m 54s');
     assert.ok(f.logs.every(line => line.length <= 78));
 });
 
@@ -407,78 +418,91 @@ test('dashboard recovery overrides historical LIVE and preserves a wrapped fault
     assert.match(f.read().hackStatus, /^DRAINING/);
 });
 
-test('dashboard warmup does not claim LIVE or stable timing before any completion', () => {
+test('dashboard warmup stays human-readable and moves timing jargon to details', () => {
     const f = dashboardFixture();
     f.stats.lastHackAt = NaN; f.stats.pipeline.minSpacing = Infinity;
     f.stats.pipeline.driftCount = 0; f.stats.pipeline.driftSum = 0; f.stats.pipeline.driftMax = 0;
     f.batches.set('1', { phases: { H: { complete: false, skipped: false } }, landing: { H: f.clock.now + 78_000 } });
-    const text = f.render();
-    assert.match(text, /Hack status\s+ETA 1m 18s/);
-    assert.match(text, /spacing n\/a/);
-    assert.doesNotMatch(text, /\bLIVE\b|\bHealthy\b|\bInfinity\b|\bNaN\b/);
+    const compact = f.render();
+    assert.match(compact, /Hack status\s+ETA 1m 18s/);
+    assert.doesNotMatch(compact, /Pipe drift|spacing n\/a|\bLIVE\b|\bInfinity\b|\bNaN\b/);
+    const detailed = f.render({ cfg: { dashboardDetails: true } });
+    assert.match(detailed, /spacing n\/a/);
 });
 
-test('dashboard isolates background target health, estimates and RAM from active fields', () => {
+test('background prep becomes the actionable next-target view instead of a ranking table', () => {
     const f = dashboardFixture(), text = f.render(), status = f.read();
     assert.equal(status.target, 'phantasy');
+    assert.equal(status.targetMode, 'AUTO');
     assert.equal(status.state, 'RUNNING');
     assert.equal(status.background, 'the-hub | WEAKEN | ETA 44m 10s');
     assert.match(status.prepHealth, /security \+88\.000/);
-    assert.match(status.prepModel, /UPPER BOUND/);
-    assert.match(status.security, /^7\.278 \/ 7\.000/);
+    assert.match(status.security, /^\+0\.278 \| 7\.278 \/ 7\.000/);
     assert.match(status.ramOnline, /^207\.84 TB \/ 25\.03 PB/);
-    assert.match(text, /home 8 \(1\.438x\) \| fleet 1\.000x RAM-weighted/);
+    assert.match(text, /Potential\s+\$3\.12b\/s upper bound/);
+    assert.doesNotMatch(text, /AUTO TARGET RANKING/);
+
     f.cfg.backgroundPrep = { enabled: false, status: 'DISABLED', reason: 'disabled' };
-    assert.match(f.render(), /Background\s+none \| DISABLED/);
+    const noPrep = f.render();
+    assert.match(noPrep, /NEXT TARGET/);
+    assert.match(noPrep, /Candidate\s+max-hardware \| \$157\.10m\/s next 10m/);
+    assert.doesNotMatch(noPrep, /Background\s+none \| DISABLED/);
 });
 
-test('dashboard supervisor parses old and new target tables without changing rate units', () => {
-    const f = dashboardFixture(); f.render();
+test('supervisor target parsing remains available when detailed ranking is requested', () => {
+    const f = dashboardFixture();
+    f.render({ cfg: { dashboardDetails: true } });
     const compact = f.read();
-    assert.equal(compact.income60, '$587.74m/s');
-    assert.equal(compact.targets.length, 4);
-    assert.equal(compact.targets[0].name, 'phantasy');
-    assert.equal(compact.targets[0].selected, true);
-    assert.equal(compact.targets[0].effective, '$504.03m/s');
-    assert.equal(compact.targets[1].prep, '2m 54s');
+    assert.equal(compact.targets.length, 5);
+    assert.equal(compact.targets[0].steady, '$580.34m/s');
     const legacy = f.supervisor.parseTargets(['> phantasy $504.03m/s steady:  $580.34m/s S:49.7% P:441ms prep:0ms']);
     assert.equal(legacy[0].name, 'phantasy'); assert.equal(legacy[0].steady, '$580.34m/s');
     assert.equal(legacy[0].prep, '0ms');
 });
 
-test('dashboard prep screen stays compact and preserves the full target name for the supervisor', () => {
+test('prep dashboard focuses on preparation and keeps ranking in details only', () => {
     const f = dashboardFixture();
     f.api.renderPrep(f.ns, 'the-hub', f.network, f.cfg, 1, 'WEAKEN',
         [{phase:'PREP-W', threads:14}], f.clock.now + 264_000, 0, 0, 0, 1, f.targets);
-    const status = f.read();
+    let text = f.logs.join('\n');
+    let status = f.read();
     assert.equal(status.mode, 'prep'); assert.equal(status.target, 'the-hub');
     assert.equal(status.stage, 'WEAKEN'); assert.match(status.wave, /4m 24s/);
-    assert.ok(f.logs.length <= 20);
+    assert.match(text, /PREPARING TARGET/);
+    assert.doesNotMatch(text, /AUTO TARGET RANKING/);
+    assert.ok(f.logs.length <= 14);
+
+    f.api.renderPrep(f.ns, 'the-hub', f.network, {...f.cfg, dashboardDetails:true}, 1, 'WEAKEN',
+        [{phase:'PREP-W', threads:14}], f.clock.now + 264_000, 0, 0, 0, 1, f.targets);
+    text = f.logs.join('\n');
+    assert.match(text, /AUTO TARGET RANKING \/ DETAILS/);
     assert.ok(f.logs.every(line => line.length <= 78));
 });
 
-test('dashboard helper wraps errors and caps table cells without invalid duration strings', () => {
+test('dashboard helper wraps errors and keeps the detailed ranking bounded', () => {
     const f = dashboardFixture(), ui = loadScript('lib/dashboard.js', f.clock);
     f.logs.length = 0; ui.dashboardRow(f.ns, 'Reason', 'X'.repeat(250));
     assert.ok(f.logs.every(line => line.length <= 78));
     assert.equal(f.logs.join('').replace(/Reason| /g, ''), 'X'.repeat(250));
     f.logs.length = 0;
     ui.dashboardTargets(f.ns, [{name:'a'.repeat(100), effective:'$504.03m/s', steady:'$580.34m/s', prep:'ready'}]);
+    assert.match(f.logs[0], /AUTO TARGET RANKING \/ DETAILS/);
     assert.ok(f.logs.every(line => line.length <= 78));
     assert.equal(ui.dashboardTime(Infinity), 'n/a');
     assert.equal(ui.dashboardTime(NaN), 'n/a');
     assert.equal(ui.dashboardTime(3_900_000), '1h 05m');
 });
 
-test('dashboard rendering is read-only and supervisor overview consumes the new schema', () => {
+test('dashboard rendering is read-only and supervisor overview consumes the compact schema', () => {
     const f = dashboardFixture();
     const before = JSON.stringify({stats:f.stats, cfg:f.cfg, runtime:f.runtime, network:f.network});
-    f.render({cfg:{dashboardDetails:true}});
+    f.render();
     assert.equal(JSON.stringify({stats:f.stats, cfg:f.cfg, runtime:f.runtime, network:f.network}), before);
     const daemonLogs = [...f.logs];
     f.supervisor.render({...f.ns, ps:()=>[{filename:'daemon.js',pid:1}], getScriptLogs:()=>daemonLogs}, {
-        cfg:{contracts:false, progression:false, dashboardDetails:false},
+        cfg:{contracts:false, progression:false, stocks:false, go:false, dashboardDetails:false},
         fleetStatus:{type:'fleet-status', network:f.network, cloud:f.cloud},
+        services:[], actions:null, stockAccess:{ok:false,missing:[]},
         fleetHealth:{healthy:true}, contractHealth:{healthy:true}, progressionHealth:{healthy:true},
     });
     assert.match(f.logs.join('\n'), /Income 60s\s+\$587\.74m\/s/);

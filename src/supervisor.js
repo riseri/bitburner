@@ -338,7 +338,7 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, 
 	if (!cfg.stocks) row("Stocks", "Disabled");
 	else if (!stockAccess?.ok) row("Stocks", `Locked: missing ${stockAccess?.missing?.join(", ") || "market access"}`);
 	else if (!stocks) row("Stocks", "Starting / waiting for market snapshot");
-	else row("Stocks", `${stocks.state || "running"} | ${cash(stocks.equity)} equity | ${cashSigned(stocks.openPnl)} open P/L`);
+	else row("Stocks", `${stocks.state || "running"} | session ${cashSigned(stocks.realized)} realized net | ${Number(stocks.sells) > 0 ? `avg ${cashSigned(stocks.avgTradePnl)} / closed trade` : "no closed trades yet"}`);
 
 	if (!cfg.contracts) row("Contracts", "Disabled");
 	else if (!contracts) row("Contracts", "Starting / waiting for scan");
@@ -466,7 +466,11 @@ function renderStocks(ns, stocks, cfg, access) {
 	row("State", stocks.state || "unknown");
 	row("Portfolio", `${cash(stocks.equity)} equity | ${cash(stocks.exposure)} invested`);
 	row("Cash", `${cash(stocks.cash)} | shared floor ${cash(stocks.reserveFloor)}`);
-	row("P/L", `${cashSigned(stocks.openPnl)} open | ${cashSigned(stocks.realized)} realized`);
+	row("Open P/L", `${cashSigned(stocks.openPnl)} unrealized`);
+	row("Profit total", `${cashSigned(stocks.realized)} realized net this session | ${Number(stocks.sells) || 0} closed trades`);
+	row("Per trade", Number(stocks.sells) > 0
+		? `avg ${cashSigned(stocks.avgTradePnl)} | last ${cashSigned(stocks.lastTradePnl)} | ${Number(stocks.winningTrades) || 0}W/${Number(stocks.losingTrades) || 0}L`
+		: "No closed trades yet");
 	if (stocks.last) row("Last", stocks.last);
 	if (cfg.dashboardDetails) {
 		row("Trades", `${Number(stocks.buys) || 0} buys | ${Number(stocks.sells) || 0} sells | fees ${cash(stocks.fees)}`);
@@ -600,7 +604,7 @@ function readDaemonDashboard(ns) {
 		mode: "running",
 		target: headerMatch?.[1] ?? "unknown",
 		hackingLevel: headerMatch?.[2] ?? "",
-		targetMode: field(logs, "Target"),
+		targetMode: field(logs, "Selection") || field(logs, "Target"),
 		state: field(logs, "State"),
 		money: field(logs, "Money"),
 		security: field(logs, "Security"),
