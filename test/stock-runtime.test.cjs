@@ -286,6 +286,9 @@ test('stock trader reports net realized profit for closed short trades',async()=
     canShort:true,
     flags:{ticks:2,'max-buys-per-tick':1},
     stocks:{
+      AAA:{forecast:0.50,volatility:0.01,ask:100,bid:99,maxShares:5e9,pos:[0,0,0,0]},
+      BBB:{forecast:0.50,volatility:0.01,ask:200,bid:199,maxShares:5e9,pos:[0,0,0,0]},
+      CCC:{forecast:0.50,volatility:0.01,ask:50,bid:49,maxShares:5e9,pos:[0,0,0,0]},
       BEAR:{forecast:0.30,volatility:0.04,ask:101,bid:100,maxShares:5e9,pos:[0,0,0,0]},
     },
     onUpdate:async({stocks,updates})=>{
