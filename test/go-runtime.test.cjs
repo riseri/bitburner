@@ -5,7 +5,7 @@ const api=loadGo();
 const empty=n=>Array(n).fill('.'.repeat(n));
 
 function fixture(flags={}) {
-    const files=new Map(),logs=[],terminal=[],calls=[],random=seedRandom(20);
+    const files=new Map(),logs=[],terminal=[],calls=[],random=seedRandom(20);\n    const status={value:null,clear(){this.value=null;},write(value){this.value=value;},peek(){return this.value;}};
     const world={board:empty(5),opponent:'Netburners',history:[],currentPlayer:'Black',previousMove:null,
         passes:0,blackTurns:0,wins:0,losses:0,reset:{currentNode:1,lastNodeReset:100,lastAugReset:200}};
     let writes=0,sleeps=0;
@@ -39,7 +39,7 @@ function fixture(flags={}) {
     }
     const ns={pid:42,getHostname:()=> 'home',getScriptName:()=> 'go-bot.js',
         flags:pairs=>({...Object.fromEntries(pairs),games:1,...flags}),disableLog(){},
-        ps:()=>[{pid:42,filename:'go-bot.js'},{pid:9,filename:'daemon.js'}],
+        ps:()=>[{pid:42,filename:'go-bot.js'},{pid:9,filename:'daemon.js'}],\n        getPortHandle:port=>{assert.equal(port,12);return status;},
         read:p=>files.get(p)||'',write:async(p,text)=>{files.set(p,text);writes++;if(f.onWrite)await f.onWrite(writes);},
         sleep:async ms=>{if(++sleeps>10000)throw new Error('test runaway');if(f.onSleep)await f.onSleep(ms,sleeps);},
         clearLog:()=>{logs.length=0;},print:s=>logs.push(s),tprint:s=>terminal.push(s),
@@ -54,7 +54,7 @@ function fixture(flags={}) {
             analysis:{getValidMoves:()=>mask(world.board,'X',world.history),getStats:()=>({[world.opponent]:{
                 wins:world.wins,losses:world.losses,winStreak:world.wins-world.losses,
                 bonusPercent:1.234,bonusDescription:'faction and company reputation',rep:0}})}}};
-    const f={ns,world,files,logs,terminal,calls,play,white,onWrite:null,onSleep:null,onAction:null};
+    const f={ns,world,files,logs,terminal,calls,status,play,white,onWrite:null,onSleep:null,onAction:null};
     return f;
 }
 
@@ -65,7 +65,7 @@ test('IPvGO default run completes a Daedalus game and leaves the final board int
     assert.match(f.logs.join('\n'),/GAME COMPLETE/);assert.match(f.logs.join('\n'),/1 games/);
     assert.match(f.logs.join('\n'),/Actual bonus\s+\+1.234%/);
     assert.match(f.logs.join('\n'),/Not joined/);
-    assert.equal(JSON.parse(f.files.get('go-bot-state.txt')).phase,'complete');
+    assert.equal(JSON.parse(f.files.get('go-bot-state.txt')).phase,'complete');\n    assert.equal(f.status.value.type,'go-status');assert.equal(f.status.value.state,'GAME COMPLETE');\n    assert.equal(f.status.value.producerPid,42);
 });
 test('IPvGO defaults to fast pacing with RNG sniping disabled',async()=>{
     const f=fixture();const observed=[];
@@ -179,7 +179,7 @@ test('IPvGO verifies full history, not only the visible board',()=>{
 test('IPvGO runtime contains no scheduler, cheat, reset-stats, or testing-board mutations',()=>{
     const fs=require('node:fs'),path=require('node:path');
     const sources=['go-bot.js','lib/go-session.js','lib/go-strategy.js'].map(p=>fs.readFileSync(path.join(__dirname,'../src',p),'utf8')).join('\n');
-    for(const re of [/ns\.singularity/,/ns\.go\.cheat/,/ns\.(kill|scriptKill|killall|exec|run|getPortHandle)\s*\(/,/setTestingBoardState\s*\(/,/resetStats\s*\(/,/\b(document|window)\b/])assert.doesNotMatch(sources,re);
+    for(const re of [/ns\.singularity/,/ns\.go\.cheat/,/ns\.(kill|scriptKill|killall|exec|run)\s*\(/,/setTestingBoardState\s*\(/,/resetStats\s*\(/,/\b(document|window)\b/])assert.doesNotMatch(sources,re);
 });
 
 test('IPvGO manual changes during pending-write persistence prevent the next move',async()=>{
