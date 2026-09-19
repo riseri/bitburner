@@ -338,7 +338,7 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, 
 	if (!cfg.stocks) row("Stocks", "Disabled");
 	else if (!stockAccess?.ok) row("Stocks", `Locked: missing ${stockAccess?.missing?.join(", ") || "market access"}`);
 	else if (!stocks) row("Stocks", "Starting / waiting for market snapshot");
-	else row("Stocks", `${stocks.state || "running"} | session ${cashSigned(stocks.realized)} realized net | avg ${cashSigned(stocks.avgTradePnl)} / closed trade`);
+	else row("Stocks", `${stocks.state || "running"} | session ${cashSigned(stocks.realized)} realized net | ${Number(stocks.sells) > 0 ? `avg ${cashSigned(stocks.avgTradePnl)} / closed trade` : "no closed trades yet"}`);
 
 	if (!cfg.contracts) row("Contracts", "Disabled");
 	else if (!contracts) row("Contracts", "Starting / waiting for scan");
