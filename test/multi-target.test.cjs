@@ -228,3 +228,18 @@ test('steady promotion selects only the weaker stable lane and pauses for trial 
     f.a.recovery = null; f.b.drain = { reason: 'target drain' };
     assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), null);
 });
+
+
+test('an inferior tuned trial is retired before it can become a LIVE second lane', () => {
+    const f = fixture();
+    f.b.mode = 'TUNING';
+    f.b.trial = true;
+    f.b.minimumExpected = 1000;
+    f.b.tuner = { next: () => ({ done: true, value: { plan: { expected: 500 } } }) };
+    f.multi.servicePipelineTuning(f.ns, f.pool, f.b);
+    assert.equal(f.b.retiring, true);
+    assert.equal(f.b.mode, 'DRAINING');
+    assert.match(f.b.retireReason, /below admission floor/);
+    assert.equal(f.a.mode, 'RUNNING');
+    assert.equal(f.a.drain, null);
+});
