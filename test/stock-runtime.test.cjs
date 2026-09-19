@@ -9,7 +9,7 @@ function load(){
   let all='';
   for(const item of files){
     all+=fs.readFileSync(path.join(__dirname,'../src',item),'utf8')
-      .replace(/^import .*;\s*$/gm,'')
+      .replace(/^import(?:.|\n)*?;\s*$/gm,'')
       .replace(/\bexport (?=(?:async )?function|const )/g,'')+'\n';
   }
   const names=[...all.matchAll(/^(?:async )?function (\w+)\s*\(/gm)].map(m=>m[1]);
@@ -44,6 +44,7 @@ function fixture(overrides={}){
     print:s=>logs.push(s),
     clearLog:()=>{logs.length=0;},
     getServerMoneyAvailable:()=>cash,
+    getResetInfo:()=>({currentNode:overrides.currentNode??1,ownedSF:overrides.canShort?{8:2}:{}}),
     getPortHandle:()=>status,
     stock:{
       hasWseAccount:()=>access.wse,
@@ -81,6 +82,26 @@ function fixture(overrides={}){
         stock.pos[0]-=shares;
         if(!stock.pos[0])stock.pos[1]=0;
         return stock.bid;
+      },
+      buyShort:(s,shares)=>{
+        calls.push('short:'+s);
+        shares=Math.round(shares);
+        const stock=stocks[s],cost=shares*stock.bid+commission;
+        if(!overrides.canShort||shares<=0||cash<cost||shares+stock.pos[0]+stock.pos[2]>stock.maxShares)return 0;
+        const prior=stock.pos[2]*stock.pos[3];
+        cash-=cost;
+        stock.pos[2]+=shares;
+        stock.pos[3]=(prior+shares*stock.bid)/stock.pos[2];
+        return stock.bid;
+      },
+      sellShort:(s,shares)=>{
+        calls.push('cover:'+s);
+        const stock=stocks[s];shares=Math.min(Math.round(shares),stock.pos[2]);
+        if(!overrides.canShort||shares<=0)return 0;
+        cash+=shares*(2*stock.pos[3]-stock.ask)-commission;
+        stock.pos[2]-=shares;
+        if(!stock.pos[2])stock.pos[3]=0;
+        return stock.ask;
       },
     },
   };
@@ -177,7 +198,7 @@ test('stock trader reports actual net realized profit total and per closed trade
   assert.match(log,/Profit total\s+\+/);
   assert.match(log,/Per trade\s+avg \+/);
   assert.match(log,/1W\/0L/);
-  assert.match(log,/SELL AAA .* net \+/);
+  assert.match(log,/SELL LONG AAA .* net \+/);
 });
 
 
@@ -205,15 +226,83 @@ test('stock trader duplicate and remote instances do not touch the market',async
   }
 });
 
-test('stock trader never auto-buys access, shorts, or mutates unrelated services',()=>{
+test('stock trader never auto-buys access or mutates unrelated services',()=>{
   const source=fs.readFileSync(path.join(__dirname,'../src/stock-trader.js'),'utf8');
   for(const re of [
     /purchaseWseAccount\s*\(/,
     /purchaseTixApi\s*\(/,
     /purchase4SMarketData/,
-    /buyShort\s*\(/,
-    /sellShort\s*\(/,
     /ns\.(run|exec|kill|scriptKill|killall)\s*\(/,
     /ns\.singularity/,
   ]) assert.doesNotMatch(source,re);
+});
+
+
+test('stock trader opens the strongest short when shorting is unlocked',async()=>{
+  const f=fixture({
+    canShort:true,
+    stocks:{
+      AAA:{forecast:0.56,volatility:0.01,ask:100,bid:99,maxShares:5e9,pos:[0,0,0,0]},
+      BEAR:{forecast:0.30,volatility:0.04,ask:101,bid:100,maxShares:5e9,pos:[0,0,0,0]},
+    },
+  });
+  await api.main(f.ns);
+  assert.ok(f.stocks.BEAR.pos[2]>0,'BEAR should be shorted');
+  assert.ok(f.calls.includes('short:BEAR'));
+  assert.equal(f.status.peek().canShort,true);
+});
+
+test('stock trader ignores bearish entries when shorting is unavailable',async()=>{
+  const f=fixture({
+    stocks:{
+      AAA:{forecast:0.54,volatility:0.01,ask:100,bid:99,maxShares:5e9,pos:[0,0,0,0]},
+      BEAR:{forecast:0.30,volatility:0.04,ask:101,bid:100,maxShares:5e9,pos:[0,0,0,0]},
+    },
+  });
+  await api.main(f.ns);
+  assert.equal(f.stocks.BEAR.pos[2],0);
+  assert.ok(!f.calls.some(c=>c.startsWith('short:')));
+  assert.equal(f.status.peek().canShort,false);
+});
+
+test('stock trader covers weak shorts before rotating capital',async()=>{
+  const f=fixture({
+    canShort:true,
+    stocks:{
+      BEAR:{forecast:0.60,volatility:0.03,ask:90,bid:89,maxShares:5e9,pos:[0,0,1e6,100]},
+      AAA:{forecast:0.70,volatility:0.04,ask:100,bid:99,maxShares:5e9,pos:[0,0,0,0]},
+    },
+  });
+  await api.main(f.ns);
+  assert.equal(f.stocks.BEAR.pos[2],0);
+  assert.ok(f.calls.includes('cover:BEAR'));
+  assert.ok(f.calls.indexOf('cover:BEAR')<f.calls.indexOf('buy:AAA'));
+});
+
+test('stock trader reports net realized profit for closed short trades',async()=>{
+  const startingCash=1e12;
+  const f=fixture({
+    cash:startingCash,
+    canShort:true,
+    flags:{ticks:2,'max-buys-per-tick':1},
+    stocks:{
+      AAA:{forecast:0.50,volatility:0.01,ask:100,bid:99,maxShares:5e9,pos:[0,0,0,0]},
+      BBB:{forecast:0.50,volatility:0.01,ask:200,bid:199,maxShares:5e9,pos:[0,0,0,0]},
+      CCC:{forecast:0.50,volatility:0.01,ask:50,bid:49,maxShares:5e9,pos:[0,0,0,0]},
+      BEAR:{forecast:0.30,volatility:0.04,ask:101,bid:100,maxShares:5e9,pos:[0,0,0,0]},
+    },
+    onUpdate:async({stocks,updates})=>{
+      if(updates===2){
+        stocks.BEAR.forecast=0.50;
+        stocks.BEAR.ask=80;
+        stocks.BEAR.bid=79;
+      }
+    },
+  });
+  await api.main(f.ns);
+  const status=f.status.peek();
+  assert.equal(status.sells,1);
+  assert.equal(status.winningTrades,1);
+  assert.equal(status.realized,status.lastTradePnl);
+  assert.equal(status.realized,f.cash-startingCash);
 });

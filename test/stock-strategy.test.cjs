@@ -19,8 +19,8 @@ test('stock strategy normalizes safe defaults',()=>{
   assert.equal(cfg.cashReserve,0.20);
   assert.equal(cfg.maxExposure,0.80);
   assert.equal(cfg.maxPosition,0.25);
-  assert.equal(cfg.entryForecast,0.60);
-  assert.equal(cfg.exitForecast,0.55);
+  assert.equal(cfg.entryForecast,0.55);
+  assert.equal(cfg.exitForecast,0.52);
   assert.equal(cfg.dryRun,false);
 });
 
@@ -30,7 +30,7 @@ test('stock strategy ranks stronger 4S long edges first',()=>{
     {symbol:'AAA',forecast:0.61,volatility:0.02,shortShares:0,longShares:0,maxShares:1e6},
     {symbol:'BBB',forecast:0.64,volatility:0.01,shortShares:0,longShares:0,maxShares:1e6},
     {symbol:'CCC',forecast:0.70,volatility:0.03,shortShares:1,longShares:0,maxShares:1e6},
-    {symbol:'DDD',forecast:0.59,volatility:0.05,shortShares:0,longShares:0,maxShares:1e6},
+    {symbol:'DDD',forecast:0.54,volatility:0.05,shortShares:0,longShares:0,maxShares:1e6},
   ];
   const ranked=api.rankLongCandidates(rows,cfg);
   assert.deepEqual(Array.from(ranked,r=>r.symbol),['AAA','BBB']);
@@ -39,8 +39,8 @@ test('stock strategy ranks stronger 4S long edges first',()=>{
 
 test('stock strategy uses hysteresis for exits',()=>{
   const cfg=api.normalizeStockConfig({});
-  assert.equal(api.shouldExitLong({longShares:100,forecast:0.549},cfg),true);
-  assert.equal(api.shouldExitLong({longShares:100,forecast:0.551},cfg),false);
+  assert.equal(api.shouldExitLong({longShares:100,forecast:0.519},cfg),true);
+  assert.equal(api.shouldExitLong({longShares:100,forecast:0.521},cfg),false);
   assert.equal(api.shouldExitLong({longShares:0,forecast:0.1},cfg),false);
 });
 
@@ -82,4 +82,55 @@ test('stock config rejects dangerous or contradictory limits',()=>{
     {'min-hold-ticks':0},
     {'max-buys-per-tick':0},
   ]) assert.throws(()=>api.normalizeStockConfig(flags));
+});
+
+
+test('stock strategy ranks long and short opportunities by directional edge',()=>{
+  const cfg=api.normalizeStockConfig({});
+  const rows=[
+    {symbol:'LONG',forecast:0.60,volatility:0.02,shortShares:0,longShares:0,maxShares:1e6},
+    {symbol:'SHORT',forecast:0.38,volatility:0.03,shortShares:0,longShares:0,maxShares:1e6},
+    {symbol:'NEUTRAL',forecast:0.50,volatility:0.10,shortShares:0,longShares:0,maxShares:1e6},
+  ];
+  const ranked=api.rankTradeCandidates(rows,cfg,true);
+  assert.deepEqual(Array.from(ranked,r=>r.symbol),['SHORT','LONG']);
+  assert.deepEqual(Array.from(ranked,r=>r.direction),['S','L']);
+  assert.ok(ranked[0].edge>ranked[1].edge);
+});
+
+test('stock strategy falls back to long-only when shorting is unavailable',()=>{
+  const cfg=api.normalizeStockConfig({});
+  const rows=[
+    {symbol:'LONG',forecast:0.60,volatility:0.02,shortShares:0,longShares:0,maxShares:1e6},
+    {symbol:'SHORT',forecast:0.38,volatility:0.03,shortShares:0,longShares:0,maxShares:1e6},
+  ];
+  const ranked=api.rankTradeCandidates(rows,cfg,false);
+  assert.deepEqual(Array.from(ranked,r=>r.symbol),['LONG']);
+});
+
+test('stock strategy uses symmetric hysteresis for short exits',()=>{
+  const cfg=api.normalizeStockConfig({});
+  assert.equal(api.shouldExitShort({shortShares:100,forecast:0.481},cfg),true);
+  assert.equal(api.shouldExitShort({shortShares:100,forecast:0.479},cfg),false);
+  assert.equal(api.shouldExitShort({shortShares:0,forecast:0.9},cfg),false);
+});
+
+test('stock strategy sizes shorts from bid price and respects shared share cap',()=>{
+  const row={ask:101,bid:100,longShares:100,shortShares:50,maxShares:1000};
+  assert.equal(api.sharesForBudget(row,50100,100,'S'),500);
+  assert.equal(api.sharesForBudget(row,1e9,100,'S'),850);
+});
+
+test('stock strategy friction filter works symmetrically for profitable shorts',()=>{
+  const cfg=api.normalizeStockConfig({'min-hold-ticks':6,'min-profit-multiple':1.10});
+  const strong={forecast:0.30,volatility:0.04,ask:101,bid:100};
+  const weak={forecast:0.45,volatility:0.005,ask:101,bid:100};
+  assert.equal(api.tradeHasEnoughEdge(strong,1_000_000,100_000,cfg,'S'),true);
+  assert.equal(api.tradeHasEnoughEdge(weak,10_000,100_000,cfg,'S'),false);
+});
+
+test('allocation scaling gives strongest edge full position and weaker edges partial capital',()=>{
+  assert.equal(api.allocationScale(0.01,0.01),1);
+  assert.ok(api.allocationScale(0.0025,0.01)>=0.55);
+  assert.ok(api.allocationScale(0.0025,0.01)<1);
 });

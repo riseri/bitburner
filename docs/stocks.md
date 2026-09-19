@@ -1,6 +1,6 @@
-# 4S stock money printer
+# 4S directional stock money printer
 
-`stock-trader.js` is a long-only stock trader for the World Stock Exchange. The
+`stock-trader.js` is a 4S directional stock trader for the World Stock Exchange. The
 normal deployment is supervisor-managed, while direct standalone runs remain
 supported for smoke tests and dry runs. It has its own status port and does not
 share JIT worker/control ports or RAM ownership with the hacking daemon.
@@ -44,8 +44,7 @@ stock updates are approximately every 6 seconds.
 
 ## Default strategy
 
-The trader is deliberately long-only. It uses 4S forecast and volatility to rank
-opportunities by an estimated directional return per tick:
+The trader uses 4S forecast and volatility to rank directional opportunities by estimated return per tick. Longs use the normal edge and shorts use the mirrored bearish edge when shorting is unlocked:
 
 ```text
 edge ~= (2 * forecast - 1) * volatility / 2
@@ -53,8 +52,10 @@ edge ~= (2 * forecast - 1) * volatility / 2
 
 Default entry/exit hysteresis:
 
-- buy candidates at forecast >= 60%
-- exit owned longs at forecast <= 55%
+- buy long candidates at forecast >= 55%
+- buy short candidates at forecast <= 45% when BitNode 8 / Source-File 8 level 2+ permits shorts
+- exit owned longs at forecast <= 52%
+- cover owned shorts at forecast >= 48%
 
 Before buying, the candidate must also have enough estimated multi-tick edge to
 cover the bid/ask spread plus both $100k commissions by the configured profit
@@ -70,12 +71,12 @@ Defaults:
 | `--cash-floor` | `0` | Additional absolute cash floor |
 | `--max-exposure` | `0.80` | Maximum total stock exposure |
 | `--max-position` | `0.25` | Maximum exposure in one symbol |
-| `--entry-forecast` | `0.60` | Minimum 4S forecast to consider buying |
-| `--exit-forecast` | `0.55` | Sell a long at or below this forecast |
+| `--entry-forecast` | `0.55` | Minimum bullish forecast; bearish short threshold is mirrored at 45% |
+| `--exit-forecast` | `0.52` | Exit threshold; short cover threshold is mirrored at 48% |
 | `--min-trade` | `25000000` | Minimum transaction size before commission |
 | `--min-hold-ticks` | `6` | Horizon used by the friction check |
-| `--min-profit-multiple` | `1.15` | Expected edge must exceed friction by this factor |
-| `--max-buys-per-tick` | `4` | Limit new allocations per market update |
+| `--min-profit-multiple` | `1.10` | Expected edge must exceed friction by this factor |
+| `--max-buys-per-tick` | `8` | Limit new allocations per market update |
 | `--ticks` | `0` | Number of market updates before exit; 0 = continuous |
 | `--dry-run` | `false` | Print hypothetical trades without buying/selling |
 
@@ -101,8 +102,9 @@ The script log shows:
 - realized **net** profit for this session
 - average and last net profit per closed trade, plus win/loss count
 - trade count and commissions
-- the strongest current 4S signals
+- the strongest current directional 4S signals
 - current exposure/reserve safety limits
+- current deployment versus the exposure cap and why capital may still be idle
 
 For positions opened by the running trader, realized profit is net of both the buy
 and sell commissions. The dashboard also shows average realized profit per closed
@@ -118,9 +120,7 @@ is the game's actual next-tick direction probability, but forecasts change over
 time, market cycles can flip, spreads and commissions are real, and large
 transactions can influence stock forecasts.
 
-The initial version intentionally avoids shorts because short APIs require
-additional BitNode 8 / Source-File 8 access. A later version can add short
-positions behind an explicit capability check.
+Shorting is enabled automatically only in BitNode 8 or when Source-File 8 level 2+ is active. Otherwise the same trader falls back to long-only behavior without attempting short APIs.
 
 
 ## Supervisor integration
@@ -165,3 +165,10 @@ This means cloud purchases/upgrades cannot intentionally spend through the
 trader's cash reserve. The shared floor is ignored when the stock heartbeat is
 stale, access is blocked, or the trader is in dry-run mode. No stock script
 controls JIT scheduling or server allocation.
+
+
+## Capital allocation
+
+The trader no longer treats the exposure limit as a passive ceiling only. Qualified symbols receive a target position based on their 4S directional edge: the best edge can use the full per-symbol cap while weaker but still profitable edges receive a smaller allocation. Total exposure, per-symbol exposure, the shared cash reserve, maximum shares, spread, commissions, and the multi-tick friction check still cap every entry.
+
+This is intentionally aggressive about using capital when the market presents real 4S edge, but it will still leave money idle instead of filling the portfolio with weak or negative-expectation positions.
