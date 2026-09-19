@@ -79,7 +79,7 @@ point stops with its board intact rather than looping indefinitely.
 | `--games` | `0` | Verified game completions before exit; 0 = continuous |
 | `--takeover` | `false` | Explicitly adopt the unfinished starting game |
 | `--interval` | `500` | Delay between player turns, 100..60000 ms |
-| `--think-ms` | `15` | Cooperative tactical evaluation budget, 1..100 ms |
+| `--think-ms` | `35` | Cooperative adversarial-search budget, 1..100 ms |
 
 Other supported opponents are `Netburners`, `Slum Snakes`, `The Black Hand`,
 `Tetrads`, and `Illuminati`. For example, an easier-opponent shakedown:
@@ -111,19 +111,23 @@ by this bot; game-wide records may also include games played elsewhere.
 
 ## Strategy and runtime limits
 
-The strategy is a bounded heuristic, not a Go solver or a guaranteed winning
-policy. It ranks captures, escapes from atari, threats, connections and expansion;
-it avoids simple self-atari and filling its own eyes. It checks immediate capture
-replies for at most six finalists, with at most eight reply points per finalist.
-It passes when no worthwhile safe move remains. The live valid-move mask is the
-final authority, including the game's superko rule; the local model is used for
-tactics and transition verification, never to bypass that mask.
+The strategy is now a bounded adversarial search, not a guaranteed Go solver.
+Move ordering still prioritizes captures, atari escapes, threats, connections,
+eyes and safe expansion, but 5x5 play now evaluates our move against several
+strong opponent replies and then searches our best counter. Leaf positions include
+area score, komi, group liberties, simple eyes and local influence. Larger boards
+use narrower branches deliberately.
 
-Candidate evaluation yields with `ns.sleep(5)` after each candidate/reply. The
-reported CPU estimate sums tactical evaluation slices and excludes intentional
-sleeps; board reads, mask calculation, snapshot setup, sorting, persistence and
-rendering are outside that estimate. The limit is cooperative: one board
-operation, GC, or the game API's own opponent/validator work can exceed it.
+When the opponent has just passed, the bot checks the actual area score including
+komi and immediately takes a winning pass instead of reopening a settled game.
+The live valid-move mask remains final authority for our move, including the
+game's superko rule. Local search also rejects positions found in the available
+history, but never overrides the game's live legality decision.
+
+Search yields with `ns.sleep(5)` between root variations. The reported CPU
+estimate excludes those deliberate sleeps. The default 35 ms budget is
+cooperative, not a hard realtime guarantee: one board operation, garbage
+collection, or native AI work can exceed it.
 Larger boards cost more. Separate scripts share the game's JavaScript runtime,
 so this is NOT a guarantee of zero impact on hacking timing. The default small
 board and pacing are intentional. Measure actual JIT income/timing during the
@@ -145,9 +149,12 @@ Tests cover board orientation, offline nodes, independent capture/suicide rules,
 API legality masks, eye protection, passing, bounded cooperative evaluation,
 owned/foreign/unfinished games, interrupted requests, manual moves and resets,
 state-write failures, duplicate processes, changed reset epochs and completed
-game accounting. Seeded games use an independent **random legal reference
-opponent**, not the native Daedalus AI. Those results are a smoke test, not a
-claimed production win rate. An initial five-game live trial is still necessary.
+game accounting. Seeded games still include the independent random legal smoke test. A separate
+Daedalus-shaped benchmark models the documented tactical priorities (capture,
+defend, eyes, pressure, corners, expansion) without copying the native AI. It is
+a regression guard, not a claimed production win rate. The original live bot
+produced a 40% Daedalus win rate over 25 user-observed games; the upgraded search
+must still be validated against the real game after deployment.
 
 Official references checked on 2026-09-18:
 - [Go API](https://github.com/bitburner-official/bitburner-src/blob/dev/markdown/bitburner.go.md)
