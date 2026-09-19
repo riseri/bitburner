@@ -1,17 +1,18 @@
 import { chooseGoMove } from "lib/go-strategy.js";
-import { GO_STATE_FILE, GO_OPPONENTS, goConfig, readGoSnapshot, snapshotKey, readGoRecord, saveGoRecord, mayStartGo, assertSameGo, verifyGoReply, inferWhiteReply } from "lib/go-session.js";
+import { GO_STATE_FILE, GO_OPPONENTS, GO_CYCLE_MS, goConfig, readGoSnapshot, snapshotKey, readGoRecord, saveGoRecord, mayStartGo, assertSameGo, verifyGoReply, inferWhiteReply, daedalusPriorityRng, findDaedalusDistractionWindow } from "lib/go-session.js";
 
 /** Standalone IPvGO player. Never launched by the supervisor or deployed to the fleet. @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([["opponent", "Daedalus"], ["size", 5], ["games", 0],
-		["takeover", false], ["interval", 500], ["think-ms", 35]]);
+		["takeover", false], ["interval", 500], ["think-ms", 35], ["rng-snipe", true], ["rng-max-wait", 10_000]]);
 	ns.disableLog("ALL");
 	try {
 		if (ns.getHostname() !== "home") throw new Error("Run go-bot.js on home only");
 		if (ns.ps("home").some(p => p.filename === ns.getScriptName() && p.pid !== ns.pid)) {
 			throw new Error("Only one go-bot.js may play at a time");
 		}
-		const cfg = goConfig(flags), session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, last: "Starting", analysis: null };
+		const cfg = goConfig(flags), session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, last: "Starting", analysis: null,
+			rng: null, rngAttempts: 0, rngSnipes: 0, rngWaitMs: 0 };
 		let snapshot = readGoSnapshot(ns);
 		const decision = mayStartGo(snapshot, readGoRecord(ns), cfg.takeover);
 		if (decision === "new") snapshot = await startGame(ns, cfg, snapshot);
@@ -60,6 +61,14 @@ export async function main(ns) {
 				if (action.x !== null && !ns.go.analysis.getValidMoves()[action.x]?.[action.y]) {
 					throw new Error("Selected move is no longer legal; stopped instead of retrying blindly");
 				}
+				const endingPass = action.x === null && snapshot.game.previousMove === null && snapshot.history.length > 0;
+				if (!endingPass && snapshot.opponent === "Daedalus" && cfg.rngSnipe) {
+					session.rng = await alignDaedalusRng(ns, snapshot, cfg);
+					session.rngAttempts++;
+					if (session.rng.armed) session.rngSnipes++;
+					session.rngWaitMs += session.rng.waitedMs;
+				} else if (snapshot.opponent !== "Daedalus" || !cfg.rngSnipe) session.rng = null;
+				assertSameGo(ns, snapshot);
 				session.last = action.x === null ? action.reason : `(${action.x}, ${action.y}) ${action.reason}`;
 				await saveGoRecord(ns, snapshot, "pending", { action: { x: action.x, y: action.y } });
 				assertSameGo(ns, snapshot);
@@ -82,6 +91,34 @@ export async function main(ns) {
 		// One terminal message on exit, not a terminal-shaped machine gun.
 		ns.tprint(`IPvGO bot stopped: ${reason}`);
 	}
+}
+
+async function alignDaedalusRng(ns, snapshot, cfg) {
+	let waitedMs = 0, attempts = 0, lastPriority = [];
+	while (attempts++ < 4 && waitedMs <= cfg.rngMaxWait) {
+		const totalPlaytime = Number(ns.getPlayer().totalPlaytime);
+		if (!Number.isFinite(totalPlaytime) || totalPlaytime < 0) {
+			return { armed: false, waitedMs, priority: [], reason: "playtime unavailable" };
+		}
+		const remaining = Math.max(0, cfg.rngMaxWait - waitedMs);
+		const plan = findDaedalusDistractionWindow(totalPlaytime, remaining);
+		if (!plan) return { armed: false, waitedMs, priority: [], reason: "no distraction band" };
+		if (plan.waitMs > 0) {
+			await ns.sleep(plan.waitMs);
+			waitedMs += plan.waitMs;
+		}
+		assertSameGo(ns, snapshot);
+		const actual = Number(ns.getPlayer().totalPlaytime);
+		lastPriority = [0, 1, 2].map(index => daedalusPriorityRng(actual + index * GO_CYCLE_MS));
+		// Three favorable ticks cover the state write plus the AI's initial 200ms wait.
+		if (lastPriority.every(value => value >= 0.9)) {
+			return { armed: true, waitedMs, priority: lastPriority, seed: actual, reason: "Daedalus distraction band" };
+		}
+		if (waitedMs + GO_CYCLE_MS > cfg.rngMaxWait) break;
+		await ns.sleep(GO_CYCLE_MS);
+		waitedMs += GO_CYCLE_MS;
+	}
+	return { armed: false, waitedMs, priority: lastPriority, reason: "timing band slipped" };
 }
 
 async function startGame(ns, cfg, previous) {
@@ -114,6 +151,12 @@ function renderGo(ns, snapshot, session, state) {
 		const a = session.analysis;
 		ns.print(`  Analysis       ${a.considered} roots | ${a.nodes ?? a.replies} search nodes | ${a.cpuMs.toFixed(1)}ms CPU estimate${a.limited ? " | budget reached" : ""}`);
 		ns.print(`  Projection     ${Number(a.projected ?? 0).toFixed(1)} immediate area margin`);
+	}
+	if (session.rngAttempts) {
+		const r = session.rng;
+		const last = r ? `${r.armed ? "ARMED" : "MISS"} | last wait ${(r.waitedMs / 1000).toFixed(1)}s` : "not needed on final pass";
+		ns.print(`  RNG rig        ${session.rngSnipes}/${session.rngAttempts} armed | ${last} | total wait ${(session.rngWaitMs / 1000).toFixed(1)}s`);
+		if (r?.priority?.length) ns.print(`  Daedalus RNG   ${r.priority.map(value => value.toFixed(3)).join(" / ")} priority samples`);
 	}
 	if (stats) {
 		ns.print(`  Game records   ${stats.wins} wins | ${stats.losses} losses | streak ${stats.winStreak}`);

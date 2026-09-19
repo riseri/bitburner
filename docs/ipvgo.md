@@ -80,6 +80,8 @@ point stops with its board intact rather than looping indefinitely.
 | `--takeover` | `false` | Explicitly adopt the unfinished starting game |
 | `--interval` | `500` | Delay between player turns, 100..60000 ms |
 | `--think-ms` | `35` | Cooperative adversarial-search budget, 1..100 ms |
+| `--rng-snipe` | `true` | For Daedalus, time moves into the AI's documented distraction RNG branch |
+| `--rng-max-wait` | `10000` | Maximum cooperative wall-clock wait per move for an RNG window |
 
 Other supported opponents are `Netburners`, `Slum Snakes`, `The Black Hand`,
 `Tetrads`, and `Illuminati`. For example, an easier-opponent shakedown:
@@ -124,6 +126,24 @@ The live valid-move mask remains final authority for our move, including the
 game's superko rule. Local search also rejects positions found in the available
 history, but never overrides the game's live legality decision.
 
+### Daedalus RNG timing
+
+Daedalus has an additional default-on optimization. The native AI seeds a
+Wichmann-Hill RNG from `Player.totalPlaytime` after its initial think delay, and
+uses the third random sample to decide whether to run its normal priority policy.
+A value at or above 0.9 sends Daedalus through the less-directed fallback path.
+
+`ns.getPlayer().totalPlaytime` exposes the same playtime clock, and that clock
+advances in 200 ms game cycles. Before committing a Daedalus move, the bot searches
+forward for four consecutive 200 ms seeds whose third RNG sample is at least 0.9.
+It sleeps cooperatively until that window, rechecks the live board and current
+playtime, then commits only if at least three favorable ticks remain. Four ticks
+provide margin for timer ordering, state persistence, and the AI's initial wait.
+
+This does not use `ns.go.cheat`, testing-board mutation, busy waiting, or scheduler
+integration. The tradeoff is slower wall-clock Go games: a favorable window can
+take several seconds. Use `--rng-snipe false` to compare ordinary play.
+
 Search yields with `ns.sleep(5)` between root variations. The reported CPU
 estimate excludes those deliberate sleeps. The default 35 ms budget is
 cooperative, not a hard realtime guarantee: one board operation, garbage
@@ -152,13 +172,24 @@ state-write failures, duplicate processes, changed reset epochs and completed
 game accounting. Seeded games still include the independent random legal smoke test. A separate
 Daedalus-shaped benchmark models the documented tactical priorities (capture,
 defend, eyes, pressure, corners, expansion) without copying the native AI. It is
-a regression guard, not a claimed production win rate. The original live bot
-produced a 40% Daedalus win rate over 25 user-observed games; the upgraded search
-must still be validated against the real game after deployment.
+a regression guard, not a claimed production win rate. The original one-ply bot
+produced a 40% Daedalus win rate over 25 user-observed games. The adversarial-search
+revision then produced 10 wins and 10 losses with a -0.05 average score margin in
+a live 20-game trial, showing that the synthetic benchmark overstated its edge.
 
-Official references checked on 2026-09-18:
+The RNG timing layer is based on the actual native seed source, game-cycle clock,
+and Daedalus 0.9 distraction threshold. It still needs a fresh live A/B trial:
+run Daedalus with RNG sniping enabled, then repeat with `--rng-snipe false`.
+The goal is a material improvement over the 50% / -0.05 live baseline, not a
+synthetic win-rate claim.
+
+Official references checked on 2026-09-19:
 - [Go API](https://github.com/bitburner-official/bitburner-src/blob/dev/markdown/bitburner.go.md)
 - [API implementation and stats fields](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Go/effects/netscriptGoImplementation.ts)
 - [Move/history and pass semantics](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Go/boardState/boardState.ts)
 - [Reward multipliers](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Go/effects/effect.ts)
 - [Win/favor scoring](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Go/boardAnalysis/scoring.ts)
+
+- [Native Go AI and Daedalus priority](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Go/boardAnalysis/goAI.ts)
+- [Wichmann-Hill RNG](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Casino/RNG.ts)
+- [200 ms game-cycle playtime updates](https://github.com/bitburner-official/bitburner-src/blob/dev/src/engine.tsx)
