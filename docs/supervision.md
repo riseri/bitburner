@@ -130,11 +130,39 @@ Planner-only startup remains:
 run supervisor.js
 ```
 
-To opt into actions:
+To opt into only the original program/backdoor actions explicitly:
 
 ```text
 run supervisor.js --progression-actions true --progression-cash-reserve 0.10
 ```
+
+The common action combinations use profiles:
+
+```text
+run supervisor.js --profile observe
+run supervisor.js --profile assist
+run supervisor.js --profile hands-off
+```
+
+`observe` is read-only for Singularity actions, `assist` enables progression and
+augmentation actions without installing, and `hands-off` also enables automatic
+installation. Explicit flags override profile values, so exceptional runs can
+still adjust one setting without restating the whole configuration.
+
+It joins invited non-city factions, selects available faction work, donates for an
+exact reputation gap when favor and `Formulas.exe` permit it, purchases the next
+reputation-ready and funded planned augmentation, and records which faction work
+it owns. Donations preserve the planned purchase, percentage reserve, and unrelated
+savings floor. Unrelated player work is never stopped or replaced. City invitations
+are ignored unless one is selected with `--augmentation-city-faction`. When
+Singularity is locked, status recommends BN4/SF4 and makes no calls through the
+locked API.
+
+Installation remains disarmed unless `--auto-install true` is supplied. It also
+requires `--min-install N` queued augmentations, no remaining matching plan item,
+no unrelated player activity, and a present `bootstrap.js`. Before resetting, the
+supervisor arguments are persisted; `bootstrap.js` restores that exact command
+after installation. The default threshold is five.
 
 To change an existing daemon's launch settings deliberately, stop the supervisor and
 that daemon first. The supervisor will not silently replace live processes to force
@@ -163,7 +191,7 @@ augmentation planner, telemetry report, and read-only `doctor.js` commands.
 
 ## One-command utility management
 
-`run supervisor.js --progression-actions true` now includes automatic program
+`run supervisor.js --profile assist` includes automatic program and augmentation
 savings, one startup diagnostic pass, periodic read-only augmentation advice,
 telemetry recording, and a rolling one-hour history summary. Standalone utility
 commands are optional. Use `--savings augmentations` to reserve for the next
@@ -171,6 +199,12 @@ augmentation recommendation, `--save-amount N` for a fixed manual goal, or
 `--savings keep` to disable automatic goal updates. Automatic policies preserve
 active manually configured goals. Program savings uses the configured progression
 reserve and waits for Singularity and enabled progression actions.
+
+With augmentation actions enabled, `--savings auto` advances from completed port
+programs to the next augmentation. Fleet and stock entries protect that goal; only
+the matching augmentation purchase may consume it. The augmentation manager has
+its own percentage reserve and rechecks the live price, reputation and queued
+ownership immediately before each mutation.
 
 `--cloud-roi` and `--cloud-payback` are forwarded to newly launched fleet managers.
 The diagnostic/planner children are serialized, never heartbeat-killed, and retry

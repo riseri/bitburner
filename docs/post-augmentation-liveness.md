@@ -38,7 +38,7 @@ Batch RAM failures and shared-budget skips are visible in the normal daemon view
 with the current rejection reason. Secondary admission reports actual progress
 instead of retaining its initial 'waiting for productive runtime' message forever.
 No timing, worker semantics, progression flag, Formulas API or extra target count
-is introduced. Start with `run supervisor.js --progression-actions true` as before.
+is introduced. Start with `run supervisor.js --profile assist` as before.
 
 ## Evidence and limits
 

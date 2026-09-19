@@ -45,3 +45,14 @@ export function readAugmentationCatalog(ns) {
     }
     return { catalog: [...catalog.values()], owned };
 }
+
+export function buildAugmentationPlan(ns, options = {}) {
+    const focus = String(options.focus ?? "hacking"), target = String(options.target ?? "");
+    const multiplier = Number(options.multiplier ?? options["price-multiplier"] ?? 1);
+    if (!Number.isFinite(multiplier) || multiplier < 1) throw new Error("price-multiplier must be finite and at least 1");
+    if (!["hacking", "all"].includes(focus)) throw new Error("focus must be hacking or all");
+    const { catalog, owned } = readAugmentationCatalog(ns);
+    const targets = target ? [target] : catalog.filter(a => focus === "all" ||
+        Object.entries(a.stats).some(([key, value]) => key.startsWith("hacking") && value > 1)).map(a => a.name);
+    return planAugmentations(catalog, owned, targets, multiplier);
+}

@@ -1,7 +1,8 @@
 # Bitburner automation
 
 Two-target JIT hacking, fleet management, contracts, 4S trading, IPvGO, and opt-in
-program/backdoor actions. `supervisor.js` owns service restarts and the dashboard.
+program, backdoor, faction-work, augmentation-purchase, and reset actions.
+`supervisor.js` owns service restarts and the dashboard.
 
 ## BitNode, Source-File, and API requirements
 
@@ -16,6 +17,8 @@ their own requirements. BN means your **current BitNode**; SF means an owned
 | `--progression-actions true`: TOR/program purchases and faction backdoors | **BN4 or SF4 level 1+** (Singularity) | Actions are blocked; other services continue |
 | Automatic program savings (`--savings auto` or `programs`) | **BN4 or SF4 level 1+**, plus enabled progression and `--progression-actions true` | Waits instead of creating a new automatic program goal |
 | Augmentation planning (`--augmentations true`, `--augmentation-focus`, `--augmentation-target`, or standalone planner) | **BN4 or SF4 level 1+** | Planner shows `BLOCKED: Singularity is locked` |
+| Augmentation loop (`--augmentation-actions true`) | **BN4 or SF4 level 1+** | Reports how to unlock Singularity and performs no actions |
+| Automatic installation (`--auto-install true`) | **BN4 or SF4 level 1+**, augmentation actions, and the configured queued-augmentation threshold | Remains advisory; no reset occurs |
 | `--savings augmentations` | **BN4 or SF4 level 1+**, enabled augmentation planning, and a fresh complete plan | Automatic savings waits for a plan; an existing goal is preserved |
 | Fixed savings (`--save-amount`, `--save-label`, or standalone `savings.js`) | **No Singularity, BN, or SF requirement** | Cash protection works independently of planning; automatic spending on a program still requires Singularity |
 | 4S stock trading, including long positions | **WSE Account + TIX API + 4S Market Data TIX API access**; no specific BN/SF gate for longs | Stock service is blocked until all three are available; it does not buy access automatically |
@@ -30,10 +33,9 @@ SF4 level 1 is enough to unlock Singularity, but outside BN4 its APIs have highe
 RAM costs at lower SF4 levels. An unlocked planner or progression actor can still
 show `WAITING_RAM`; the supervisor never kills workers to force a helper to fit.
 
-For the startup examples below: the two commands with `--progression-actions true`
-need Singularity for those extra actions; the augmentation-savings command needs
-Singularity for planning and automatic savings; the fixed "My fund" command does
-not. **Setting a flag does not unlock the required API.**
+The `assist` and `hands-off` profiles need Singularity for their progression
+actions; augmentation savings also needs it for planning. Fixed savings does not.
+**Selecting a profile does not unlock the required API.**
 
 ## Setup and start
 
@@ -56,12 +58,29 @@ planning, startup diagnostics, periodic augmentation advice, and telemetry. Lock
 capabilities appear as blocked; optional helpers wait for RAM without stopping
 other services. All results appear in the supervisor dashboard.
 
-To include automatic program purchases, faction backdoors, and automatic savings
-for the next port program (**requires BN4 or SF4 level 1+ / Singularity**):
+Three profiles cover the normal operating modes:
 
 ```text
-run supervisor.js --progression-actions true
+run supervisor.js --profile observe
+run supervisor.js --profile assist
+run supervisor.js --profile hands-off
 ```
+
+`observe` is the default and performs no Singularity mutations. `assist` enables
+programs, backdoors, safe faction joins, reputation work, donations, and
+augmentation purchases, but leaves installation manual. `hands-off` additionally
+installs after the configured threshold and restarts the same profile. The latter
+two require BN4 or SF4 level 1+.
+
+Individual flags remain available as profile overrides. For example:
+
+```text
+run supervisor.js --profile hands-off --min-install 8 --augmentation-city-faction Aevum
+```
+
+The exact supervisor arguments are saved and restored through `bootstrap.js` after
+installation. Without Singularity, the same dashboard stays read-only and explains
+that BN4 or SF4 is required while the other automation continues normally.
 
 Run only one supervisor and one daemon. To deploy changes, let Filesync finish,
 use `ps` to find the supervisor and stop its PID first, then stop the daemon and
@@ -76,19 +95,27 @@ No separate utility commands are required. Examples below are alternative startu
 commands, not additional supervisors to run concurrently:
 
 ```text
-run supervisor.js --progression-actions true
-run supervisor.js --progression-actions true --cloud-payback 3600
+run supervisor.js --profile assist
+run supervisor.js --profile assist --cloud-payback 3600
 run supervisor.js --savings augmentations --augmentation-focus hacking
 run supervisor.js --save-amount 1000000000 --save-label "My fund"
 ```
 
 | Flag | Default | Behavior |
 | --- | --- | --- |
+| `--profile` | `observe` | `observe`, `assist`, or `hands-off`; explicit flags override profile settings |
 | `--diagnostics` | `true` | Run `doctor.js` once at startup; show warnings |
 | `--augmentations` | `true` | Refresh advice about once a minute; requires BN4 or SF4 level 1+ |
 | `--augmentation-focus` | `hacking` | `hacking` or `all` |
 | `--augmentation-target` | empty | Plan for one named augmentation and its prerequisites |
 | `--augmentation-price-multiplier` | `1` | Assumed price growth per purchase; 1 gives a lower bound |
+| `--augmentation-actions` | `false` | Join safe invitations, work for reputation, and purchase the planned augmentations |
+| `--augmentation-cash-reserve` | `0.10` | Cash fraction retained after an automatic augmentation purchase |
+| `--augmentation-city-faction` | empty | The only city faction the loop may auto-join; city invitations are skipped when empty |
+| `--augmentation-join-factions` / `--augmentation-work` / `--augmentation-donate` / `--augmentation-purchase` | `true` | Individual action gates within an enabled loop; donations also require favor and `Formulas.exe` |
+| `--augmentation-focus-work` | `false` | Whether automatic faction work takes focus |
+| `--auto-install` | `false` | Install queued augmentations and restart through `bootstrap.js`; requires augmentation actions |
+| `--min-install` | `5` | Minimum queued augmentations before automatic installation |
 | `--savings` | `auto` | Automatic program/augmentation modes require Singularity; see requirements above |
 | `--save-amount` | unset | Set a fixed manual goal instead of automatic savings; no Singularity required |
 | `--save-label` / `--save-target` | `Savings` / empty | Label and optional allowed program purchase for a fixed goal |
@@ -96,7 +123,8 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--telemetry` | `true` | Record history and show a rolling one-hour summary |
 | `--home-reserve` | `8` | Minimum daemon reserve; automatically raised for optional helper RAM |
 
-Savings modes: `auto` and `programs` advance through TOR and missing port openers;
+Savings modes: `auto` advances through TOR and missing port openers, then follows
+the augmentation loop when it is enabled; `programs` stops after the port openers;
 `augmentations` follows the next fresh, complete augmentation recommendation;
 `keep` preserves the current goal without automatic updates; `none` clears it at
 startup and disables automatic updates. Active manual goals are preserved by
@@ -113,7 +141,7 @@ refreshing. Enable `--dashboard-details true` for the shopping list and more war
 
 ## Save for a goal
 
-The supervisor manages this automatically with `--progression-actions true`.
+The `assist` and `hands-off` profiles manage this automatically.
 These standalone commands remain available for changing goals while it runs:
 
 ```text
@@ -151,7 +179,7 @@ it is a heuristic, not a guarantee. Default maximum payback is 1800 seconds.
 Configure it directly at supervisor startup:
 
 ```text
-run supervisor.js --progression-actions true --cloud-payback 3600
+run supervisor.js --profile assist --cloud-payback 3600
 ```
 
 `--cloud-roi false` restores affordability-based purchases. Use it if the
@@ -180,8 +208,14 @@ Current quotes are live; the default basket total is a lower bound before future
 purchase inflation. `--price-multiplier N` projects a user-specified per-purchase
 multiplier. Re-run after purchases. The next purchase's cash target uses its live
 quote. `--save-goal` explicitly replaces the shared savings goal with that amount.
-The planner never buys, works for a faction, donates, installs augmentations or
-resets. Buy manually and then clear/update the goal.
+The standalone planner never buys, works for a faction, donates, installs
+augmentations or resets. The separately gated augmentation loop can join invited
+non-city factions, perform faction work, donate when favor and `Formulas.exe` make
+the exact reputation cost available, and buy its next planned item. It never
+interrupts unrelated player activity. City factions require
+`--augmentation-city-faction`, and installation additionally requires
+`--auto-install true` plus the queued-augmentation threshold. Donations retain
+enough cash for the planned purchase, the percentage reserve, and unrelated goals.
 
 ## Record and diagnose
 

@@ -206,6 +206,33 @@ test('supervisor manages exactly one Go bot on its informational status port', (
     assert.deepEqual(Array.from(go[0].args),['--port',12]);
 });
 
+test('supervisor wires the opt-in augmentation loop and reset safety gates', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    const services=api.createManagedServices({ps:()=>[]}, {
+        contracts:false,progression:false,stocks:false,go:false,augmentationActions:true,
+        augmentationFocus:'hacking',augmentationTarget:'',augmentationCashReserve:.15,
+        augmentationJoinFactions:true,augmentationCityFaction:'Aevum',augmentationWork:true,
+        augmentationDonate:true,augmentationPurchase:true,augmentationFocusWork:false,autoInstall:true,minInstall:7,
+    },[]);
+    const manager=services.find(s=>s.name==='augmentation-manager.js');
+    assert.ok(manager); assert.equal(manager.port,11); assert.equal(manager.heartbeatType,'augmentation-status');
+    assert.equal(manager.args[manager.args.indexOf('--city-faction')+1],'Aevum');
+    assert.equal(manager.args[manager.args.indexOf('--auto-install')+1],true);
+    assert.equal(manager.args[manager.args.indexOf('--min-install')+1],7);
+});
+
+test('supervisor profiles collapse common action flags while explicit overrides win', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    const assist={profile:'assist','progression-actions':false,'augmentation-actions':false,'auto-install':true};
+    api.applySupervisorProfile(assist,['--profile','assist']);
+    assert.equal(assist['progression-actions'],true); assert.equal(assist['augmentation-actions'],true);
+    assert.equal(assist['auto-install'],false);
+    const handsOff={profile:'hands-off','progression-actions':false,'augmentation-actions':false,'auto-install':false};
+    api.applySupervisorProfile(handsOff,['--profile=hands-off','--auto-install',false]);
+    assert.equal(handsOff['progression-actions'],true); assert.equal(handsOff['augmentation-actions'],true);
+    assert.equal(handsOff['auto-install'],false);
+});
+
 test('Go safety stops block automatic restart instead of replaying uncertain state', () => {
     const clock=new Clock(),api=loadScript('supervisor.js',clock),status=new Port();
     const service=api.createManagedServices({ps:()=>[]},

@@ -99,6 +99,16 @@ test('automatic savings never reserves for inaccessible or disabled progression;
     assert.equal(JSON.parse(f.files.get('data/savings.json')).amount, 0);
 });
 
+test('automatic savings moves from completed programs into the enabled augmentation loop', async () => {
+    const f=fixture();
+    f.ns.hasTorRouter=()=>true; f.ns.fileExists=name=>name.endsWith('.exe');
+    const cfg={savingsMode:'auto',progression:true,progressionActions:true,progressionCashReserve:.1,
+        augmentationActions:true,augmentationCashReserve:.2};
+    await f.api.updateSupervisorSavings(f.ns,cfg,{errors:[],next:{name:'BitWire',price:800}});
+    const goal=JSON.parse(f.files.get('data/savings.json'));
+    assert.equal(goal.target,'augmentation:BitWire'); assert.equal(goal.amount,1000);
+});
+
 test('one supervisor command starts diagnostics, services, automatic savings, and then the planner', async () => {
     const f = fixture(), supervisor = loadScript('supervisor.js', f.clock);
     const ports = new Map();

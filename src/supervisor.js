@@ -15,11 +15,13 @@ const PROGRESSION_PURCHASE = "progression-purchase.js";
 const PROGRESSION_BACKDOOR = "progression-backdoor.js";
 const STOCK_TRADER = "stock-trader.js";
 const GO_BOT = "go-bot.js";
+const AUGMENTATION_MANAGER = "augmentation-manager.js";
 const CONTRACT_SELFTEST = "contract-selftest.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([
+		["profile", "observe"],
 		["background-prep", true],
 		["max-targets", 2],
 		["dashboard-details", false],
@@ -38,6 +40,16 @@ export async function main(ns) {
 		["augmentation-focus", "hacking"],
 		["augmentation-target", ""],
 		["augmentation-price-multiplier", 1],
+		["augmentation-actions", false],
+		["augmentation-cash-reserve", 0.10],
+		["augmentation-join-factions", true],
+		["augmentation-city-faction", ""],
+		["augmentation-work", true],
+		["augmentation-donate", true],
+		["augmentation-purchase", true],
+		["augmentation-focus-work", false],
+		["auto-install", false],
+		["min-install", 5],
 		["savings", "auto"],
 		["save-amount", -1],
 		["save-label", "Savings"],
@@ -46,6 +58,7 @@ export async function main(ns) {
 		["cloud-payback", 1800],
 		["home-reserve", 8],
 	]);
+	applySupervisorProfile(flags, ns.args);
 
 	ns.disableLog("ALL");
 	if (ns.getHostname() !== HOME || ns.ps(HOME).some(process => process.filename === "supervisor.js" && process.pid !== ns.pid)) {
@@ -61,6 +74,16 @@ export async function main(ns) {
 		augmentationFocus: String(flags["augmentation-focus"]),
 		augmentationTarget: String(flags["augmentation-target"]),
 		augmentationMultiplier: Number(flags["augmentation-price-multiplier"]),
+		augmentationActions: asBoolean(flags["augmentation-actions"]),
+		augmentationCashReserve: clampFraction(flags["augmentation-cash-reserve"]),
+		augmentationJoinFactions: asBoolean(flags["augmentation-join-factions"]),
+		augmentationCityFaction: String(flags["augmentation-city-faction"]),
+		augmentationWork: asBoolean(flags["augmentation-work"]),
+		augmentationDonate: asBoolean(flags["augmentation-donate"]),
+		augmentationPurchase: asBoolean(flags["augmentation-purchase"]),
+		augmentationFocusWork: asBoolean(flags["augmentation-focus-work"]),
+		autoInstall: asBoolean(flags["auto-install"]),
+		minInstall: Number(flags["min-install"]),
 		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
 		cloudRoi: asBoolean(flags["cloud-roi"]),
 		cloudPayback: Number(flags["cloud-payback"]),
@@ -76,11 +99,13 @@ export async function main(ns) {
 	};
 
 	validateSupervisorOptions(flags, cfg);
+	await saveSupervisorBootstrap(ns);
 	const required = [DAEMON, FLEET];
 	if (cfg.contracts) required.push(CONTRACTS);
 	if (cfg.progression) required.push(PROGRESSION);
 	if (cfg.stocks) required.push(STOCK_TRADER);
 	if (cfg.go) required.push(GO_BOT);
+	if (cfg.augmentationActions) required.push(AUGMENTATION_MANAGER, "bootstrap.js");
 	if (cfg.progression && cfg.progressionActions) {
 		required.push(PROGRESSION_PURCHASE, PROGRESSION_BACKDOOR);
 	}
@@ -105,7 +130,8 @@ export async function main(ns) {
 		cfg.augmentations && augmentationAccess(ns) ? ns.getScriptRam("augmentation-planner.js", HOME) : 0,
 		cfg.progression && cfg.progressionActions ? ns.getScriptRam(PROGRESSION_PURCHASE, HOME) : 0,
 		cfg.progression && cfg.progressionActions ? ns.getScriptRam(PROGRESSION_BACKDOOR, HOME) : 0);
-	daemonArgs.push("--home-reserve", Math.max(Number(flags["home-reserve"]), utilityReserve + 8));
+	const augmentationServiceReserve = cfg.augmentationActions ? ns.getScriptRam(AUGMENTATION_MANAGER, HOME) : 0;
+	daemonArgs.push("--home-reserve", Math.max(Number(flags["home-reserve"]), augmentationServiceReserve + utilityReserve + 8));
 	const services = createManagedServices(ns, cfg, daemonArgs);
 	const actions = createActionState();
 	const jobs = createSupervisorUtilities(cfg);
@@ -147,12 +173,12 @@ export async function main(ns) {
 		cfg.fleetStatusPort = services.find(service => service.name === FLEET).port;
 		const fleetStatus = snapshot(FLEET), contractStatus = snapshot(CONTRACTS),
 			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER),
-			goStatus = snapshot(GO_BOT);
+			goStatus = snapshot(GO_BOT), augmentationStatus = snapshot(AUGMENTATION_MANAGER);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
 		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
 		cfg.telemetryError = telemetry?.error || "";
 		if (telemetry) cfg.telemetrySummary = summarizeTelemetry(telemetry.samples, Date.now() - 3600000);
-		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, stockAccess: stockGate });
+		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, stockAccess: stockGate });
 		await ns.sleep(cfg.interval);
 	}
 }
@@ -191,6 +217,14 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	// Go publishes status for the dashboard, but slow opponent API calls are allowed to wait indefinitely.
 	// Process liveness owns restart decisions; the generic heartbeat watchdog does not.
 	if (cfg.go) services.push(createService(GO_BOT, ["--port", PORTS.GO_STATUS], "go-status", PORTS.GO_STATUS, false));
+	if (cfg.augmentationActions) services.push(createService(AUGMENTATION_MANAGER,
+		["--port", PORTS.AUGMENTATION_STATUS, "--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget,
+			"--cash-reserve", cfg.augmentationCashReserve, "--join-factions", cfg.augmentationJoinFactions,
+			"--city-faction", cfg.augmentationCityFaction, "--work", cfg.augmentationWork,
+			"--donate", cfg.augmentationDonate ?? true,
+			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
+			"--auto-install", cfg.autoInstall, "--min-install", cfg.minInstall],
+		"augmentation-status", PORTS.AUGMENTATION_STATUS));
 	return services;
 }
 
@@ -280,13 +314,14 @@ async function runOnce(ns, script) {
 function progressionActorProcess(ns) { return actorProcesses(ns)[0] ?? null; }
 
 function render(ns, state) {
-	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, fleetHealth, contractHealth, progressionHealth } = state;
+	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, fleetHealth, contractHealth, progressionHealth } = state;
 	const daemon = readDaemonDashboard(ns);
 	const fleet = fleetStatus?.type === "fleet-status" ? fleetStatus : null;
 	const contracts = contractStatus?.type === "contract-status" ? contractStatus : null;
 	const progression = progressionStatus?.type === "progression-status" ? progressionStatus : null;
 	const stocks = stockStatus?.type === "stock-status" ? stockStatus : null;
 	const go = goStatus?.type === "go-status" ? goStatus : null;
+	const augmentation = augmentationStatus?.type === "augmentation-status" ? augmentationStatus : null;
 
 	ns.clearLog();
 	dashboardTitle(ns, "BITBURNER AUTOMATION");
@@ -321,8 +356,8 @@ function render(ns, state) {
 
 	if (!cfg.dashboardDetails) {
 		renderOverview(ns, daemon, fleet);
-		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, actions: state.actions, services: state.services, stockAccess: state.stockAccess });
-		renderAttention(ns, { daemon, fleet, contracts, progression, go, services: state.services });
+		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, actions: state.actions, services: state.services, stockAccess: state.stockAccess });
+		renderAttention(ns, { daemon, fleet, contracts, progression, go, augmentation, services: state.services });
 		ns.print("  Details: restart with --dashboard-details true");
 		return;
 	}
@@ -348,6 +383,7 @@ function render(ns, state) {
 	renderStocks(ns, stocks, cfg, state.stockAccess);
 	renderContracts(ns, contracts, cfg);
 	renderProgression(ns, progression, cfg, state.actions);
+	renderAugmentationLoop(ns, augmentation, cfg);
 	renderGoStatus(ns, go, cfg, state.services);
 	dashboardSection(ns, "Services");
 	if (state.services) {
@@ -411,7 +447,7 @@ function renderOverview(ns, daemon, fleet) {
 	}
 }
 
-function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, actions, services, stockAccess }) {
+function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, actions, services, stockAccess }) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Automation");
 
@@ -431,6 +467,10 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, 
 		const next = progression.nextObjective?.label || "No immediate objective";
 		row("Progression", `${next} | ${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`);
 	}
+	if (cfg.augmentationActions) row("Aug loop", augmentation
+		? `${augmentation.state} / ${augmentation.phase || "WAIT"} | ${augmentation.action || augmentation.recommendation || "waiting"}`
+		: "Starting / waiting for status");
+	else row("Aug loop", "Planner only; restart with --augmentation-actions true to enable");
 
 	const goService = services?.find(service => service.name === GO_BOT);
 	if (!cfg.go) row("IPvGO", "Disabled");
@@ -448,7 +488,7 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, 
 	}
 }
 
-function renderAttention(ns, { daemon, fleet, contracts, progression, go, services }) {
+function renderAttention(ns, { daemon, fleet, contracts, progression, go, augmentation, services }) {
 	const notices = [];
 	if (daemon?.reason && ["RECOVERING", "DRAINING"].includes(String(daemon.state).toUpperCase())) notices.push(["Money engine", daemon.reason]);
 	if (daemon?.mode === "reconfigure" && daemon.reason) notices.push(["Money engine", daemon.reason]);
@@ -456,6 +496,7 @@ function renderAttention(ns, { daemon, fleet, contracts, progression, go, servic
 	if (contracts?.error) notices.push(["Contracts", contracts.error]);
 	if (progression?.error) notices.push(["Progression", progression.error]);
 	if (go?.terminal && go.error) notices.push(["IPvGO", go.error]);
+	if (augmentation?.error) notices.push(["Aug loop", augmentation.error]);
 
 	const recentService = services?.filter(service => service.lastEvent)
 		.sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
@@ -586,6 +627,7 @@ function renderProgression(ns, progression, cfg, actions = null) {
 	if (progression.error) { row("Warning", progression.error); return; }
 	row("Mode", cfg.progressionActions ? "Safe actions enabled" : "Planner only; no automatic actions");
 	if (progression.nextObjective?.label) row("Next", progression.nextObjective.label);
+	for (const recommendation of (progression.recommendations || []).slice(0, cfg.dashboardDetails ? 4 : 1)) row("Recommendation", recommendation);
 	row("Unlocks", `${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} port programs | ` +
 		`${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} faction backdoors`);
 	if (cfg.dashboardDetails) {
@@ -600,6 +642,17 @@ function renderProgression(ns, progression, cfg, actions = null) {
 		const actor = progressionActorProcess(ns);
 		if (actor) row("Action", actor.filename === PROGRESSION_BACKDOOR ? "Installing faction backdoor" : "Buying TOR / port program");
 	}
+}
+
+function renderAugmentationLoop(ns, augmentation, cfg) {
+	const row = (label, value) => dashboardRow(ns, label, value);
+	dashboardSection(ns, "Augmentation loop");
+	if (!cfg.augmentationActions) { row("Status", "Disabled; planning and recommendations remain active"); return; }
+	if (!augmentation) { row("Status", "Starting / waiting for augmentation manager"); return; }
+	row("Status", `${augmentation.state || "UNKNOWN"}${augmentation.phase ? ` | ${augmentation.phase}` : ""}`);
+	if (augmentation.action) row("Last action", augmentation.action);
+	if (augmentation.recommendation) row("Next", augmentation.recommendation);
+	row("Queued", `${Number(augmentation.queued) || 0} augmentation(s) | auto-install ${cfg.autoInstall ? `armed at ${cfg.minInstall}` : "disabled"}`);
 }
 
 function renderGoStatus(ns, go, cfg, services) {
@@ -949,6 +1002,7 @@ function createSupervisorUtilities(cfg) {
 }
 
 function validateSupervisorOptions(flags, cfg) {
+	if (!["observe", "assist", "hands-off"].includes(String(flags.profile))) throw new Error("profile must be observe, assist, or hands-off");
 	if (!["auto", "keep", "programs", "augmentations", "none"].includes(String(flags.savings))) throw new Error("savings must be auto, keep, programs, augmentations, or none");
 	const amount = Number(flags["save-amount"]);
 	if (!Number.isFinite(amount) || amount < -1 || (amount < 0 && amount !== -1)) throw new Error("save-amount must be nonnegative or -1 (unset)");
@@ -957,5 +1011,31 @@ function validateSupervisorOptions(flags, cfg) {
 	if (!Number.isFinite(cfg.augmentationMultiplier) || cfg.augmentationMultiplier < 1) throw new Error("augmentation-price-multiplier must be at least 1");
 	if (!Number.isFinite(cfg.cloudPayback) || cfg.cloudPayback <= 0) throw new Error("cloud-payback must be positive");
 	if (!Number.isFinite(Number(flags["home-reserve"])) || Number(flags["home-reserve"]) < 0) throw new Error("home-reserve must be nonnegative");
+	if (!Number.isSafeInteger(cfg.minInstall) || cfg.minInstall < 1) throw new Error("min-install must be a positive integer");
+	if (cfg.autoInstall && !cfg.augmentationActions) throw new Error("auto-install requires augmentation-actions");
 	if (cfg.savingsMode === "augmentations" && !cfg.augmentations) throw new Error("Augmentation savings requires augmentation planning");
+}
+
+function applySupervisorProfile(flags, args = []) {
+	const profile = String(flags.profile || "observe"), explicit = new Set();
+	for (const value of args || []) {
+		const token = String(value);
+		if (token.startsWith("--")) explicit.add(token.slice(2).split("=", 1)[0]);
+	}
+	const presets = {
+		observe: {},
+		assist: { "progression-actions": true, "augmentation-actions": true, "auto-install": false },
+		"hands-off": { "progression-actions": true, "augmentation-actions": true, "auto-install": true },
+	};
+	if (!Object.hasOwn(presets, profile)) return flags;
+	for (const [key, value] of Object.entries(presets[profile])) if (!explicit.has(key)) flags[key] = value;
+	return flags;
+}
+
+async function saveSupervisorBootstrap(ns) {
+	const args = Array.isArray(ns.args) ? [...ns.args] : [];
+	if (!args.every(value => typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)))) {
+		throw new Error("Cannot persist invalid supervisor arguments for reset bootstrap");
+	}
+	await ns.write("data/supervisor-bootstrap.json", JSON.stringify({ version: 1, args, updatedAt: Date.now() }), "w");
 }

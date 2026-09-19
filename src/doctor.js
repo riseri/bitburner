@@ -20,7 +20,8 @@ export function diagnoseAutomation(ns) {
     const lines = [];
     const processes = ns.ps("home"), issues = [], visited = new Set();
     const entries = ["supervisor.js", "daemon.js", "fleet-manager.js", "contract-manager.js", "progression-manager.js",
-        "stock-trader.js", "go-bot.js", "augmentation-planner.js", "progression-purchase.js", "progression-backdoor.js", "jit-hack.js", "jit-grow.js", "jit-weaken.js"];
+        "stock-trader.js", "go-bot.js", "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js",
+        "progression-purchase.js", "progression-backdoor.js", "jit-hack.js", "jit-grow.js", "jit-weaken.js"];
     const inspect = file => {
         if (visited.has(file)) return;
         visited.add(file);
@@ -36,7 +37,8 @@ export function diagnoseAutomation(ns) {
         const ram = ns.getScriptRam(file, "home");
         if (!ram) issues.push(`RAM analysis failed or missing: ${file}`);
         if (active.length > 1 && !file.startsWith("jit-")) issues.push(`Duplicate ${file}: PIDs ${active.map(p => p.pid).join(", ")}`);
-        if (!active.length && !file.startsWith("jit-") && file !== "progression-purchase.js" && file !== "progression-backdoor.js" && file !== "augmentation-planner.js") additionalRam += ram;
+        if (!active.length && !file.startsWith("jit-") && !["progression-purchase.js", "progression-backdoor.js",
+            "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js"].includes(file)) additionalRam += ram;
         lines.push(`${file}: ${ram.toFixed(2)} GB | ${active.length ? active.map(p => `PID ${p.pid} ${JSON.stringify(p.args)}`).join("; ") : "stopped"}`);
     }
     const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
@@ -50,7 +52,7 @@ export function diagnoseAutomation(ns) {
     };
     const fleet = processes.find(p => p.filename === "fleet-manager.js"), daemon = processes.find(p => p.filename === "daemon.js");
     if (fleet && daemon && customPort(fleet) !== customPort(daemon)) issues.push("Daemon and fleet manager disagree on fleet port");
-    const servicePorts = { "fleet-manager.js": 19, "contract-manager.js": 18, "progression-manager.js": 16, "stock-trader.js": 13, "go-bot.js": 12 };
+    const servicePorts = { "fleet-manager.js": 19, "contract-manager.js": 18, "progression-manager.js": 16, "stock-trader.js": 13, "go-bot.js": 12, "augmentation-manager.js": 11 };
     const argument = (process, flag, fallback) => {
         const index = process?.args.indexOf(flag) ?? -1;
         return index >= 0 ? Number(process.args[index + 1]) : fallback;

@@ -1,5 +1,6 @@
 import { PORTS } from "lib/ports.js";
 import { progressionPrograms, progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
+import { singularityRecommendation } from "lib/augmentation-loop.js";
 
 const HOME = "home";
 const DEFAULT_INTERVAL_MS = 5_000;
@@ -99,6 +100,8 @@ function buildStatus(ns, fleetStatus) {
 					? `Source-File 4.${sf4Level}`
 					: "locked",
 		},
+		recommendations: singularityAvailable ? [] : [singularityRecommendation(),
+			"Keep the money engine, fleet, contracts, stocks, and IPvGO running; perform faction work and augmentation purchases manually"],
 		torOwned,
 		programs,
 		programsOwned: programs.filter(program => program.owned).length,

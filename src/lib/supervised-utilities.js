@@ -62,12 +62,20 @@ export async function updateSupervisorSavings(ns, cfg, plan) {
     if (current.floor > 0 && current.owner !== "supervisor") { cfg.savingsStatus = "Preserving your existing savings goal"; return; }
     let desired = null;
     if (cfg.savingsMode === "auto" || cfg.savingsMode === "programs") {
-        if (!cfg.progression || !cfg.progressionActions) { cfg.savingsStatus = "Program savings waits for progression actions"; return; }
         const reset = ns.getResetInfo();
         if (reset.currentNode !== 4 && !(Number(reset.ownedSF?.get?.(4)) > 0)) { cfg.savingsStatus = "Program savings waits for Singularity"; return; }
         const program = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms().find(p => !ns.fileExists(p.name, "home"));
-        if (program) desired = { amount: program.cost / (1 - cfg.progressionCashReserve), label: `Buy ${program.name}`, target: program.name };
-        cfg.savingsStatus = program ? `Saving for ${program.name}` : "All port programs owned";
+        if (program && (!cfg.progression || !cfg.progressionActions)) { cfg.savingsStatus = "Program savings waits for progression actions"; return; }
+        if (program) {
+            desired = { amount: program.cost / (1 - cfg.progressionCashReserve), label: `Buy ${program.name}`, target: program.name };
+            cfg.savingsStatus = `Saving for ${program.name}`;
+        }
+        else if (cfg.savingsMode === "auto" && cfg.augmentationActions) {
+            if (!plan || plan.errors?.length) { cfg.savingsStatus = "Programs complete; waiting for a fresh augmentation plan"; return; }
+            if (plan.next) desired = { amount: plan.next.price / (1 - cfg.augmentationCashReserve),
+                label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };
+            cfg.savingsStatus = plan.next ? `Programs complete; saving for ${plan.next.name}` : "Programs and planned augmentations complete";
+        } else cfg.savingsStatus = "All port programs owned";
     } else if (cfg.savingsMode === "augmentations") {
         if (!plan || plan.errors?.length) { cfg.savingsStatus = "Waiting for a fresh, complete augmentation plan"; return; }
         if (plan.next) desired = { amount: plan.next.price, label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };

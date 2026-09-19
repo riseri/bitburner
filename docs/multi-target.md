@@ -122,14 +122,14 @@ home, use `ps` to find and stop the old supervisor PID first, then the daemon PI
 The normal startup preserving progression actions is:
 
 ```text
-run supervisor.js --progression-actions true
+run supervisor.js --profile assist
 ```
 
 `--dashboard-details true` is still available. To retain prep-only single-target
 behavior on the next startup:
 
 ```text
-run supervisor.js --progression-actions true --max-targets 1
+run supervisor.js --profile assist --max-targets 1
 ```
 
 The supervisor forwards `--max-targets` to a newly started daemon. Existing

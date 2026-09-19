@@ -1,5 +1,5 @@
 import { writeUtilityReport } from "lib/utility-report.js";
-import { planAugmentations, readAugmentationCatalog } from "lib/augmentation-plan.js";
+import { buildAugmentationPlan } from "lib/augmentation-plan.js";
 import { writeSavings } from "lib/savings.js";
 
 /** Read-only purchasing advice; --save-goal only writes a cash reserve. @param {NS} ns */
@@ -40,14 +40,4 @@ export async function main(ns) {
             ns.tprint("Saved the next purchase's cash goal. Buy manually, then clear or replace it with savings.js.");
         }
     } else ns.tprint("No matching unowned augmentations in joined factions; existing savings goal unchanged.");
-}
-
-export function buildAugmentationPlan(ns, f) {
-    const multiplier = Number(f["price-multiplier"]);
-    if (!Number.isFinite(multiplier) || multiplier < 1) throw new Error("price-multiplier must be finite and at least 1");
-    if (!["hacking", "all"].includes(f.focus)) throw new Error("focus must be hacking or all");
-    const { catalog, owned } = readAugmentationCatalog(ns);
-    const targets = f.target ? [String(f.target)] : catalog.filter(a => f.focus === "all" ||
-        Object.entries(a.stats).some(([key, value]) => key.startsWith("hacking") && value > 1)).map(a => a.name);
-    return planAugmentations(catalog, owned, targets, multiplier);
 }
