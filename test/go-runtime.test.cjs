@@ -160,7 +160,7 @@ test('IPvGO move API exceptions stop once without retry or destructive reset',as
     assert.equal(f.terminal.length,1);assert.match(f.terminal[0],/API unavailable/);
     assert.equal(JSON.parse(f.files.get('go-bot-state.txt')).phase,'pending');
 });
-for(const flags of [{opponent:'w0r1d_d43m0n'},{opponent:'No AI'},{size:19},{games:-1},{interval:-1},{'think-ms':NaN}]) {
+for(const flags of [{opponent:'w0r1d_d43m0n'},{opponent:'No AI'},{size:19},{games:-1},{interval:-1},{'think-ms':NaN},{port:13}]) {
     test(`IPvGO invalid configuration fails before any Go mutations ${JSON.stringify(flags)}`,async()=>{
         const f=fixture(flags);await api.main(f.ns);assert.equal(f.terminal.length,1);assert.deepEqual(f.calls,[]);
     });
