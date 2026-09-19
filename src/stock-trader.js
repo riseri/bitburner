@@ -224,7 +224,6 @@ function render(ns, market, cfg, session, commission, state) {
 	const rows = market.rows ?? market;
 	const metrics = market.metrics ?? portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
 	const reserveFloor = Math.max(cfg.cashFloor, metrics.equity * cfg.cashReserve);
-	const elapsedMin = Math.max(1, Date.now() - session.startedAt) / 60_000;
 	const candidates = rankLongCandidates(rows, cfg).slice(0, 5);
 	const positions = rows.filter(row => row.longShares > 0 || row.shortShares > 0).length;
 	const row = (label, value) => dashboardRow(ns, label, value);
