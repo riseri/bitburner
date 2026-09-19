@@ -113,7 +113,7 @@ test('stock trader publishes supervisor heartbeat and capital floor',async()=>{
   await api.main(f.ns);
   const status=f.status.peek();
   assert.equal(status.type,'stock-status');
-  assert.equal(status.version,2);
+  assert.equal(status.version,1);
   assert.equal(status.producerPid,42);
   assert.equal(status.access.ok,true);
   assert.ok(status.reserveFloor>0);
