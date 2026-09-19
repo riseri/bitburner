@@ -215,6 +215,7 @@ function renderMoneyEngine(ns, daemon, details = false) {
 		if (daemon.batchRate) row("Batch rate", daemon.batchRate);
 		if (details && daemon.income10) row("Income 10s", daemon.income10);
 	}
+	if (daemon.health) row("Health", daemon.health);
 	if (daemon.money) row("Money", daemon.money);
 	if (daemon.security) row("Security", daemon.security);
 	if (details && daemon.steal) row("Steal", daemon.steal);
@@ -343,37 +344,50 @@ function readDaemonDashboard(ns) {
 	if (!header) return null;
 
 	const headerMatch = header.match(/JIT DAEMON ::\s*(.*?)\s*:: hacking\s+(\d+)/);
+	const target = headerMatch?.[1] ?? "unknown";
+	const compactMode = field(logs, "Mode");
+	const compactIncome = field(logs, "Income");
+	const compactThroughput = field(logs, "Throughput");
+	const compactHackStatus = compactMode.includes("|") ? compactMode.split("|").slice(1).join("|").trim() : "";
+	const compactState = compactHackStatus.startsWith("PAUSED") ? "RECOVERING"
+		: compactHackStatus.startsWith("DRAINING") ? "DRAINING" : compactHackStatus ? "RUNNING" : "";
+	const actualIncome = compactIncome.match(/^(.*?)\s+actual(?:\s+\||$)/)?.[1] ?? "";
+	const modelIncome = compactIncome.match(/\|\s+(.*?)\s+model(?:\s+\||$)/)?.[1] ?? "";
+	const totalIncome = compactThroughput.match(/\|\s+(.*?)\s+total(?:\s+\||$)/)?.[1] ?? "";
+	const nextTarget = compactMode ? field(logs, "Target") : "";
 	return {
 		mode: "running",
-		target: headerMatch?.[1] ?? "unknown",
+		target,
 		hackingLevel: headerMatch?.[2] ?? "",
-		targetMode: field(logs, "Target"),
-		state: field(logs, "State"),
+		targetMode: field(logs, "Target") && !compactMode ? field(logs, "Target")
+			: compactMode.split("|")[0]?.trim() || "",
+		state: field(logs, "State") || compactState,
+		health: compactMode ? field(logs, target) : "",
 		money: field(logs, "Money"),
 		security: field(logs, "Security"),
 		income10: field(logs, "Income 10s"),
-		income60: field(logs, "Income 60s"),
-		runTotal: field(logs, "Run total"),
-		model: field(logs, "Model"),
+		income60: field(logs, "Income 60s") || actualIncome,
+		runTotal: field(logs, "Run total") || totalIncome,
+		model: field(logs, "Model") || modelIncome,
 		steal: field(logs, "Steal"),
-		background: field(logs, "Background"),
-		prepRam: field(logs, "Prep RAM"),
-		prepHealth: field(logs, "Prep health"),
-		prepModel: field(logs, "Prep model"),
-		prepNote: field(logs, "Prep note"),
-		ramOnline: field(logs, "RAM online"),
+		background: field(logs, "Background") || nextTarget,
+		prepRam: field(logs, "Prep RAM") || (compactMode ? field(logs, "Prep") : ""),
+		prepHealth: field(logs, "Prep health") || (compactMode ? field(logs, "Health") : ""),
+		prepModel: field(logs, "Prep model") || (compactMode ? field(logs, "Potential") : ""),
+		prepNote: field(logs, "Prep note") || (compactMode ? field(logs, "Progress") : ""),
+		ramOnline: field(logs, "RAM online") || (compactMode ? field(logs, "Fleet") : ""),
 		coreBonus: field(logs, "Core bonus"),
-		pipeRecovery: field(logs, "Pipe recovery"),
+		pipeRecovery: field(logs, "Pipe recovery") || (compactMode ? field(logs, "Scheduler") : ""),
 		restarts: field(logs, "Restarts"),
 		fallback: field(logs, "Fallback"),
 		reason: field(logs, "Reason"),
-		batchRate: field(logs, "Batch rate"),
-		pipeline: field(logs, "Pipeline"),
+		batchRate: field(logs, "Batch rate") || (compactMode ? compactThroughput : ""),
+		pipeline: field(logs, "Pipeline") || (compactMode ? field(logs, "Workload") : ""),
 		batches: field(logs, "Batches"),
-		hackStatus: field(logs, "Hack status"),
+		hackStatus: field(logs, "Hack status") || compactHackStatus,
 		allocator: field(logs, "Allocator"),
 		pipeMisses: field(logs, "Pipe misses"),
-		pipeDrift: field(logs, "Pipe drift"),
+		pipeDrift: field(logs, "Pipe drift") || (compactMode ? field(logs, "Timing") : ""),
 		loopLag: field(logs, "Loop lag"),
 		misses: field(logs, "Misses"),
 		recovery: field(logs, "Recovery"),
