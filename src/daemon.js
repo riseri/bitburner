@@ -4560,6 +4560,10 @@ function renderSchedulerDashboard(ns, pool) {
 	});
 	const totalRam = pool.network.hosts.reduce((n, host) => n + host.maxRam, 0);
 	const prepRam = backgroundPrepRam(pool.cfg.prepStates);
+	const background = pool.cfg.backgroundPrep;
+	const backgroundRam = backgroundPrepRam(background);
+	const repairRam = Math.max(0, prepRam - backgroundRam);
+	const backgroundEta = background?.active ? Math.max(0, background.active.finishAt - now) : 0;
 	const usedRam = totalRunningRam(pool.running) + prepRam + [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
 	const snapshot = {
 		type: "jit-status", version: 2, pid: ns.pid, generatedAt: now,
@@ -4569,6 +4573,16 @@ function renderSchedulerDashboard(ns, pool) {
 		earned: all.reduce((n, p) => n + p.stats.money, 0),
 		model: rows.reduce((n, p) => n + (["LIVE", "WARMUP"].includes(p.mode) ? p.model : 0), 0),
 		usedRam, totalRam, prepRam, note: pool.note, loopLag: pool.lagMax,
+		backgroundPrep: background ? {
+			target: background.target || "", status: background.status || "", reason: background.reason || "",
+			ram: backgroundRam, eta: backgroundEta,
+			health: background.health ? { ...background.health } : null,
+			candidate: background.candidate ? {
+				potential: background.candidate.potential || 0,
+				upperBound: Boolean(background.candidate.upperBound),
+				prepMs: background.candidate.prepMs || 0,
+			} : null,
+		} : null,
 		maxLaunches: pool.cfg.maxLaunches, maxWorkers: pool.cfg.maxWorkers, maxBatchRate: pool.cfg.maxBatchRate,
 		retired: pool.history.map(p => ({ target: p.name, earned: p.stats.money, reason: p.retireReason })),
 	};
@@ -4594,6 +4608,16 @@ function renderSchedulerDashboard(ns, pool) {
 	row("Model", `${cash(snapshot.model)}/s estimate; warmup is not income`);
 	row("Run total", `${cash(snapshot.earned)} earned across all target epochs`);
 	row("Admission", pool.note);
+	dashboardSection(ns, "Background prep / second target");
+	row("Background", `${background?.target || "none"} | ${background?.status || "DISABLED"}` +
+		(background?.active ? ` | ETA ${dashboardTime(backgroundEta)}` : ""));
+	if (background?.health) row("Prep health",
+		`money ${(100 * background.health.money / Math.max(1, background.health.max)).toFixed(1)}%` +
+		` | security +${Math.max(0, background.health.sec - background.health.min).toFixed(3)}`);
+	if (background?.candidate) row("Prep model",
+		`${cash(background.candidate.potential)}/s ${background.candidate.upperBound ? "UPPER BOUND" : "potential estimate"}`);
+	if (backgroundRam > 0) row("Prep RAM", `${formatRam(backgroundRam)} held for second-target prep`);
+	if (background?.reason) row("Prep note", background.reason);
 	dashboardSection(ns, "Independent target pipelines");
 	for (const p of rows) {
 		row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s actual`);
@@ -4622,7 +4646,7 @@ function renderSchedulerDashboard(ns, pool) {
 	row("Home cores", `${homeCores} (${coreBonus(homeCores).toFixed(3)}x growth/weaken bonus)`);
 	row("Budget", `${pool.cfg.maxBatchRate} batches/s | ${pool.cfg.maxLaunches} planned launches/s | ${pool.cfg.maxWorkers} worker slots`);
 	row("Loop lag", `max ${pool.lagMax.toFixed(1)}ms session`);
-	row("Repair RAM", `${formatRam(prepRam)} held separately`);
+	if (repairRam > 0) row("Repair RAM", `${formatRam(repairRam)} held by target recovery`);
 	if (pool.history.length) row("Last retired", `${pool.history.at(-1).name}: ${pool.history.at(-1).retireReason}`);
 	if (!pool.cfg.dashboardDetails) ns.print("  More diagnostics: --dashboard-details true");
 }
