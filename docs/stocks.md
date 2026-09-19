@@ -44,7 +44,7 @@ stock updates are approximately every 6 seconds.
 
 ## Default strategy
 
-`The trader uses 4S forecast and volatility to rank directional opportunities by estimated return per tick. Longs use the normal edge and shorts use the mirrored bearish edge when shorting is unlocked:`
+The trader uses 4S forecast and volatility to rank directional opportunities by estimated return per tick. Longs use the normal edge and shorts use the mirrored bearish edge when shorting is unlocked:
 
 ```text
 edge ~= (2 * forecast - 1) * volatility / 2
