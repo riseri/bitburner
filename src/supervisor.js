@@ -1,7 +1,7 @@
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { loadTelemetry, recordTelemetry, summarizeTelemetry } from "lib/telemetry.js";
-import { dashboardSection, dashboardRow, dashboardTargets, dashboardTime } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
@@ -289,7 +289,7 @@ function render(ns, state) {
 	const go = goStatus?.type === "go-status" ? goStatus : null;
 
 	ns.clearLog();
-	ns.print("BITBURNER AUTOMATION");
+	dashboardTitle(ns, "BITBURNER AUTOMATION");
 	const goal = readSavings(ns);
 	if (goal.floor > 0 || goal.error) {
 		const funds = ns.getServerMoneyAvailable(HOME);
@@ -747,8 +747,8 @@ function field(logs, label) {
 		let value = line.slice(label.length).trim();
 		// New dashboards wrap long values at 78 columns. Rejoin only their
 		// dedicated continuation indent, never the next labeled field or table.
-		for (let j = i + 1; j < logs.length && /^ {17}\S/.test(logs[j]); j++) {
-			value += ` ${logs[j].trim()}`;
+		for (let j = i + 1; j < logs.length && (/^ {17}\S/.test(logs[j]) || /^[║│] {17}\S/.test(logs[j])); j++) {
+			value += ` ${stripPrefix(logs[j]).trim()}`;
 		}
 		return value;
 	}
@@ -764,11 +764,19 @@ function findLog(logs, text) {
 }
 
 function stripPrefix(line) {
+	let text = String(line);
 	for (const marker of ["JIT DAEMON ::", "TARGET ANALYSIS ::"]) {
-		const index = line.indexOf(marker);
-		if (index >= 0) return line.slice(index);
+		const index = text.indexOf(marker);
+		if (index >= 0) {
+			text = text.slice(index);
+			break;
+		}
 	}
-	return line.trimStart();
+	return text.trimStart()
+		.replace(/^[║│]\s?/, "")
+		.replace(/\s*║$/, "")
+		.replace(/\s*[═─]+[╗╢]$/, "")
+		.trimStart();
 }
 
 function processStatus(ns, script) {

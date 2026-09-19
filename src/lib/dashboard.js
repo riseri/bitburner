@@ -1,18 +1,32 @@
 // Text-only presentation helpers. No ports, timers, process control or game state.
 // Keep the same bounded width on Windows and in the supervisor's log window.
+const DASHBOARD_WIDTH = 78;
+const LABEL_WIDTH = 14;
+
 export function dashboardFit(value, width) {
 	const text = String(value ?? "n/a").replace(/\x1b\[[0-9;]*m/g, "");
 	return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 3))}...`;
 }
 
+export function dashboardTitle(ns, title) {
+	// Preserve identifiers/casing in titles because the supervisor also consumes daemon logs.
+	const heading = ` ${String(title)} `;
+	ns.print(`╔═${heading}${"═".repeat(Math.max(0, DASHBOARD_WIDTH - heading.length - 3))}╗`);
+}
+
 export function dashboardSection(ns, title) {
 	const heading = ` ${String(title).toUpperCase()} `;
-	ns.print(heading + "─".repeat(Math.max(0, 78 - heading.length)));
+	// A breathing line matters more than another ornament in Bitburner's dense log windows.
+	ns.print("");
+	ns.print(`╟─${heading}${"─".repeat(Math.max(0, DASHBOARD_WIDTH - heading.length - 3))}╢`);
 }
 
 export function dashboardRow(ns, label, value) {
-	const prefix = `  ${dashboardFit(label, 14).padEnd(14)} `;
-	const width = 78 - prefix.length;
+	// Keep the row schema deliberately simple: the supervisor and simulation tools
+	// consume these same logs, while the title/section bands provide visual structure.
+	const prefix = `  ${dashboardFit(label, LABEL_WIDTH).padEnd(LABEL_WIDTH)} `;
+	const continuation = " ".repeat(prefix.length);
+	const width = DASHBOARD_WIDTH - prefix.length;
 	// Continuations retain the full message instead of hiding the cause of a fault.
 	let rest = String(value ?? "n/a").replace(/\s+/g, " ").trim() || "n/a";
 	let first = true;
@@ -22,7 +36,7 @@ export function dashboardRow(ns, label, value) {
 			const space = rest.lastIndexOf(" ", end);
 			if (space > 0) end = space;
 		}
-		ns.print((first ? prefix : " ".repeat(prefix.length)) + rest.slice(0, end));
+		ns.print((first ? prefix : continuation) + rest.slice(0, end));
 		rest = rest.slice(end).trimStart();
 		first = false;
 	}
@@ -45,11 +59,11 @@ export function dashboardCounters(counters = {}) {
 export function dashboardTargets(ns, targets, limit = 4) {
 	if (!targets?.length) return;
 	dashboardSection(ns, "Auto target ranking / details");
-	ns.print(`  ${"Target".padEnd(22)} ${"Next 10m/s".padStart(13)} ${"Steady/s".padStart(13)} ${"Prep".padStart(9)}`);
+	ns.print(`║ ${"Target".padEnd(22)} ${"Next 10m/s".padStart(13)} ${"Steady/s".padStart(13)} ${"Prep".padStart(9)} ║`);
 	for (const entry of targets.slice(0, limit)) {
 		const rate = value => dashboardFit(String(value ?? "n/a").replace(/\/s$/, ""), 13).padStart(13);
 		const prep = entry.prep === "0ms" ? "ready" : entry.prep;
-		ns.print(`${entry.selected ? ">" : " "} ${dashboardFit(entry.name, 22).padEnd(22)} ` +
-			`${rate(entry.effective)} ${rate(entry.steady)} ${dashboardFit(prep, 9).padStart(9)}`);
+		ns.print(`║${entry.selected ? ">" : " "} ${dashboardFit(entry.name, 22).padEnd(22)} ` +
+			`${rate(entry.effective)} ${rate(entry.steady)} ${dashboardFit(prep, 9).padStart(9)} ║`);
 	}
 }

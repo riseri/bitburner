@@ -12,7 +12,7 @@ import {
 	portfolioMetrics,
 } from "lib/stock-strategy.js";
 import { PORTS } from "lib/ports.js";
-import { dashboardSection, dashboardRow } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow } from "lib/dashboard.js";
 
 const HOME = "home";
 const LONG = "L";
@@ -304,7 +304,7 @@ function render(ns, market, cfg, session, commission, state) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 
 	ns.clearLog();
-	ns.print(`STOCK TRADER :: 4S ${session.canShort ? "LONG + SHORT" : "LONG"}`);
+	dashboardTitle(ns, `STOCK TRADER :: 4S ${session.canShort ? "LONG + SHORT" : "LONG"}`);
 
 	dashboardSection(ns, "Portfolio");
 	row("State", `${state} | tick ${session.ticks}`);

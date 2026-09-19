@@ -1,5 +1,5 @@
 import { runTargetPipelines } from "lib/target-pipelines.js";
-import { dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary } from "lib/background-prep.js";
 
@@ -4474,7 +4474,7 @@ function renderDashboard(
 	const prep = cfg.backgroundPrep;
 
 	ns.clearLog();
-	ns.print(`JIT DAEMON :: ${target} :: hacking ${ns.getHackingLevel()}`);
+	dashboardTitle(ns, `JIT DAEMON :: ${target} :: hacking ${ns.getHackingLevel()}`);
 
 	dashboardSection(ns, "Current run");
 	row("Selection", cfg.requestedTarget === "auto" ? "AUTO" : "LOCKED");
@@ -4651,7 +4651,7 @@ function renderSchedulerDashboard(ns, pool) {
 	}
 	const row = (label, value) => dashboardRow(ns, label, value);
 	ns.clearLog();
-	ns.print(`JIT DAEMON :: MULTI :: hacking ${ns.getHackingLevel()}`);
+	dashboardTitle(ns, `JIT DAEMON :: MULTI :: hacking ${ns.getHackingLevel()}`);
 
 	dashboardSection(ns, "Overview");
 	row("Target slots", `${rows.length}/${pool.cfg.maxTargets} | priority ${pool.anchor}`);
@@ -4734,7 +4734,7 @@ function renderPrep(
 	const row = (label, value) => dashboardRow(ns, label, value);
 
 	ns.clearLog();
-	ns.print(`JIT DAEMON :: PREP :: ${target}`);
+	dashboardTitle(ns, `JIT DAEMON :: PREP :: ${target}`);
 	dashboardSection(ns, "Preparing target");
 	row("Stage", stage);
 	row("Wave", `#${wave} | ETA ${dashboardTime(end ? Math.max(0, end - Date.now()) : 0)}`);

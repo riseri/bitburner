@@ -1,5 +1,5 @@
 import { PORTS } from "lib/ports.js";
-import { dashboardSection, dashboardRow } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow } from "lib/dashboard.js";
 import { SOLVERS, solveContractAsync } from "contract-solvers.js";
 import { contractFiles, contractIdentity, solverRevision, readValidation, readQuarantine, readReceipts, validationBlocker, isContractDummy, contractBoolean, saveContractJson } from "lib/contract-safety.js";
 
@@ -198,7 +198,7 @@ function publish(ns, port, state) {
 
 	const row = (label, value) => dashboardRow(ns, label, value);
 	ns.clearLog();
-	ns.print("CODING CONTRACTS");
+	dashboardTitle(ns, "CODING CONTRACTS");
 
 	dashboardSection(ns, "Status");
 	row("Scanner", `${state.scanning ? "SCANNING" : "IDLE"} | ${state.scans} scans`);

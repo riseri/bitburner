@@ -1,6 +1,6 @@
 import { chooseGoMove } from "lib/go-strategy.js";
 import { PORTS } from "lib/ports.js";
-import { dashboardSection, dashboardRow } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow } from "lib/dashboard.js";
 import { GO_STATE_FILE, GO_OPPONENTS, GO_CYCLE_MS, goConfig, readGoSnapshot, snapshotKey, readGoRecord, saveGoRecord, mayStartGo, assertSameGo, verifyGoReply, inferWhiteReply, daedalusPriorityRng, findDaedalusDistractionWindow } from "lib/go-session.js";
 
 /** Supervisor-managed singleton IPvGO player. Never deployed to the hacking fleet. @param {NS} ns */
@@ -176,7 +176,7 @@ function renderGo(ns, snapshot, session, state, status = null) {
 	publishGoStatus(status, ns, snapshot, session, state, stats, member);
 
 	ns.clearLog();
-	ns.print("IPvGO BOT");
+	dashboardTitle(ns, "IPvGO BOT");
 
 	dashboardSection(ns, "Game");
 	row("State", state);

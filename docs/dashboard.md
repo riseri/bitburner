@@ -4,6 +4,11 @@ Both the daemon and supervisor use a plain-text, 78-column layout. There is no
 HTML overlay, log-window resizing, animation, new status port or faster refresh
 loop. Live income appears before forecasts or target rankings.
 
+The shared layout uses a strong title band, separated section bands, whitespace,
+and a boxed target-ranking table. Labels remain fixed-width and wrapped values
+stay aligned beneath their value column, so the eye can scan vertically without
+losing long warnings or recovery reasons.
+
 ## Default view
 
 The daemon is also summary-first now. Its normal view shows the current target, live state, measured/model income, target health, pipeline size, RAM use, and the background/next target. Low-level recovery counters, timing, thread sizing, fleet internals, and the full auto-target ranking are hidden unless `--dashboard-details true` is enabled. The supervisor remains the broader human-facing overview across hacking, stocks, contracts, progression, IPvGO, and managed services.

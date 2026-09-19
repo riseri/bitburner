@@ -486,7 +486,7 @@ test('dashboard helper wraps errors and keeps the detailed ranking bounded', () 
     assert.equal(f.logs.join('').replace(/Reason| /g, ''), 'X'.repeat(250));
     f.logs.length = 0;
     ui.dashboardTargets(f.ns, [{name:'a'.repeat(100), effective:'$504.03m/s', steady:'$580.34m/s', prep:'ready'}]);
-    assert.match(f.logs[0], /AUTO TARGET RANKING \/ DETAILS/);
+    assert.match(f.logs.join('\n'), /AUTO TARGET RANKING \/ DETAILS/);
     assert.ok(f.logs.every(line => line.length <= 78));
     assert.equal(ui.dashboardTime(Infinity), 'n/a');
     assert.equal(ui.dashboardTime(NaN), 'n/a');
