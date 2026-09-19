@@ -217,7 +217,8 @@ test('steady promotion selects only the weaker stable lane and pauses for trial 
         p.mode = 'RUNNING'; p.trial = false; p.recovery = null; p.drain = null; p.retiring = false;
         p.stats.pipeline.completed = 300; p.stats.lastHackAt = f.clock.now;
     }
-    f.a.runtime.plan.expected = 1000; f.b.runtime.plan.expected = 500;
+    f.a.runtime = { ...f.a.runtime, plan: { ...f.a.runtime.plan, expected: 1000 } };
+    f.b.runtime = { ...f.b.runtime, plan: { ...f.b.runtime.plan, expected: 500 } };
     assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), f.b);
 
     f.b.trial = true;
