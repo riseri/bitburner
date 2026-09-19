@@ -198,7 +198,7 @@ test('stock trader reports actual net realized profit total and per closed trade
   assert.match(log,/Profit total\s+\+/);
   assert.match(log,/Per trade\s+avg \+/);
   assert.match(log,/1W\/0L/);
-  assert.match(log,/SELL AAA .* net \+/);
+  assert.match(log,/SELL LONG AAA .* net \+/);
 });
 
 
