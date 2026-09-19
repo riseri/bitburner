@@ -629,6 +629,8 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 		tickBackgroundPrep(ns, { state: cfg.backgroundPrep, target: anchor.name, activeTargets,
 			blockedTargets: pool.blocked, network: pool.network, cfg, runtime: anchor.runtime, stats: anchor.stats,
 			healthy: productive(anchor, now), allowLaunch: allowPrepLaunch,
+			slotFill: cfg.maxTargets > 1 && !full,
+			availableBatchRate: Math.max(0, cfg.maxBatchRate - anchor.runtime.plan.batchRate),
 			spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
 				now, Infinity, pool.foreign) });
 		const prep = cfg.backgroundPrep;

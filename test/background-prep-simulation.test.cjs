@@ -81,3 +81,27 @@ test('a dead prep worker retries in isolation and daemon exit cancels only its o
     assert.ok(!exit.processes.has(owned.pid));
     assert.ok(jit.every(pid => exit.processes.has(pid)), 'prep exit hook must not kill JIT workers');
 });
+
+
+test('post-reset empty second slot chooses a fast-paying target instead of a long-prep whale', { timeout: 120_000 }, async () => {
+    const sim = new NetscriptSimulation({
+        target: 'phantasy', weakenTime: 78_000, levelPerMinute: 0,
+        mainServer: { max: 600e6, money: 600e6, sec: 7, min: 7, required: 30 },
+        flags: { target: 'phantasy', 'max-targets': 2 },
+        backgroundTargets: {
+            'fast-lane': { max: 1.5e9, money: 1.35e9, sec: 8, min: 7, required: 80, weakenTime: 40_000, chance: .8 },
+            'slow-whale': { max: 4.96e9, money: 100e6, sec: 50, min: 12, required: 300, weakenTime: 300_000, chance: .8 },
+        },
+    });
+    sim.run();
+    await sim.clock.runUntil(sim.start + 8 * 60_000);
+    const status = sim.getPort(17).peek();
+    assert.equal(status.type, 'jit-status');
+    assert.equal(status.pipelines.length, 2, JSON.stringify(status));
+    assert.ok(status.pipelines.some(p => p.target === 'fast-lane'), JSON.stringify(status));
+    assert.ok(!status.pipelines.some(p => p.target === 'slow-whale'), JSON.stringify(status));
+    assert.ok(sim.paid.some(p => p.target === 'fast-lane'),
+        'the acquired second target should already be contributing income inside eight minutes');
+    assert.ok(sim.paid.some(p => p.target === 'phantasy'),
+        'the incumbent must keep earning while the second slot is acquired');
+});

@@ -86,6 +86,43 @@ test('security 100 is an explicitly labeled finite upper-bound candidate', () =>
     assert.ok(candidate.prepMs > 0);
 });
 
+
+test('empty second-slot acquisition accepts additive income below the replacement threshold', () => {
+    const f = fixture();
+    f.servers.modest = { max: 1.5e6, money: 1.35e6, min: 5, sec: 5, required: 60 };
+    const replacement = f.prep.estimateBackgroundCandidate(f.ns, 'modest', f.ctx);
+    assert.equal(replacement, null, 'ordinary replacement scoring still requires switch-threshold upside');
+
+    f.ctx.slotFill = true;
+    f.ctx.availableBatchRate = 1;
+    const additive = f.prep.estimateBackgroundCandidate(f.ns, 'modest', f.ctx);
+    assert.ok(additive, 'a useful additive second earner should be eligible');
+    assert.equal(additive.slotFill, true);
+    assert.ok(additive.potential > f.ctx.runtime.plan.expected * 0.05);
+    assert.ok(additive.potential < f.ctx.runtime.plan.expected * f.cfg.switchThreshold);
+});
+
+test('empty second-slot scoring prefers near-term earnings over a slow two-hour whale', () => {
+    const f = fixture();
+    f.servers.fast = { max: 4e6, money: 3.6e6, min: 5, sec: 5, required: 60 };
+    f.servers.whale = { max: 30e6, money: 1e6, min: 5, sec: 20, required: 80 };
+    const oldW = f.ns.getWeakenTime, oldG = f.ns.getGrowTime;
+    f.ns.getWeakenTime = h => h === 'whale' ? 900_000 : oldW(h);
+    f.ns.getGrowTime = h => h === 'whale' ? 720_000 : oldG(h);
+
+    const replacementFast = f.prep.estimateBackgroundCandidate(f.ns, 'fast', f.ctx);
+    const replacementWhale = f.prep.estimateBackgroundCandidate(f.ns, 'whale', f.ctx);
+    assert.ok(replacementWhale.score > replacementFast.score,
+        'long-horizon replacement scoring should still prefer the whale');
+
+    f.ctx.slotFill = true;
+    f.ctx.availableBatchRate = 1;
+    const fillFast = f.prep.estimateBackgroundCandidate(f.ns, 'fast', f.ctx);
+    const fillWhale = f.prep.estimateBackgroundCandidate(f.ns, 'whale', f.ctx);
+    assert.ok(fillFast.score > fillWhale.score,
+        'empty-slot acquisition should prefer the target that starts paying inside the short horizon');
+});
+
 test('one background worker reaches READY without hacking or touching active PIDs', async () => {
     const f = fixture(); f.select();
     for (let i = 0; i < 40 && f.state.status !== 'READY'; i++) {
