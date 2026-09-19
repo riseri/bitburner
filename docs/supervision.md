@@ -24,7 +24,7 @@ recovery remain visible after the dashboard clears its log.
 
 The daemon is checked for process existence only. Preparation, recovery and slow
 log refreshes are not heartbeat failures. Its bootstrap now leaves an existing
-fleet manager and its budget flags alone. Its startup port validation also reserves the new action channel.
+fleet manager and its budget flags alone. Its startup port validation reserves every supervisor-owned status/action channel, including IPvGO.
 Allocation, timing, event consumption and background preparation are unchanged.
 
 Fleet discovery and contract scanning publish lightweight heartbeats while yielding
@@ -48,11 +48,27 @@ floor. Dry-run, blocked, malformed and stale stock heartbeats do not reserve cas
 This coordination is budget-only: stocks do not own JIT RAM, fleet allocation,
 worker ports or target selection.
 
+## IPvGO service
+
+Port 12 (`PORTS.GO_STATUS`) is reserved for the singleton IPvGO bot. Go automation
+is enabled by default and can be disabled with `--go false`. The supervisor adopts
+an existing `go-bot.js` process and its arguments or launches one with continuous
+defaults; duplicate Go processes remain a conflict rather than being broadly killed.
+
+The Go status channel is informational, not a heartbeat watchdog. Opponent API calls
+can legitimately wait for an unbounded amount of time, so stale Go status never
+causes the supervisor to kill a live game. Ordinary process exits still use bounded
+service restart/backoff. Safety exits are different: the bot publishes terminal
+`go-status` before exiting, and the supervisor marks that exact PID `BLOCKED`
+instead of starting another bot against an uncertain board. Restarting the supervisor
+or explicitly starting a new Go bot is therefore a conscious retry boundary.
+
+
 ## Action protocol
 
 Port 14 (`PORTS.PROGRESSION_ACTION`) is a single request/result slot, separate from
 JIT events (20), fleet status (19), contract status (18), JIT status (17), progression
-status (16) and JIT control (15). Do not reuse it for unrelated scripts.
+status (16), JIT control (15), stock status (13) and Go status (12). Do not reuse it for unrelated scripts.
 
 The planner publishes independent `objectives`, a `planRevision`, and a reset epoch
 made from current BitNode, last BitNode reset and last augmentation reset. Its
