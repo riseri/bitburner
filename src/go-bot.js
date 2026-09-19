@@ -1,4 +1,5 @@
 import { chooseGoMove } from "lib/go-strategy.js";
+import { dashboardSection, dashboardRow } from "lib/dashboard.js";
 import { GO_STATE_FILE, GO_OPPONENTS, GO_CYCLE_MS, goConfig, readGoSnapshot, snapshotKey, readGoRecord, saveGoRecord, mayStartGo, assertSameGo, verifyGoReply, inferWhiteReply, daedalusPriorityRng, findDaedalusDistractionWindow } from "lib/go-session.js";
 
 /** Standalone IPvGO player. Never launched by the supervisor or deployed to the fleet. @param {NS} ns */
@@ -152,38 +153,48 @@ async function startGame(ns, cfg, previous) {
 function renderGo(ns, snapshot, session, state) {
 	const stats = ns.go.analysis.getStats()[snapshot.opponent];
 	const member = ns.getPlayer().factions.includes(snapshot.opponent);
+	const row = (label, value) => dashboardRow(ns, label, value);
+
 	ns.clearLog();
 	ns.print("IPvGO BOT");
-	ns.print(`  State          ${state}`);
-	ns.print(`  Opponent       ${snapshot.opponent} | ${snapshot.board.length}x${snapshot.board.length}`);
-	ns.print(`  Score          You ${snapshot.game.blackScore} | Opponent ${snapshot.game.whiteScore} (includes komi)`);
-	ns.print(`  This session   ${session.games} games | ${session.wins} wins | ${session.losses} losses | ${session.moves} turns played`);
+
+	dashboardSection(ns, "Game");
+	row("State", state);
+	row("Opponent", `${snapshot.opponent} | ${snapshot.board.length}x${snapshot.board.length}`);
+	row("Score", `you ${snapshot.game.blackScore} | opponent ${snapshot.game.whiteScore} (komi included)`);
+	row("Session", `${session.games} games | ${session.wins} wins | ${session.losses} losses | ${session.moves} moves`);
 	if (session.games) {
-		ns.print(`  Score margin    ${(session.margin / session.games).toFixed(2)} avg points/game`);
 		const avgGameMs = session.gameMs / session.games;
 		const scorePerMinute = session.gameMs > 0 ? session.score / (session.gameMs / 60_000) : 0;
-		ns.print(`  Farm pace       ${(avgGameMs / 1000).toFixed(1)}s/game | ${scorePerMinute.toFixed(1)} black score/min`);
+		row("Pace", `${(avgGameMs / 1000).toFixed(1)}s/game | ${scorePerMinute.toFixed(1)} score/min | ${(session.margin / session.games).toFixed(2)} avg margin`);
 	}
-	ns.print(`  Last action    ${session.last}`);
+	row("Last action", session.last);
+
 	if (session.analysis) {
 		const a = session.analysis;
-		ns.print(`  Analysis       ${a.considered} roots | ${a.nodes ?? a.replies} search nodes | ${a.cpuMs.toFixed(1)}ms CPU estimate${a.limited ? " | budget reached" : ""}`);
-		ns.print(`  Projection     ${Number(a.projected ?? 0).toFixed(1)} immediate area margin`);
+		dashboardSection(ns, "Decision");
+		row("Search", `${a.considered} roots | ${a.nodes ?? a.replies} nodes | ${a.cpuMs.toFixed(1)}ms${a.limited ? " | budget reached" : ""}`);
+		row("Projection", `${Number(a.projected ?? 0).toFixed(1)} immediate area margin`);
 	}
-	if (session.rngAttempts) {
-		const r = session.rng;
-		const last = r ? `${r.armed ? "ARMED" : "MISS"} | last wait ${(r.waitedMs / 1000).toFixed(1)}s` : "not needed on final pass";
-		ns.print(`  RNG rig        ${session.rngSnipes}/${session.rngAttempts} armed | ${last} | total wait ${(session.rngWaitMs / 1000).toFixed(1)}s`);
-		if (r?.priority?.length) ns.print(`  Daedalus RNG   ${r.priority.map(value => value.toFixed(3)).join(" / ")} priority samples`);
-	}
+
 	if (stats) {
-		ns.print(`  Game records   ${stats.wins} wins | ${stats.losses} losses | streak ${stats.winStreak}`);
-		ns.print(`  Actual bonus   +${Number(stats.bonusPercent).toFixed(3)}% ${stats.bonusDescription}`);
+		dashboardSection(ns, "Rewards");
+		row("Record", `${stats.wins} wins | ${stats.losses} losses | streak ${stats.winStreak}`);
+		row("Node bonus", `+${Number(stats.bonusPercent).toFixed(3)}% | ${stats.bonusDescription}`);
 		const elapsedHours = Math.max(1, Date.now() - session.startedAt) / 3_600_000;
 		const bonusRate = (Number(stats.bonusPercent) - session.startBonus) / elapsedHours;
-		ns.print(`  Bonus pace      ${bonusRate >= 0 ? "+" : ""}${bonusRate.toFixed(3)}%/hour this session`);
-		ns.print(`  Favor credit   ${stats.rep} rep-equivalent (game-reported cumulative credit, not current faction rep)`);
+		row("Bonus pace", `${bonusRate >= 0 ? "+" : ""}${bonusRate.toFixed(3)}%/hour this session`);
+		row("Faction", member ? "Joined; qualifying win streaks can award favor" : "Not joined; node-power bonus still applies");
 	}
-	ns.print(`  Membership     ${member ? "Joined opponent faction; qualifying win streaks can award favor" : "Not joined; node-power bonus still applies, direct faction favor does not"}`);
-	ns.print(`  Safety         Stop this bot before playing manually. Resume record: ${GO_STATE_FILE}`);
+
+	if (session.rngAttempts) {
+		dashboardSection(ns, "Daedalus timing");
+		const r = session.rng;
+		const last = r ? `${r.armed ? "ARMED" : "MISS"} | last wait ${(r.waitedMs / 1000).toFixed(1)}s` : "not needed on final pass";
+		row("RNG attempts", `${session.rngSnipes}/${session.rngAttempts} armed | ${last} | total wait ${(session.rngWaitMs / 1000).toFixed(1)}s`);
+	}
+
+	dashboardSection(ns, "Safety");
+	row("Manual play", `Stop this bot first | resume state: ${GO_STATE_FILE}`);
 }
+
