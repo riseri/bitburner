@@ -64,9 +64,9 @@ test('IPvGO default run completes a Daedalus game and leaves the final board int
     const f=fixture();await api.main(f.ns);
     assert.deepEqual(f.terminal,[]);assert.equal(f.world.currentPlayer,'None');
     assert.equal(f.calls.filter(v=>v==='reset').length,1);
-    assert.match(f.logs.join('\\n'),/GAME COMPLETE/);assert.match(f.logs.join('\\n'),/1 games/);
-    assert.match(f.logs.join('\\n'),/Actual bonus\s+\+1.234%/);
-    assert.match(f.logs.join('\\n'),/Not joined/);
+    assert.match(f.logs.join('\n'),/GAME COMPLETE/);assert.match(f.logs.join('\n'),/1 games/);
+    assert.match(f.logs.join('\n'),/Actual bonus\s+\+1.234%/);
+    assert.match(f.logs.join('\n'),/Not joined/);
     assert.equal(JSON.parse(f.files.get('go-bot-state.txt')).phase,'complete');
     assert.equal(f.status.value.type,'go-status');assert.equal(f.status.value.state,'GAME COMPLETE');
     assert.equal(f.status.value.producerPid,42);
@@ -78,7 +78,7 @@ test('IPvGO defaults to fast pacing with RNG sniping disabled',async()=>{
     assert.deepEqual(f.terminal,[]);
     assert.ok(observed.includes(25),'expected 25ms turn pacing');
     assert.ok(observed.includes(1),'expected 1ms cooperative search yields');
-    assert.doesNotMatch(f.logs.join('\\n'),/RNG rig/);
+    assert.doesNotMatch(f.logs.join('\n'),/RNG rig/);
 });
 
 test('IPvGO repeat mode resets only after verified completion',async()=>{
@@ -87,7 +87,7 @@ test('IPvGO repeat mode resets only after verified completion',async()=>{
         if(resets++)assert.equal(f.world.currentPlayer,'None');return reset(...args);
     };
     await api.main(f.ns);assert.deepEqual(f.terminal,[]);assert.equal(resets,2);
-    assert.match(f.logs.join('\\n'),/2 games/);
+    assert.match(f.logs.join('\n'),/2 games/);
 });
 test('IPvGO refuses an unowned manual game by default',async()=>{
     const f=fixture();f.play('X',2,2);f.white();const board=[...f.world.board];
@@ -182,7 +182,7 @@ test('IPvGO verifies full history, not only the visible board',()=>{
 });
 test('IPvGO runtime contains no scheduler, cheat, reset-stats, or testing-board mutations',()=>{
     const fs=require('node:fs'),path=require('node:path');
-    const sources=['go-bot.js','lib/go-session.js','lib/go-strategy.js'].map(p=>fs.readFileSync(path.join(__dirname,'../src',p),'utf8')).join('\\n');
+    const sources=['go-bot.js','lib/go-session.js','lib/go-strategy.js'].map(p=>fs.readFileSync(path.join(__dirname,'../src',p),'utf8')).join('\n');
     for(const re of [/ns\.singularity/,/ns\.go\.cheat/,/ns\.(kill|scriptKill|killall|exec|run)\s*\(/,/setTestingBoardState\s*\(/,/resetStats\s*\(/,/\b(document|window)\b/])assert.doesNotMatch(sources,re);
 });
 
@@ -210,7 +210,7 @@ test('IPvGO a slow opponent is awaited once with no heartbeat-triggered restart'
 test('IPvGO completed boards are not counted a second time when a new run starts',async()=>{
     const f=fixture();f.play('X');f.play('O');
     await api.main(f.ns);assert.deepEqual(f.terminal,[]);assert.equal(f.calls.filter(c=>c==='reset').length,1);
-    assert.match(f.logs.join('\\n'),/1 games/);
+    assert.match(f.logs.join('\n'),/1 games/);
 });
 test('IPvGO an invalid observed reply cannot cause another move',async()=>{
     const f=fixture();f.ns.go.makeMove=async()=>({type:'surprise',x:null,y:null});
@@ -227,7 +227,7 @@ test('IPvGO arms a Daedalus distraction window before committing moves',async()=
     f.ns.sleep=async ms=>{if(ms>=200)playtime+=Math.floor(ms/200)*200;return baseSleep(ms);};
     await api.main(f.ns);
     assert.deepEqual(f.terminal,[]);
-    const log=f.logs.join('\\n');
+    const log=f.logs.join('\n');
     assert.match(log,/RNG rig\s+\d+\/\d+ armed/);
     assert.match(log,/Daedalus RNG\s+0\.9/);
 });
