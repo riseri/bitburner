@@ -61,7 +61,7 @@ class Port {
 }
 
 function loadScript(file, clock, extra = {}) {
-    if (file === 'daemon.js' || file === 'supervisor.js') {
+    if (['daemon.js', 'supervisor.js', 'contract-manager.js', 'stock-trader.js'].includes(file)) {
         extra = { ...loadScript('lib/dashboard.js', clock), ...extra };
     }
     if (['daemon.js', 'lib/target-pipelines.js'].includes(file) && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
