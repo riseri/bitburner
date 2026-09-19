@@ -1,8 +1,9 @@
 # 4S stock money printer
 
-`stock-trader.js` is a standalone, long-only stock trader for the World Stock
-Exchange. It intentionally does not run from the supervisor and does not share
-ports or RAM ownership with the JIT daemon.
+`stock-trader.js` is a long-only stock trader for the World Stock Exchange. The
+normal deployment is supervisor-managed, while direct standalone runs remain
+supported for smoke tests and dry runs. It has its own status port and does not
+share JIT worker/control ports or RAM ownership with the hacking daemon.
 
 ## Hard access gate
 
