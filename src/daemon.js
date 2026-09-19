@@ -4705,9 +4705,13 @@ function renderPrep(
 		row("Waves left", `~${wavesLeft} | ~${projectedMultiplier.toFixed(2)}x growth this wave`);
 	}
 	dashboardSection(ns, "Fleet");
-	row("RAM", `${formatRam(usedRam)} / ${formatRam(totalRam)}`);
-	row("Network", `${network.rooted}/${network.servers.length} rooted | ${network.hosts.length} hosts`);
-	if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, cfg.dashboardDetails ? 6 : 4);
+	row("Fleet", `${formatRam(usedRam)} / ${formatRam(totalRam)} used | ${network.hosts.length} worker hosts`);
+	if (cfg.dashboardDetails) {
+		row("Network", `${network.rooted}/${network.servers.length} rooted`);
+		if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, 6);
+	} else {
+		ns.print("  More diagnostics: --dashboard-details true");
+	}
 }
 
 /* =========================================================
