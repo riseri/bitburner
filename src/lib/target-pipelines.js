@@ -129,12 +129,10 @@ export async function runTargetPipelines(ns, setup, api) {
 			for (const slot of pool.launchBuckets.keys()) if (slot < Math.floor((now - 1000) / BUCKET_MS)) pool.launchBuckets.delete(slot);
 		}
 
-		// Give bounded maintenance/tuning the quiet window before planning another
-		// income batch. Planning first can continuously consume every >50ms gap
-		// and starve second-target tuning even after discovery succeeds.
-		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50) {
-			servicePipelineMaintenance(ns, pool);
-		}
+		// Discovery and initial trial tuning get a bounded liveness opportunity
+		// before another incumbent batch is planned. Recovery/repair maintenance
+		// keeps its original ordering so a rebuilding support lane cannot steal
+		// the incumbent's scheduling cadence.
 		serviceAdmissionOpportunity(ns, pool);
 		// Budget is shared, not multiplied by the number of targets. Never queue
 		// new work in front of an already committed due launch or worker event.
@@ -142,6 +140,9 @@ export async function runTargetPipelines(ns, setup, api) {
 			planPipelineBatch(ns, pool);
 		}
 		if (pool.port.empty()) launchPipelineChunks(ns, pool);
+		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50) {
+			servicePipelineMaintenance(ns, pool);
+		}
 		if (now - pool.lastMonitor >= 1000) {
 			pool.lastMonitor = now;
 			monitorPipelineLoad(ns, pool, now);
@@ -451,6 +452,30 @@ function replanIdlePipeline(ns, pool, p, now) {
 	return true;
 }
 
+function servicePipelineTuning(ns, pool, p) {
+	const { api } = pool;
+	if (p.mode !== "TUNING" || Date.now() < p.nextRetry) return false;
+	if (!api.targetHealth(ns, p.name).clean) {
+		p.tuner = null;
+		if (p.trial) beginPipelineDrain(pool, p,
+			{ kind: "drain", hard: true, reason: "prepared candidate became dirty before admission" }, true);
+		else p.mode = "PREPARING";
+		return true;
+	}
+	if (!p.tuner) beginPipelineTuning(ns, pool, p);
+	if (!p.tuner) return true;
+	const step = p.tuner.next(); // at most 32 candidate periods per step
+	if (step.done) {
+		p.tuner = null;
+		if (!step.value) {
+			p.note = "No plan fits shared limits; retrying later";
+			p.nextRetry = Date.now() + (p.idleReplanning ? Math.min(IDLE_REPLAN_MAX_BACKOFF_MS,
+				30_000 * 2 ** Math.min(4, p.idleFailures++)) : 30_000);
+		} else activatePipeline(ns, pool, p, step.value, p.stats.restarts > 0);
+	}
+	return true;
+}
+
 function servicePipelineMaintenance(ns, pool) {
 	const { api } = pool;
 	for (const p of pool.pipelines.values()) {
@@ -496,27 +521,7 @@ function servicePipelineMaintenance(ns, pool) {
 			} else if (p.repair.status === "ERROR") p.note = `Repair stopped: ${p.repair.error}`;
 			return;
 		}
-		if (p.mode === "TUNING" && Date.now() >= p.nextRetry) {
-			if (!api.targetHealth(ns, p.name).clean) {
-				p.tuner = null;
-				if (p.trial) beginPipelineDrain(pool, p,
-					{ kind: "drain", hard: true, reason: "prepared candidate became dirty before admission" }, true);
-				else p.mode = "PREPARING";
-				return;
-			}
-			if (!p.tuner) beginPipelineTuning(ns, pool, p);
-			if (!p.tuner) return;
-			const step = p.tuner.next(); // at most 32 candidate periods per step
-			if (step.done) {
-				p.tuner = null;
-				if (!step.value) {
-					p.note = "No plan fits shared limits; retrying later";
-					p.nextRetry = Date.now() + (p.idleReplanning ? Math.min(IDLE_REPLAN_MAX_BACKOFF_MS,
-						30_000 * 2 ** Math.min(4, p.idleFailures++)) : 30_000);
-				} else activatePipeline(ns, pool, p, step.value, p.stats.restarts > 0);
-			}
-			return;
-		}
+		if (servicePipelineTuning(ns, pool, p)) return;
 		// Elective work must never take down the other earner during a peer's
 		// initial trial, recovery or warmup. Only the affected target is drained.
 		const peerBusy = [...pool.pipelines.values()].some(other => other !== p &&
@@ -580,6 +585,14 @@ export function serviceAdmissionOpportunity(ns, pool) {
 	if (slack <= 5) return false;
 	pool.nextAdmissionService = now + 100;
 	serviceBackgroundAndAdmission(ns, pool, slack > 50);
+	// Only initial trial tuning gets this pre-planning liveness lane. Established
+	// targets in recovery/repair remain on normal maintenance ordering so they
+	// cannot reduce the healthy incumbent's cadence.
+	if (slack > 20) {
+		const trial = [...pool.pipelines.values()].find(p =>
+			p.trial && p.mode === "TUNING" && !p.recovery && !p.drain);
+		if (trial) servicePipelineTuning(ns, pool, trial);
+	}
 	return true;
 }
 
