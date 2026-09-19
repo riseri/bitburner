@@ -104,3 +104,32 @@ test('already-ready targets can fill both slots after restart and owner shutdown
     assert.ok(owned.every(pid=>!sim.processes.has(pid)));
     assert.ok(sim.processes.has(outsider.pid));
 });
+
+
+test('steady promotion replaces the weaker bootstrap lane with a richer prepped target', { timeout: 180_000 }, async () => {
+    const sim = new NetscriptSimulation({
+        target: 'phantasy', weakenTime: 78_000, levelPerMinute: 0,
+        mainServer: { max: 600e6, money: 600e6, sec: 7, min: 7, required: 30, chance: .8 },
+        flags: { target: 'phantasy', 'max-targets': 2 },
+        backgroundTargets: {
+            'fast-lane': { max: 1.5e9, money: 1.35e9, sec: 8, min: 7, required: 80, weakenTime: 40_000, chance: .8 },
+            'slow-whale': { max: 4.96e9, money: 250e6, sec: 20, min: 12, required: 300, weakenTime: 120_000, chance: .8 },
+        },
+    });
+    sim.run();
+    await sim.clock.runUntil(sim.start + 28 * 60_000);
+    assertSound(sim);
+    const final = state(sim);
+    assert.equal(final.pipelines.length, 2, JSON.stringify(final));
+    assert.ok(final.pipelines.some(p => p.target === 'fast-lane'), JSON.stringify(final));
+    assert.ok(final.pipelines.some(p => p.target === 'slow-whale'), JSON.stringify(final));
+    assert.ok(!final.pipelines.some(p => p.target === 'phantasy'), JSON.stringify(final));
+    assert.ok(final.retired.some(p => p.target === 'phantasy' && /steady-state promotion/.test(p.reason)),
+        JSON.stringify(final.retired));
+    assert.ok(sim.paid.some(p => p.target === 'slow-whale'),
+        'the promoted whale should contribute paid income');
+    assert.ok(sim.snapshots.every(s => s.pipelines.length <= 2),
+        'promotion must never create a third JIT pipeline');
+    assert.ok(sim.paid.some(p => p.target === 'fast-lane' && p.at >= sim.clock.now - 120_000),
+        'the surviving lane should keep earning through the promotion handoff');
+});
