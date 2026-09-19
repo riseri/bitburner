@@ -4477,7 +4477,7 @@ function renderDashboard(
 	ns.print(`JIT DAEMON :: ${target} :: hacking ${ns.getHackingLevel()}`);
 
 	dashboardSection(ns, "Current run");
-	row("Target", cfg.requestedTarget === "auto" ? "AUTO" : "LOCKED");
+	row("Selection", cfg.requestedTarget === "auto" ? "AUTO" : "LOCKED");
 	row("State", state);
 	row("Hack status", hackStatus);
 	if (drain || recovery) row("Reason", (drain || recovery).reason);
