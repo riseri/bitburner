@@ -142,9 +142,12 @@ function orderedMoves(board, color, history, komi, limit = Infinity, rootMask = 
 			if (group.liberties.size > 1 && after.liberties.size === 1) threatened += group.points.length;
 		}
 		const ownAtari = result.own.liberties.size === 1 && !result.captured;
+		const region = before.groups[before.ids[x][y]];
+		if (!result.captured && !saved && !threatened && simpleEye(board, x, y, color)) continue;
+		if (!result.captured && !saved && !threatened && region.borders.size === 1 &&
+			region.borders.has(color) && region.points.length <= board.length) continue;
 		let order = 28 * result.captured + 20 * saved + 8 * threatened + 1.5 * result.own.liberties.size + 3 * Math.max(0, friends.length - 1);
 		if (ownAtari) order -= 36 + result.own.points.length * 9;
-		if (!result.captured && !saved && simpleEye(board, x, y, color)) order -= 30;
 		const edge = Math.min(x, y, board.length - 1 - x, board.length - 1 - y);
 		if (board.length === 5) order += edge === 1 ? 3 : edge === 0 ? -1.5 : 1;
 		const reason = result.captured ? `capture ${result.captured}` : saved ? `save ${saved} threatened stones`
