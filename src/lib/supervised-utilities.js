@@ -75,7 +75,7 @@ export async function updateSupervisorSavings(ns, cfg, plan) {
             if (plan.next) desired = { amount: plan.next.price / (1 - cfg.augmentationCashReserve),
                 label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };
             cfg.savingsStatus = plan.next ? `Programs complete; saving for ${plan.next.name}` : "Programs and planned augmentations complete";
-        } else cfg.savingsStatus = "All port programs owned";
+        } else cfg.savingsStatus = "All automatic program unlocks owned";
     } else if (cfg.savingsMode === "augmentations") {
         if (!plan || plan.errors?.length) { cfg.savingsStatus = "Waiting for a fresh, complete augmentation plan"; return; }
         if (plan.next) desired = { amount: plan.next.price, label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };

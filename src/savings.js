@@ -9,7 +9,7 @@ export async function main(ns) {
     if (f.clear) await writeSavings(ns, 0, "No savings goal");
     else if (f["next-program"]) {
         const p = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms().find(p => !ns.fileExists(p.name, "home"));
-        if (!p) { ns.tprint("All port programs owned; existing savings goal unchanged."); return; }
+        if (!p) { ns.tprint("All automatic program unlocks owned; existing savings goal unchanged."); return; }
         // Include the default progression reserve; the purchase actor rechecks the live price.
         await writeSavings(ns, p.cost / 0.9, `Buy ${p.name}`, p.name);
     } else if (Number(f.amount) !== -1) await writeSavings(ns, Number(f.amount), f.label, f.target);

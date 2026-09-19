@@ -9,4 +9,6 @@ export const PORTS = Object.freeze({
 	STOCK_STATUS: 13,
 	GO_STATUS: 12,
 	AUGMENTATION_STATUS: 11,
+	DARKNET_STATUS: 10,
+	DARKNET_EVENTS: 9,
 });

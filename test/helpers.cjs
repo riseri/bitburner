@@ -62,6 +62,7 @@ class Port {
 
 function loadScript(file, clock, extra = {}) {
     if (['progression-manager.js', 'augmentation-manager.js'].includes(file)) extra = { ...loadScript('lib/augmentation-loop.js', clock), ...extra };
+    if (file === 'darknet-agent.js') extra = { ...loadScript('lib/darknet-solvers.js', clock), ...extra };
     if (file === 'augmentation-manager.js') extra = { ...loadScript('lib/augmentation-plan.js', clock), ...extra };
     if (file === 'lib/supervised-utilities.js') extra = { ...loadScript('lib/savings.js', clock), ...loadScript('lib/progression-protocol.js', clock), ...extra };
     if (file === 'lib/utility-report.js') extra = { ...loadScript('lib/progression-protocol.js', clock), ...extra };
@@ -79,7 +80,7 @@ function loadScript(file, clock, extra = {}) {
     if (['daemon.js', 'lib/target-pipelines.js'].includes(file) && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
         extra = { ...loadScript('lib/background-prep.js', clock), ...extra };
     }
-    if (['supervisor.js', 'progression-manager.js', 'progression-purchase.js', 'augmentation-manager.js',
+    if (['supervisor.js', 'progression-manager.js', 'progression-purchase.js', 'augmentation-manager.js', 'darknet-manager.js',
         'progression-backdoor.js', 'lib/progression-dispatch.js'].includes(file)) {
         extra = { ...loadScript('lib/progression-protocol.js', clock), ...extra };
     }
@@ -94,7 +95,7 @@ function loadScript(file, clock, extra = {}) {
     const sandbox = {
         console, Date: class extends Date { static now() { return clock.now; } },
         setTimeout: (fn, ms) => clock.timer(ms, fn),
-        PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15, PROGRESSION_ACTION: 14, STOCK_STATUS: 13, GO_STATUS: 12, AUGMENTATION_STATUS: 11 },
+        PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15, PROGRESSION_ACTION: 14, STOCK_STATUS: 13, GO_STATUS: 12, AUGMENTATION_STATUS: 11, DARKNET_STATUS: 10, DARKNET_EVENTS: 9 },
         ...extra,
     };
     vm.createContext(sandbox);

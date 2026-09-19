@@ -1,6 +1,6 @@
 # Bitburner automation
 
-Two-target JIT hacking, fleet management, contracts, 4S trading, IPvGO, and opt-in
+Two-target JIT hacking, fleet management, contracts, 4S trading, IPvGO, Darknet exploration, and opt-in
 program, backdoor, faction-work, augmentation-purchase, and reset actions.
 `supervisor.js` owns service restarts and the dashboard.
 
@@ -14,7 +14,8 @@ their own requirements. BN means your **current BitNode**; SF means an owned
 | --- | --- | --- |
 | Supervisor, hacking, fleet management, contracts, diagnostics, telemetry | No specific BN or SF gate in this repo; sufficient RAM and the relevant servers/APIs must be available | Normal resource and capability limits still apply |
 | Progression status and recommendations | No Singularity requirement | Reports missing programs/backdoors; does not execute actions |
-| `--progression-actions true`: TOR/program purchases and faction backdoors | **BN4 or SF4 level 1+** (Singularity) | Actions are blocked; other services continue |
+| `--progression-actions true`: TOR/program purchases, DarkscapeNavigator, and faction backdoors | **BN4 or SF4 level 1+** (Singularity) | Actions are blocked; other services continue |
+| Darknet exploration | `DarkscapeNavigator.exe`, or BN15/SF15 access that grants it | Coordinator reports `LOCKED`; other services continue |
 | Automatic program savings (`--savings auto` or `programs`) | **BN4 or SF4 level 1+**, plus enabled progression and `--progression-actions true` | Waits instead of creating a new automatic program goal |
 | Augmentation planning (`--augmentations true`, `--augmentation-focus`, `--augmentation-target`, or standalone planner) | **BN4 or SF4 level 1+** | Planner shows `BLOCKED: Singularity is locked` |
 | Augmentation loop (`--augmentation-actions true`) | **BN4 or SF4 level 1+** | Reports how to unlock Singularity and performs no actions |
@@ -122,9 +123,16 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--cloud-roi` / `--cloud-payback` | `true` / `1800` | Fleet investment policy for newly started fleet managers |
 | `--telemetry` | `true` | Record history and show a rolling one-hour summary |
 | `--home-reserve` | `8` | Minimum daemon reserve; automatically raised for optional helper RAM |
+| `--darknet` / `--darknet-phish` | `true` / `true` | Supervise resilient exploration, cache collection, RAM reclamation, and idle phishing after Darkscape unlock |
+| `--darknet-phish-threads` / `--darknet-max-attempts` | `1024` / `600` | Bound per-server phishing workers and password attempts |
+| `--darknet-stasis` / `--darknet-stasis-depth` | `false` / `8` | Opt in to scarce stasis links on sufficiently deep servers |
+| `--darknet-migrate` / `--darknet-migrate-depth` | `false` / `8` | Opt in to induced migration of deep movable neighbors |
+| `--darknet-promote-stock` / `--darknet-stock-symbols` | `false` / `auto` | Opt in to volatility promotion for held or explicitly listed symbols |
+| `--darknet-freeze-unknown` / `--darknet-freeze-depth` | `false` / `0` | Destructively freeze unsolved servers; they lose all RAM and experience |
+| `--darknet-storm-seed` | `false` | Execute a discovered `STORM_SEED.exe`; catastrophic and deliberately never profile-enabled |
 
-Savings modes: `auto` advances through TOR and missing port openers, then follows
-the augmentation loop when it is enabled; `programs` stops after the port openers;
+Savings modes: `auto` advances through TOR, missing port openers, and `DarkscapeNavigator.exe`, then follows
+the augmentation loop when it is enabled; `programs` stops after the Darknet unlock;
 `augmentations` follows the next fresh, complete augmentation recommendation;
 `keep` preserves the current goal without automatic updates; `none` clears it at
 startup and disables automatic updates. Active manual goals are preserved by
@@ -155,12 +163,28 @@ One goal at a time, stored in `data/savings.json` on home. Setting a goal replac
 the previous one. Fleet, stock entries and progression purchases preserve its
 absolute cash floor in addition to their own reserve policies. Stock exits and
 free backdoors remain allowed. `--next-program` saves for TOR or the next missing
-port opener, including the default 10% progression reserve. It is a one-time goal,
+program unlock, including the default 10% progression reserve. It is a one-time goal,
 not automatic advancement through every program. The matching actor may spend
 the protected funds; once owned, that goal becomes inactive. Other goals stay
 protected until manually cleared/replaced. Goals become inactive after an
 augmentation or BitNode reset. Corrupt configuration blocks spending until fixed.
 Manual purchases and scripts outside this repo do not obey this policy.
+
+## Explore the Darknet
+
+Darknet automation starts automatically once `DarkscapeNavigator.exe` is owned. The
+home coordinator keeps reset-bound discoveries and credentials in
+`data/darknet-state.json`; disposable agents spread neighbor-to-neighbor because
+Darknet probing and execution are local and servers can move, restart, or disappear.
+Agents solve every current upstream server-model family, traverse the Labyrinth,
+reclaim blocked RAM, open caches, and use otherwise-idle RAM for phishing. Darknet
+RAM is intentionally separate from the timing-sensitive JIT allocator.
+
+The ordinary `observe`, `assist`, and `hands-off` profiles enable exploration,
+loot, and phishing but do not enable consequential topology mutations. Stasis,
+migration, stock promotion, freezing, and Storm Seed each require their explicit
+flag. Freezing destroys the target's RAM and experience; Storm Seed can catastrophically
+alter the network. Stop and restart the supervisor to change these policies.
 
 The dashboard shows protected cash and an approximate ETA using gross hacking
 income. It excludes future stock returns and other spending. This does not force

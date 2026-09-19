@@ -152,11 +152,11 @@ test('informational status channels never restart a live service for stale statu
 
 test('new dependent managers and daemon follow an adopted custom fleet port', () => {
     const api=loadScript('supervisor.js',new Clock());
-    const services=api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',11,'--cloud',false]}]},
+    const services=api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',8,'--cloud',false]}]},
         {contracts:true,progression:true},['--background-prep',false]);
     for(const name of ['daemon.js','contract-manager.js','progression-manager.js']) {
         const args=services.find(s=>s.name===name).args;
-        assert.equal(args[args.indexOf('--fleet-port')+1],11,name);
+        assert.equal(args[args.indexOf('--fleet-port')+1],8,name);
     }
 });
 
@@ -268,7 +268,7 @@ test('missing market access blocks stock service without restart backoff', () =>
 test('an inconsistent existing daemon/fleet pair fails before starting dependents', () => {
     const api=loadScript('supervisor.js',new Clock());
     assert.throws(()=>api.createManagedServices({ps:()=>[
-        {filename:'fleet-manager.js',pid:9,args:['--port',11]},
+        {filename:'fleet-manager.js',pid:9,args:['--port',8]},
         {filename:'daemon.js',pid:10,args:[]},
     ]},{contracts:true,progression:true},[]),/different fleet ports/);
 });

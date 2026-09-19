@@ -21,7 +21,8 @@ export function diagnoseAutomation(ns) {
     const processes = ns.ps("home"), issues = [], visited = new Set();
     const entries = ["supervisor.js", "daemon.js", "fleet-manager.js", "contract-manager.js", "progression-manager.js",
         "stock-trader.js", "go-bot.js", "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js",
-        "progression-purchase.js", "progression-backdoor.js", "jit-hack.js", "jit-grow.js", "jit-weaken.js"];
+        "progression-purchase.js", "progression-backdoor.js", "darknet-manager.js", "darknet-agent.js", "darknet-phish.js",
+        "jit-hack.js", "jit-grow.js", "jit-weaken.js"];
     const inspect = file => {
         if (visited.has(file)) return;
         visited.add(file);
@@ -38,7 +39,7 @@ export function diagnoseAutomation(ns) {
         if (!ram) issues.push(`RAM analysis failed or missing: ${file}`);
         if (active.length > 1 && !file.startsWith("jit-")) issues.push(`Duplicate ${file}: PIDs ${active.map(p => p.pid).join(", ")}`);
         if (!active.length && !file.startsWith("jit-") && !["progression-purchase.js", "progression-backdoor.js",
-            "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js"].includes(file)) additionalRam += ram;
+            "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js", "darknet-agent.js", "darknet-phish.js"].includes(file)) additionalRam += ram;
         lines.push(`${file}: ${ram.toFixed(2)} GB | ${active.length ? active.map(p => `PID ${p.pid} ${JSON.stringify(p.args)}`).join("; ") : "stopped"}`);
     }
     const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
@@ -52,14 +53,14 @@ export function diagnoseAutomation(ns) {
     };
     const fleet = processes.find(p => p.filename === "fleet-manager.js"), daemon = processes.find(p => p.filename === "daemon.js");
     if (fleet && daemon && customPort(fleet) !== customPort(daemon)) issues.push("Daemon and fleet manager disagree on fleet port");
-    const servicePorts = { "fleet-manager.js": 19, "contract-manager.js": 18, "progression-manager.js": 16, "stock-trader.js": 13, "go-bot.js": 12, "augmentation-manager.js": 11 };
+    const servicePorts = { "fleet-manager.js": 19, "contract-manager.js": 18, "progression-manager.js": 16, "stock-trader.js": 13, "go-bot.js": 12, "augmentation-manager.js": 11, "darknet-manager.js": 10 };
     const argument = (process, flag, fallback) => {
         const index = process?.args.indexOf(flag) ?? -1;
         return index >= 0 ? Number(process.args[index + 1]) : fallback;
     };
     const claims = new Map();
     for (const [port, owner] of [[argument(daemon, "--port", 20), "worker events"], [17, "JIT status"],
-        [argument(daemon, "--control-port", 15), "JIT control"], [14, "progression actions"]]) {
+        [argument(daemon, "--control-port", 15), "JIT control"], [14, "progression actions"], [9, "darknet events"]]) {
         if (!Number.isSafeInteger(port) || port <= 0) issues.push(`${owner}: invalid port ${port}`);
         if (claims.has(port)) issues.push(`Port ${port} collision: ${owner} and ${claims.get(port)}`);
         claims.set(port, owner);

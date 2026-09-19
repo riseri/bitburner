@@ -7,6 +7,7 @@ const PROGRAMS = Object.freeze([
 	{ name: "relaySMTP.exe", cost: 5_000_000 },
 	{ name: "HTTPWorm.exe", cost: 30_000_000 },
 	{ name: "SQLInject.exe", cost: 250_000_000 },
+	{ name: "DarkscapeNavigator.exe", cost: 50_000_000, category: "darknet" },
 ]);
 const BACKDOORS = Object.freeze([
 	{ host: "CSEC", faction: "CyberSec" },

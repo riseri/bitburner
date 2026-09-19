@@ -48,6 +48,22 @@ floor. Dry-run, blocked, malformed and stale stock heartbeats do not reserve cas
 This coordination is budget-only: stocks do not own JIT RAM, fleet allocation,
 worker ports or target selection.
 
+## Darknet service
+
+Port 10 carries the singleton `darknet-manager.js` heartbeat and port 9 is a
+bounded event queue from disposable Darknet agents. The manager owns the durable,
+reset-bound `data/darknet-state.json` record and launches one home agent after
+`DarkscapeNavigator.exe` is available. Agents authenticate neighboring servers,
+copy themselves and their dependencies, recover blocked RAM, open caches and
+launch bounded phishing workers. A lost or moved server therefore affects only
+its local disposable processes; surviving neighbors rediscover it.
+
+Darknet RAM is not admitted to the JIT allocator. Per-PID sessions, topology
+mutation and abrupt server deletion are incompatible with precise HWGW landing
+reservations. Risky policies—stasis, induced migration, stock promotion, freezing,
+and Storm Seed—are independently flagged and default off. Freezing and Storm Seed
+remain off in every supervisor profile.
+
 ## IPvGO service
 
 Port 12 (`PORTS.GO_STATUS`) is reserved for the singleton IPvGO bot. Go automation
@@ -81,7 +97,7 @@ epoch. Actors reject malformed, expired, mismatched-reset and non-allowlisted re
 verify real BN4/SF4 access, and claim only the pending request that matches their
 command line. Direct unbound launches of the actor scripts do nothing.
 
-Only TOR, the five port-opening programs and the four faction backdoors are admitted.
+Only TOR, the five port-opening programs, `DarkscapeNavigator.exe`, and the four faction backdoors are admitted.
 `w0r1dd43m0n`, faction work, arbitrary program purchases and augmentation/reset actions
 are not supported. The request expiry limits admission, not an installation already
 in progress. A long-running backdoor is tracked by PID and is not heartbeat-killed.
