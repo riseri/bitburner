@@ -182,7 +182,7 @@ test('supervisor manages exactly one Go bot on its informational status port', (
     assert.equal(go[0].port,12);
     assert.equal(go[0].heartbeatType,'go-status');
     assert.equal(go[0].heartbeatRequired,false);
-    assert.deepEqual(go[0].args,['--port',12]);
+    assert.deepEqual(Array.from(go[0].args),['--port',12]);
 });
 
 test('Go safety stops block automatic restart instead of replaying uncertain state', () => {
