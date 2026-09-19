@@ -21,7 +21,7 @@ export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime 
 		admissionSkips: 0, nextHealth: 0, tunedLevel: 0, tuner: null, tuneStarted: 0,
 		repair: null, control: null, note: "", nextRetry: 0, tunedCapacity: 0, lastCapacityRetune: 0,
 		idleSince: null, idleRetunes: 0, idleFailures: 0, idleRetryAt: 0, idleReplanning: false,
-		admissionReason: "", completedAtIdleReplan: 0,
+		admissionReason: "", completedAtIdleReplan: 0, minimumExpected: 0,
 	};
 	pipeline.cfg.epoch = pipeline.epoch;
 	return pipeline;
@@ -51,7 +51,7 @@ export function createPipelinePool(ns, setup, api) {
 		lastLoop: Date.now(), lagMax: 0, slowTicks: [], lastFleetAt: 0,
 		anchor: setup.target, trialGuard: null, note: "Waiting for productive runtime before admission",
 		lastAdmission: 0, nextAdmission: 0, readyScan: null, nextReadyScan: 0,
-		nextAdmissionService: 0, pendingAdmission: "",
+		nextAdmissionService: 0, pendingAdmission: "", pendingAdmissionFloor: 0,
 	};
 	const first = createTargetPipeline(setup.target, setup.cfg, api, ns.pid, 0, setup.runtime, setup.stats);
 	pool.pipelines.set(first.name, first);
@@ -471,6 +471,12 @@ function servicePipelineTuning(ns, pool, p) {
 			p.note = "No plan fits shared limits; retrying later";
 			p.nextRetry = Date.now() + (p.idleReplanning ? Math.min(IDLE_REPLAN_MAX_BACKOFF_MS,
 				30_000 * 2 ** Math.min(4, p.idleFailures++)) : 30_000);
+		} else if (p.trial && p.minimumExpected > 0 &&
+			(step.value.plan?.expected || 0) < p.minimumExpected) {
+			const expected = step.value.plan?.expected || 0;
+			beginPipelineDrain(pool, p, { kind: "drain", hard: false,
+				reason: `candidate model ${expected.toFixed(0)}/s below admission floor ${p.minimumExpected.toFixed(0)}/s` }, true);
+			pool.note = `Rejected ${p.name}: tuned income would be below the lane it was meant to improve`;
 		} else activatePipeline(ns, pool, p, step.value, p.stats.restarts > 0);
 	}
 	return true;
@@ -570,7 +576,10 @@ function resetPreparedCandidate(prep, reason) {
 function nextReadyCandidate(ns, pool, anchor, now) {
 	const prepared = pool.cfg.backgroundPrep;
 	if (prepared.status === "READY" && !prepared.active && prepared.target &&
-		!pool.pipelines.has(prepared.target) && (pool.blocked.get(prepared.target) || 0) <= now) return prepared.target;
+		!pool.pipelines.has(prepared.target) && (pool.blocked.get(prepared.target) || 0) <= now) {
+		pool.pendingAdmissionFloor = Number(prepared.candidate?.minimumExpected) || anchor.runtime.plan.expected;
+		return prepared.target;
+	}
 	if (now < pool.nextReadyScan) return "";
 	pool.readyScan ||= { names: [...pool.network.servers], index: 0, best: null };
 	const scan = pool.readyScan;
@@ -584,7 +593,8 @@ function nextReadyCandidate(ns, pool, anchor, now) {
 		if (!pool.api.targetHealth(ns, name).clean) continue;
 		const rate = Math.max(0, pool.cfg.maxBatchRate - anchor.runtime.plan.batchRate);
 		const potential = ns.getServerMaxMoney(name) * pool.cfg.maxSteal * 0.95 * ns.hackAnalyzeChance(name) * rate;
-		if (potential > anchor.runtime.plan.expected * 0.05 && (!scan.best || potential > scan.best.potential)) {
+		const threshold = anchor.runtime.plan.expected * pool.cfg.switchThreshold;
+		if (potential > threshold && (!scan.best || potential > scan.best.potential)) {
 			scan.best = { name, potential };
 		}
 	}
@@ -683,7 +693,10 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	if (!name && cfg.maxTargets > 1 && !full && now >= pool.nextAdmission && productive(anchor, now)) {
 		pool.nextAdmission = now + 500;
 		name = nextReadyCandidate(ns, pool, anchor, now);
-		if (name) pool.pendingAdmission = name;
+		if (name) {
+			pool.pendingAdmission = name;
+			pool.pendingAdmissionFloor ||= anchor.runtime.plan.expected;
+		}
 	}
 	// Read-only scouting is allowed in small launch gaps. Background preparation
 	// may also scan/select a candidate there, but it cannot exec a prep worker
@@ -715,7 +728,10 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	}
 	if (cfg.backgroundPrep.active && !cancelBackgroundPrep(ns, cfg.backgroundPrep, "admitting an earning target")) return;
 	pool.pendingAdmission = "";
+	const minimumExpected = pool.pendingAdmissionFloor || anchor.runtime.plan.expected;
+	pool.pendingAdmissionFloor = 0;
 	const p = createTargetPipeline(name, cfg, api, ns.pid, pool.nextOrdinal++);
+	p.minimumExpected = minimumExpected;
 	p.control = targetControl(pool, p); p.cfg.prepStates = cfg.prepStates;
 	pool.pipelines.set(p.name, p);
 	api.publishHackPause(p.control, Number.MAX_SAFE_INTEGER, "tuning prepared target");
