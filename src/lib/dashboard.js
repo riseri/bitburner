@@ -44,7 +44,7 @@ export function dashboardCounters(counters = {}) {
 
 export function dashboardTargets(ns, targets, limit = 4) {
 	if (!targets?.length) return;
-	dashboardSection(ns, "Targets / next 10m / planning snapshot");
+	dashboardSection(ns, "Startup target ranking snapshot");
 	ns.print(`  ${"Host".padEnd(22)} ${"10m avg/s".padStart(13)} ${"Steady/s".padStart(13)} ${"Prep".padStart(9)}`);
 	for (const entry of targets.slice(0, limit)) {
 		const rate = value => dashboardFit(String(value ?? "n/a").replace(/\/s$/, ""), 13).padStart(13);
