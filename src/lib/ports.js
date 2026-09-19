@@ -6,4 +6,5 @@ export const PORTS = Object.freeze({
 	PROGRESSION_STATUS: 16,
 	JIT_CONTROL: 15,
 	PROGRESSION_ACTION: 14, // Single request/result slot; unrelated to JIT control.
+	STOCK_STATUS: 13,
 });
