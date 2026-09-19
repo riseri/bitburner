@@ -175,6 +175,35 @@ test('a target-local circuit breaker is not misclassified as shared overload',()
     assert.equal(f.b.retiring,false);assert.equal(f.b.drain,null);
 });
 
+test('a planned grow spike waits for its imminent W2 instead of rebuilding the target',()=>{
+    const f=fixture(), batch=f.batch(f.a);
+    const grow=[...batch.chunks.values()].find(c=>c.phase==='G');
+    grow.threads=2000;
+    f.clock.now=grow.landAt;
+    f.pool.port.tryWrite(f.event(f.a,batch,'G'));
+    f.multi.dispatchPipelineEvents(f.ns,f.pool);
+    const ns={...f.ns,
+        getServerSecurityLevel:()=>20,getServerMinSecurityLevel:()=>12,
+        hackAnalyzeSecurity:threads=>threads*.002,growthAnalyzeSecurity:threads=>threads*.004};
+    f.a.nextHealth=0;
+    f.multi.servicePipelineSafety(ns,f.pool,f.a,f.clock.now);
+    assert.equal(f.a.drain,null,'the matching live W2 covers the temporary +8 security');
+
+    f.clock.now=batch.landing.W2+Math.max(500,f.a.cfg.gap*3)+1;
+    f.a.nextHealth=0;
+    f.multi.servicePipelineSafety(ns,f.pool,f.a,f.clock.now);
+    assert.match(f.a.drain.reason,/security circuit breaker/,'an overdue W2 no longer masks the fault');
+});
+
+test('an unexplained security spike still trips the circuit breaker immediately',()=>{
+    const f=fixture();
+    const ns={...f.ns,getServerSecurityLevel:()=>100,getServerMinSecurityLevel:()=>12,
+        hackAnalyzeSecurity:threads=>threads*.002,growthAnalyzeSecurity:threads=>threads*.004};
+    f.a.nextHealth=0;
+    f.multi.servicePipelineSafety(ns,f.pool,f.a,f.clock.now);
+    assert.match(f.a.drain.reason,/security circuit breaker/);
+});
+
 test('supervisor reads current multi-target status but rejects another daemon owner',()=>{
     const f=fixture(), supervisor=loadScript('supervisor.js',f.clock);
     const snapshot={type:'jit-status',version:2,pid:123,generatedAt:f.clock.now,mode:'multi',pipelines:[{target:'alpha'},{target:'beta'}]};

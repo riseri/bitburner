@@ -199,7 +199,10 @@ function servicePipelineSafety(ns, pool, p, now) {
 	if (p.mode === "RUNNING" && now >= p.nextHealth) {
 		p.nextHealth = now + 250;
 		const health = api.targetHealth(ns, p.name);
-		if (health.sec > health.minSec + 5) {
+		const expectedTail = health.sec > health.minSec + 5
+			? expectedSecurityTail(ns, pool, p, health, now)
+			: null;
+		if (health.sec > health.minSec + 5 && !expectedTail) {
 			beginPipelineDrain(pool, p, { kind: "drain", hard: true, afterKind: "resync", bumpGap: true,
 				reason: `security circuit breaker on ${p.name}: ${health.sec.toFixed(3)}` }, p.trial);
 		} else if (!p.recovery && pool.port.empty()) {
@@ -232,6 +235,35 @@ function servicePipelineSafety(ns, pool, p, now) {
 		if (p.repair?.active) cancelBackgroundPrep(ns, p.repair, "target is draining");
 		api.serviceHardDrain(ns, p.drain, p.batches, pool.running, pool.runningByChunk, p.stats);
 	}
+}
+
+// H/W1 and G/W2 deliberately land one gap apart. Large phases can therefore
+// cross the hard security threshold briefly even though their matching Weaken
+// is already running. Defer the breaker only when completed damaging chunks
+// explain the entire excursion and their own nonterminal tail is still within
+// the ordinary overdue grace. An unrelated or oversized security jump remains
+// an immediate hard fault, and a missing tail stops qualifying at its deadline.
+function expectedSecurityTail(ns, pool, p, health, now) {
+	const grace = Math.max(500, p.cfg.gap * 3);
+	let explained = 0;
+	for (const batch of p.batches.values()) {
+		for (const [damage, weaken] of [["H", "W1"], ["G", "W2"]]) {
+			const source = batch.phases[damage], tail = batch.phases[weaken];
+			const tailLanding = Number(batch.landing[weaken]);
+			if (!source || !tail || source.skipped || source.count === 0 || tail.skipped || tail.complete ||
+				!Number.isFinite(tailLanding) || now < tailLanding - p.cfg.gap - grace ||
+				now > tailLanding + grace) continue;
+			const chunks = [...batch.chunks.values()];
+			if (!chunks.some(chunk => chunk.phase === weaken && !pool.api.isTerminalChunk(chunk))) continue;
+			const threads = chunks.reduce((sum, chunk) => sum +
+				(chunk.phase === damage && chunk.status === "done" ? Math.max(0, Number(chunk.threads) || 0) : 0), 0);
+			if (!(threads > 0)) continue;
+			explained += damage === "H"
+				? Math.max(0, Number(ns.hackAnalyzeSecurity(threads, p.name)) || 0)
+				: Math.max(0, Number(ns.growthAnalyzeSecurity(threads, p.name)) || 0);
+		}
+	}
+	return health.sec - health.minSec <= explained + 0.02 ? { explained } : null;
 }
 
 export function nextPipelineLaunch(pool) {
