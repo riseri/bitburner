@@ -5,12 +5,15 @@ export const GO_OPPONENTS = Object.freeze(["Netburners", "Slum Snakes", "The Bla
 
 export function goConfig(flags) {
 	const cfg = { opponent: String(flags.opponent), size: Number(flags.size), games: Number(flags.games),
-		interval: Number(flags.interval), thinkMs: Number(flags["think-ms"]), takeover: flags.takeover === true || flags.takeover === "true" };
+		interval: Number(flags.interval), thinkMs: Number(flags["think-ms"]), strategy: String(flags.strategy ?? "search"),
+		simulations: Number(flags.simulations ?? 2400), takeover: flags.takeover === true || flags.takeover === "true" };
 	if (!GO_OPPONENTS.includes(cfg.opponent)) throw new Error(`Choose an ordinary opponent: ${GO_OPPONENTS.join(", ")}`);
 	if (![5, 7, 9, 13].includes(cfg.size)) throw new Error("size must be 5, 7, 9, or 13");
 	if (!Number.isSafeInteger(cfg.games) || cfg.games < 0) throw new Error("games must be a nonnegative integer (0 means continuous)");
 	if (!Number.isFinite(cfg.interval) || cfg.interval < 100 || cfg.interval > 60_000) throw new Error("interval must be 100..60000 ms");
-	if (!Number.isFinite(cfg.thinkMs) || cfg.thinkMs < 1 || cfg.thinkMs > 100) throw new Error("think-ms must be 1..100");
+	if (!Number.isFinite(cfg.thinkMs) || cfg.thinkMs < 1 || cfg.thinkMs > 1000) throw new Error("think-ms must be 1..1000");
+	if (!["search", "heuristic"].includes(cfg.strategy)) throw new Error("strategy must be search or heuristic");
+	if (!Number.isSafeInteger(cfg.simulations) || cfg.simulations < 1 || cfg.simulations > 20000) throw new Error("simulations must be 1..20000");
 	return cfg;
 }
 

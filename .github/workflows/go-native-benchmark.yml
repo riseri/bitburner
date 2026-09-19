@@ -27,33 +27,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Native opponent benchmark
-        shell: bash
-        run: |
-          if test -f test/go-native-benchmark.cjs; then
-            node test/go-native-benchmark.cjs --upstream native-upstream --output go-benchmark.json
-          else
-            echo 'Preparing pinned native fixture; strategy benchmark is not implemented yet.'
-          fi
-      - name: Benchmark report
+      - name: Paired native Daedalus benchmark, fixed work
+        run: node --experimental-vm-modules --disable-warning=ExperimentalWarning test/go-native-benchmark.cjs --upstream native-upstream --output go-benchmark-fixed.json
+      - name: Paired native Daedalus benchmark, production CPU cap
+        run: node --experimental-vm-modules --disable-warning=ExperimentalWarning test/go-native-benchmark.cjs --upstream native-upstream --games 20 --capped --output go-benchmark-capped.json
+      - name: Benchmark reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: go-native-report
-          path: go-benchmark.json
-          if-no-files-found: ignore
           retention-days: 7
-      - name: Pinned reproducibility sources
-        uses: actions/upload-artifact@v4
-        with:
-          name: go-native-fixtures
-          retention-days: 3
           path: |
-            native-upstream/src/Go
-            native-upstream/src/Casino/RNG.ts
-            native-upstream/src/utils
-            native-upstream/src/Augmentation/Enums.ts
-            native-upstream/LICENSE*
-            src
-            test
-            package.json
+            go-benchmark-fixed.json
+            go-benchmark-capped.json

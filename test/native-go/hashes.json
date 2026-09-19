@@ -1,0 +1,14 @@
+{
+  "src/Go/boardAnalysis/goAI.ts": "19d16e1ba033559e3d7f667f6977ba7c40b1f2d9240b03362b4949f284483de4",
+  "src/Go/boardState/boardState.ts": "a7fa0796103aaf934477b4925191583aa5e66147e7066a90835537360320204d",
+  "src/Go/boardAnalysis/boardAnalysis.ts": "d3bfa1e2c45704c47eede97596af7095270b00d5f5f60b7857d97d4c808bb2b1",
+  "src/Go/boardAnalysis/scoring.ts": "7f6562824bdfbce0b1b436de6bbeb1381be37fc85e2347275902cacced6dbe79",
+  "src/Go/effects/effect.ts": "add1c98250ea3f145a062683473bd33cee99ba93a48217de20b06ea5239bde8a",
+  "src/Go/Constants.ts": "a394d0d3917bc93f7ee85104846139710b6989399f6dc35be01f9b4273e619ec",
+  "src/Go/boardAnalysis/controlledTerritory.ts": "7b413cb6a6451fb18f045d744c68278b5d7ada1be97dea419c91a27822552f90",
+  "src/Go/boardAnalysis/patternMatching.ts": "95ccff57ff6914859b496f875a4ab6ea7e9b835c3c680719e4e42cde1f38cb08",
+  "src/Casino/RNG.ts": "95f82ff1c52adc595df7ed39dfc034fff8a88811f21125fcb403559e92e2edd5",
+  "src/Go/boardState/offlineNodes.ts": "456b4fefffebbe49ad10612a55e14d8505439576a64fc4ad9e1903208fade211",
+  "src/Go/Enums.ts": "7cd664a0642cffb75817b91baf4f2938bce80f1e616891b99da12c573a770b6e",
+  "src/Augmentation/Enums.ts": "4fe33d7d6891ca6c5284712611c6779a4caf988d229c9e217c444eb9568bede0"
+}

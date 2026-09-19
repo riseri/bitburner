@@ -38,7 +38,7 @@ function fixture(flags={}) {
         return white();
     }
     const ns={pid:42,getHostname:()=> 'home',getScriptName:()=> 'go-bot.js',
-        flags:pairs=>({...Object.fromEntries(pairs),games:1,...flags}),disableLog(){},
+        flags:pairs=>({...Object.fromEntries(pairs),games:1,simulations:32,"think-ms":5,...flags}),disableLog(){},
         ps:()=>[{pid:42,filename:'go-bot.js'},{pid:9,filename:'daemon.js'}],
         read:p=>files.get(p)||'',write:async(p,text)=>{files.set(p,text);writes++;if(f.onWrite)await f.onWrite(writes);},
         sleep:async ms=>{if(++sleeps>10000)throw new Error('test runaway');if(f.onSleep)await f.onSleep(ms,sleeps);},
@@ -168,7 +168,7 @@ test('IPvGO verifies full history, not only the visible board',()=>{
 });
 test('IPvGO runtime contains no scheduler, cheat, reset-stats, or testing-board mutations',()=>{
     const fs=require('node:fs'),path=require('node:path');
-    const sources=['go-bot.js','lib/go-session.js','lib/go-strategy.js'].map(p=>fs.readFileSync(path.join(__dirname,'../src',p),'utf8')).join('\n');
+    const sources=['go-bot.js','lib/go-session.js','lib/go-strategy.js','lib/go-search.js'].map(p=>fs.readFileSync(path.join(__dirname,'../src',p),'utf8')).join('\n');
     for(const re of [/ns\.singularity/,/ns\.go\.cheat/,/ns\.(kill|scriptKill|killall|exec|run|getPortHandle)\s*\(/,/setTestingBoardState\s*\(/,/resetStats\s*\(/,/\b(document|window)\b/])assert.doesNotMatch(sources,re);
 });
 
@@ -211,4 +211,47 @@ test('IPvGO validates every requested ordinary board size with a mocked complete
         const f=fixture({size});await api.main(f.ns);
         assert.deepEqual(f.terminal,[],`size ${size}`);assert.equal(f.world.currentPlayer,'None');
     }
+});
+
+test('IPvGO search runtime records per-game scores, version, budgets and observed bonus deltas',async()=>{
+    const f=fixture();
+    f.ns.go.analysis.getStats=()=>({[f.world.opponent]:{wins:f.world.wins,losses:f.world.losses,winStreak:1,
+        bonusPercent:f.world.currentPlayer==='None'?2.5:1,bonusDescription:'reputation gain',rep:f.world.currentPlayer==='None'?500:0}});
+    await api.main(f.ns);assert.deepEqual(f.terminal,[]);
+    const report=JSON.parse(f.files.get('go-bot-results.txt'));
+    assert.equal(report.games.length,1);const g=report.games[0];
+    assert.equal(g.strategy,'mcts-rave-v1');assert.equal(g.partial,false);assert.equal(g.simulationLimit,32);
+    assert.equal(g.blackScore,areaScore(f.world.board,5.5).blackScore);
+    assert.equal(g.margin,g.blackScore-g.whiteScore);assert.equal(g.bonusDeltaPercentagePoints,1.5);
+    assert.equal(g.favorCreditDelta,500);assert.ok(g.simulations>0);assert.ok(g.cpuMs>=0);
+    assert.match(f.logs.join('\n'),/go-bot-results.txt/);
+});
+test('IPvGO telemetry retains at most 200 completed games',async()=>{
+    const f=fixture();f.files.set('go-bot-results.txt',JSON.stringify({schema:1,games:Array.from({length:200},(_,i)=>({id:i}))}));
+    await api.main(f.ns);assert.deepEqual(f.terminal,[]);
+    const games=JSON.parse(f.files.get('go-bot-results.txt')).games;
+    assert.equal(games.length,200);assert.equal(games[0].id,1);assert.equal(games[199].strategy,'mcts-rave-v1');
+});
+test('IPvGO corrupt telemetry stops before replacing any board',async()=>{
+    const f=fixture();f.files.set('go-bot-results.txt','{broken');await api.main(f.ns);
+    assert.match(f.terminal[0],/Corrupt go-bot-results/);assert.deepEqual(f.calls,[]);
+});
+test('IPvGO result-write failure leaves the completed board intact instead of starting another game',async()=>{
+    const f=fixture({games:2}),write=f.ns.write;
+    f.ns.write=async(p,text)=>{if(p==='go-bot-results.txt')throw new Error('report disk unavailable');await write(p,text);};
+    await api.main(f.ns);assert.equal(f.world.currentPlayer,'None');assert.equal(f.calls.filter(v=>v==='reset').length,1);
+    assert.match(f.terminal[0],/report disk unavailable/);
+});
+test('IPvGO legacy strategy is selectable for live A/B trials',async()=>{
+    const f=fixture({strategy:'heuristic'});await api.main(f.ns);assert.deepEqual(f.terminal,[]);
+    const g=JSON.parse(f.files.get('go-bot-results.txt')).games[0];assert.equal(g.strategy,'heuristic-v1');assert.equal(g.simulations,0);
+});
+test('IPvGO rejects invalid search configuration before mutating a game',async()=>{
+    for(const flags of [{strategy:'magic'},{simulations:0},{simulations:20001},{simulations:1.5},{'think-ms':1001}]){
+        const f=fixture(flags);await api.main(f.ns);assert.equal(f.terminal.length,1);assert.deepEqual(f.calls,[]);
+    }
+});
+test('IPvGO taken-over telemetry marks duration as partial rather than inventing the game start',async()=>{
+    const f=fixture({takeover:true});f.play('X',2,2);f.white();await api.main(f.ns);assert.deepEqual(f.terminal,[]);
+    assert.equal(JSON.parse(f.files.get('go-bot-results.txt')).games[0].partial,true);
 });
