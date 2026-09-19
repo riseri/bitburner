@@ -209,3 +209,21 @@ test('retiring a repairing lane retains its RAM until its owned prep PID is conf
     assert.equal(f.pool.pipelines.has('beta'),false);
     assert.equal(f.pool.pipelines.has('alpha'),true);
 });
+
+
+test('steady promotion selects only the weaker stable lane and pauses for trial or recovery', () => {
+    const f = fixture();
+    for (const p of [f.a, f.b]) {
+        p.mode = 'RUNNING'; p.trial = false; p.recovery = null; p.drain = null; p.retiring = false;
+        p.stats.pipeline.completed = 300; p.stats.lastHackAt = f.clock.now;
+    }
+    f.a.runtime.plan.expected = 1000; f.b.runtime.plan.expected = 500;
+    assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), f.b);
+
+    f.b.trial = true;
+    assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), null);
+    f.b.trial = false; f.a.recovery = { reason: 'local recovery' };
+    assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), null);
+    f.a.recovery = null; f.b.drain = { reason: 'target drain' };
+    assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), null);
+});
