@@ -51,9 +51,10 @@ gap/period/lead, thread sizing, operation durations, RAM reservations and cloud
 spending. This is a presentation setting only: no scheduling or recovery policy
 changes with the view.
 
-After merging, sync all of `src`, including the new `lib/dashboard.js`, before the
-usual one-time supervisor/daemon restart. The helper is imported only by the two
-home controllers; remote HGW and background workers are unchanged.
+After merging, sync all of `src`, including `lib/dashboard.js`, before the usual
+one-time supervisor/daemon restart. Dashboard helpers are used by the supervisor,
+daemon and human-facing standalone/service panels; remote HGW and background workers
+are unchanged.
 
 ## Tests
 
@@ -69,7 +70,7 @@ Netscript RAM analysis are not emulated by these tests.
 Standalone automation windows use the same section-and-row presentation helpers:
 
 - `stock-trader.js` groups portfolio state, best 4S signals, and guardrails.
-- `go-bot.js` groups the live game, decision search, rewards, Daedalus timing, and manual-play safety.
+- `go-bot.js` groups the live game, decision search, rewards, Daedalus timing, and safety, while publishing the same state to the supervisor.
 - `contract-manager.js` groups scanner status, blockers, and the small set of contracts currently waiting for action.
 
 The intent is to keep the first screen useful at a glance while retaining verbose diagnostics behind explicit detail modes or within the service that owns them.
