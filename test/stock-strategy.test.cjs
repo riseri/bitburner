@@ -39,8 +39,8 @@ test('stock strategy ranks stronger 4S long edges first',()=>{
 
 test('stock strategy uses hysteresis for exits',()=>{
   const cfg=api.normalizeStockConfig({});
-  assert.equal(api.shouldExitLong({longShares:100,forecast:0.549},cfg),true);
-  assert.equal(api.shouldExitLong({longShares:100,forecast:0.551},cfg),false);
+  assert.equal(api.shouldExitLong({longShares:100,forecast:0.519},cfg),true);
+  assert.equal(api.shouldExitLong({longShares:100,forecast:0.521},cfg),false);
   assert.equal(api.shouldExitLong({longShares:0,forecast:0.1},cfg),false);
 });
 
