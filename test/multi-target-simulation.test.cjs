@@ -90,10 +90,10 @@ test('a non-earning trial retires instead of resetting the productive target or 
     assert.equal(sim.paid.filter(p=>p.target==='the-hub').length,0);
 });
 
-test('already-ready targets can fill both slots after restart and owner shutdown leaves unrelated workers alone',{timeout:180000},async()=>{
-    // With auto selection and short rich-target timings the richer target starts
-    // first. The next slot must still accept the smaller prepared opportunity.
-    const sim=new NetscriptSimulation({...profile,flags:{target:'auto','max-targets':2},
+test('an upgrade-quality ready target can fill slot two and owner shutdown leaves unrelated workers alone',{timeout:180000},async()=>{
+    // Pin the bootstrap target so the already-ready second target is a genuine
+    // upgrade rather than an intentional downgrade.
+    const sim=new NetscriptSimulation({...profile,flags:{target:'phantasy','max-targets':2},
         backgroundTargets:{'the-hub':{...profile.backgroundTargets['the-hub'],weakenTime:60000}}});
     sim.run();await sim.clock.runUntil(sim.start+12*60000);assertSound(sim);
     assert.equal(state(sim).pipelines.length,2,JSON.stringify(state(sim)));assert.ok(income(sim,'phantasy')>0);assert.ok(income(sim,'the-hub')>0);
@@ -132,4 +132,30 @@ test('steady promotion replaces the weaker bootstrap lane with a richer prepped 
         'promotion must never create a third JIT pipeline');
     assert.ok(sim.paid.some(p => p.target === 'fast-lane' && p.at >= sim.clock.now - 120_000),
         'the surviving lane should keep earning through the promotion handoff');
+});
+
+
+test('a clean poorer server is skipped while a richer second target is prepared and admitted', { timeout: 180_000 }, async () => {
+    const sim = new NetscriptSimulation({
+        target: 'phantasy', weakenTime: 78_000, levelPerMinute: 0,
+        mainServer: { max: 600e6, money: 600e6, sec: 7, min: 7, required: 30, chance: .8 },
+        flags: { target: 'phantasy', 'max-targets': 2 },
+        backgroundTargets: {
+            'inferior-ready': { max: 400e6, money: 400e6, sec: 6, min: 6, required: 80, weakenTime: 40_000, chance: .8 },
+            'rich-upgrade': { max: 4.96e9, money: 3.5e9, sec: 14, min: 12, required: 300, weakenTime: 60_000, chance: .8 },
+        },
+    });
+    sim.run();
+    await sim.clock.runUntil(sim.start + 12 * 60_000);
+    assertSound(sim);
+    const final = state(sim);
+    assert.equal(final.pipelines.length, 2, JSON.stringify(final));
+    assert.ok(final.pipelines.some(p => p.target === 'phantasy'), JSON.stringify(final));
+    assert.ok(final.pipelines.some(p => p.target === 'rich-upgrade'), JSON.stringify(final));
+    assert.ok(!final.pipelines.some(p => p.target === 'inferior-ready'), JSON.stringify(final));
+    assert.ok(sim.snapshots.every(snapshot =>
+        !snapshot.pipelines?.some(p => p.target === 'inferior-ready' && ['LIVE','WARMUP'].includes(p.mode))),
+        'inferior-ready must never become an earning lane');
+    assert.ok(sim.paid.some(p => p.target === 'rich-upgrade'),
+        'the richer admitted target should contribute paid income');
 });
