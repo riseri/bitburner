@@ -456,6 +456,8 @@ test('dashboard prep screen stays compact and preserves the full target name for
     const status = f.read();
     assert.equal(status.mode, 'prep'); assert.equal(status.target, 'the-hub');
     assert.equal(status.stage, 'WEAKEN'); assert.match(status.wave, /4m 24s/);
+    assert.ok(!f.logs.some(line => line.includes('STARTUP TARGET RANKING SNAPSHOT')));
+    assert.ok(f.logs.some(line => line.includes('More diagnostics')));
     assert.ok(f.logs.length <= 20);
     assert.ok(f.logs.every(line => line.length <= 78));
 });
