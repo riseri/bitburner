@@ -1,4 +1,5 @@
 import { normalizeStockConfig, expectedLongEdge, rankLongCandidates, shouldExitLong, sharesForBudget, tradeHasEnoughEdge, portfolioMetrics } from "lib/stock-strategy.js";
+import { PORTS } from "lib/ports.js";
 
 const HOME = "home";
 const LONG = "L";
@@ -18,6 +19,7 @@ export async function main(ns) {
 		["max-buys-per-tick", 4],
 		["ticks", 0],
 		["dry-run", false],
+		["port", PORTS.STOCK_STATUS],
 	]);
 	ns.disableLog("ALL");
 
@@ -28,6 +30,8 @@ export async function main(ns) {
 		}
 
 		const cfg = normalizeStockConfig(flags);
+		const statusPort = Number(flags.port);
+		if (!Number.isSafeInteger(statusPort) || statusPort <= 0) throw new Error("port must be a positive integer");
 		const tickLimit = Number(flags.ticks);
 		if (!Number.isSafeInteger(tickLimit) || tickLimit < 0) throw new Error("ticks must be a nonnegative integer");
 
@@ -36,6 +40,9 @@ export async function main(ns) {
 			ns.tprint(`STOCK TRADER disabled: missing ${access.missing.join(", ")}. No trades were made.`);
 			return;
 		}
+
+		const port = ns.getPortHandle(statusPort);
+		port.clear();
 
 		const constants = ns.stock.getConstants();
 		const commission = Number(constants?.StockMarketCommission);
@@ -55,10 +62,12 @@ export async function main(ns) {
 
 		let market = readMarket(ns, symbols);
 		render(ns, market, cfg, session, commission, "WAITING FOR STOCK TICK");
+		publishStatus(port, ns, market, cfg, session, commission, "WAITING");
 
 		while (true) {
 			const beforeWait = stockAccess(ns);
 			if (!beforeWait.ok) {
+				publishStatus(port, ns, market, cfg, session, commission, "BLOCKED", beforeWait.missing);
 				ns.tprint(`STOCK TRADER stopped: lost ${beforeWait.missing.join(", ")}. Existing positions were left untouched.`);
 				return;
 			}
@@ -67,13 +76,16 @@ export async function main(ns) {
 
 			const afterWait = stockAccess(ns);
 			if (!afterWait.ok) {
+				publishStatus(port, ns, market, cfg, session, commission, "BLOCKED", afterWait.missing);
 				ns.tprint(`STOCK TRADER stopped: lost ${afterWait.missing.join(", ")}. Existing positions were left untouched.`);
 				return;
 			}
 
 			session.ticks++;
 			market = await tradeTick(ns, symbols, cfg, session, commission);
-			render(ns, market, cfg, session, commission, cfg.dryRun ? "DRY RUN" : "ACTIVE");
+			const state = cfg.dryRun ? "DRY RUN" : "ACTIVE";
+			render(ns, market, cfg, session, commission, state);
+			publishStatus(port, ns, market, cfg, session, commission, state);
 
 			if (tickLimit && session.ticks >= tickLimit) return;
 		}
@@ -222,6 +234,36 @@ function render(ns, market, cfg, session, commission, state) {
 	}
 	ns.print(`  Safety         WSE + TIX + 4S TIX required | exposure <= ${pct(cfg.maxExposure)} | reserve >= ${pct(cfg.cashReserve)}`);
 	ns.print("                 Missing access stops trading without liquidating positions.");
+}
+
+function publishStatus(port, ns, market, cfg, session, commission, state, missing = []) {
+	const rows = market.rows ?? market;
+	const metrics = market.metrics ?? portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
+	const reserveFloor = Math.max(cfg.cashFloor, metrics.equity * cfg.cashReserve);
+	const positions = rows.filter(row => row.longShares > 0 || row.shortShares > 0).length;
+	port.clear();
+	port.write({
+		type: "stock-status",
+		version: 1,
+		producerPid: ns.pid,
+		generatedAt: Date.now(),
+		heartbeatIntervalMs: 10_000,
+		state,
+		dryRun: cfg.dryRun,
+		access: missing.length ? { ok: false, missing: [...missing] } : { ok: true, missing: [] },
+		cash: metrics.cash,
+		equity: metrics.equity,
+		exposure: metrics.exposure,
+		reserveFloor,
+		openPnl: metrics.openPnl,
+		realized: session.realized,
+		fees: session.fees,
+		buys: session.buys,
+		sells: session.sells,
+		positions,
+		ticks: session.ticks,
+		last: session.last,
+	});
 }
 
 function summarizeActions(actions) {
