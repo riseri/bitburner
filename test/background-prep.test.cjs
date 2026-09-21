@@ -87,21 +87,24 @@ test('security 100 is an explicitly labeled finite upper-bound candidate', () =>
 });
 
 
-test('empty second-slot acquisition rejects inferior lanes and admits only upgrade-quality candidates', () => {
+test('empty second-slot acquisition accepts useful additive lanes below the anchor income', () => {
     const f = fixture();
-    f.servers.modest = { max: 1.5e6, money: 1.35e6, min: 5, sec: 5, required: 60 };
-    f.servers.strong = { max: 5e6, money: 4.5e6, min: 5, sec: 5, required: 60 };
+    f.servers.tiny = { max: 0.5e6, money: 0.45e6, min: 5, sec: 5, required: 60 };
+    f.servers.megacorp = { max: 1.5e6, money: 1.35e6, min: 5, sec: 5, required: 60 };
 
     f.ctx.slotFill = true;
     f.ctx.availableBatchRate = 1;
-    assert.equal(f.prep.estimateBackgroundCandidate(f.ns, 'modest', f.ctx), null,
-        'a second lane below the switch-threshold quality gate must be rejected');
+    assert.equal(f.prep.estimateBackgroundCandidate(f.ns, 'tiny', f.ctx), null,
+        'a lane below the marginal improvement floor must still be rejected');
 
-    const strong = f.prep.estimateBackgroundCandidate(f.ns, 'strong', f.ctx);
-    assert.ok(strong, 'an upgrade-quality second target should remain eligible');
-    assert.equal(strong.slotFill, true);
-    assert.ok(strong.potential > f.ctx.runtime.plan.expected * f.cfg.switchThreshold);
-    assert.equal(strong.minimumExpected, f.ctx.runtime.plan.expected);
+    const candidate = f.prep.estimateBackgroundCandidate(f.ns, 'megacorp', f.ctx);
+    assert.ok(candidate, 'a useful second target should fill otherwise idle capacity');
+    assert.equal(candidate.slotFill, true);
+    assert.ok(candidate.potential < f.ctx.runtime.plan.expected,
+        'the additive lane need not outperform the anchor');
+    assert.ok(candidate.potential > candidate.minimumExpected);
+    assert.equal(candidate.minimumExpected,
+        f.ctx.runtime.plan.expected * (f.cfg.switchThreshold - 1));
 });
 
 test('empty second-slot scoring prefers near-term earnings over a slow two-hour whale', () => {

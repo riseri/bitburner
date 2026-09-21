@@ -38,6 +38,12 @@ Go is enabled by default and repeats completed games continuously. Use
 A directly launched `go-bot.js` is still supported for finite trials; the supervisor
 adopts an existing copy rather than starting a duplicate.
 
+The supervisor exposes the same startup permission as `--go-takeover` and enables
+it in every profile by default. When enabled, the supervisor automatically retries
+the specific "unowned or interrupted" startup stop with takeover permission. Set
+`--go-takeover false` when playing manually, or disable the bot with `--go false`.
+Other safety stops remain blocked for review.
+
 ## Existing games and restarts
 
 An untouched opening or a completed board can be replaced. A manually started,

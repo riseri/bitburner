@@ -1,8 +1,11 @@
 import { PORTS } from "lib/ports.js";
 import { solveServer } from "lib/darknet-solvers.js";
-import { darknetFormulaMetrics } from "lib/formulas.js";
+import { darknetFormulaMetrics } from "lib/darknet-formulas.js";
 
-const AGENT = "darknet-agent.js", PHISHER = "darknet-phish.js", SOLVERS = "lib/darknet-solvers.js", PORTS_FILE = "lib/ports.js", FORMULAS_FILE = "lib/formulas.js";
+const AGENT = "darknet-agent.js", RUNNER = "darknet-bootstrap.js", PHISHER = "darknet-phish.js", SOLVERS = "lib/darknet-solvers.js", PORTS_FILE = "lib/ports.js", FORMULAS_FILE = "lib/darknet-formulas.js";
+const AGENT_VERSION = 5, CRAWLER_RAM = 15.9;
+const ACTIONS = { stasis: "darknet-stasis.js", migrate: "darknet-migrate.js", freeze: "darknet-freeze.js", stock: "darknet-stock.js", storm: "darknet-storm.js" };
+const DEPLOY_FILES = [RUNNER, AGENT, PHISHER, SOLVERS, PORTS_FILE, FORMULAS_FILE, ...Object.values(ACTIONS)];
 
 /** Roaming, disposable Darknet node. Durable state belongs to darknet-manager.js. @param {NS} ns */
 export async function main(ns) {
@@ -15,13 +18,12 @@ export async function main(ns) {
 	while (true) {
 		try {
 			await serviceCurrentHost(ns, cfg);
-			const neighbors = ns.dnet.probe();
-			for (const target of neighbors) {
-				if (Date.now() < Number(retryAt.get(target) || 0)) continue;
+			const neighbors = orderedNeighbors(ns, ns.dnet.probe());
+			await visitNeighbors(neighbors.filter(target => Date.now() >= Number(retryAt.get(target) || 0)), cfg.concurrency, async target => {
 				const result = await visitNeighbor(ns, cfg, target);
 				if (result?.blocked) retryAt.set(target, Date.now() + (result.retryDelay || cfg.retryDelay));
 				else retryAt.delete(target);
-			}
+			});
 			if (cfg.migrate && ++cycles % cfg.migrateEvery === 0 && neighbors.length) await migrateOne(ns, cfg, neighbors);
 			emit(ns, cfg, { kind: "agent", host, state: "running", neighbors: neighbors.length, depth: safe(() => ns.dnet.getDepth(host), -1) });
 		} catch (error) { emit(ns, cfg, { kind: "error", host, error: String(error?.message ?? error) }); }
@@ -39,8 +41,9 @@ async function visitNeighbor(ns, cfg, target) {
 	let connected = false;
 	if (password != null && ns.getServer(target).hasAdminRights) connected = ns.dnet.connectToSession(target, password).success;
 	if (!connected && !details.hasSession) {
+		emit(ns, cfg, { kind: "cracking", host: target, from: ns.getHostname(), modelId: details.modelId, difficulty: details.difficulty });
 		const solved = password != null ? await authenticateKnown(ns, target, password) : await solveServer(ns, target, details, { maxAttempts: cfg.maxAttempts });
-		if (!solved.success) { emit(ns, cfg, { kind: "blocked", host: target, modelId: details.modelId, reason: solved.reason, attempts: solved.attempts }); if (cfg.freezeUnknown && details.depth >= cfg.freezeDepth) safe(() => ns.dnet.freezeServer(target)); return { blocked: true, retryDelay: formulaRetryDelay(formulaMetrics, solved.attempts) }; }
+		if (!solved.success) { emit(ns, cfg, { kind: "blocked", host: target, modelId: details.modelId, reason: solved.reason, attempts: solved.attempts }); if (cfg.freezeUnknown && details.depth >= cfg.freezeDepth) launchAction(ns, cfg, ACTIONS.freeze, target); return { blocked: true, retryDelay: formulaRetryDelay(formulaMetrics, solved.attempts) }; }
 		password = solved.password;
 		emit(ns, cfg, { kind: "credential", host: target, password, modelId: details.modelId, attempts: solved.attempts });
 	}
@@ -65,12 +68,18 @@ async function reclaimTarget(ns, target, details, metrics = null) {
 }
 
 async function deploy(ns, cfg, target) {
-	const files = [AGENT, PHISHER, SOLVERS, PORTS_FILE, FORMULAS_FILE];
-	if (!await ns.scp(files, target, "home")) { emit(ns, cfg, { kind: "blocked", host: target, reason: "scp-failed" }); return; }
-	const ram = ns.getServerMaxRam(target) - ns.getServerUsedRam(target), agentRam = ns.getScriptRam(AGENT, target);
-	if (ram < agentRam) { emit(ns, cfg, { kind: "blocked", host: target, reason: "agent-ram" }); return; }
-	const pid = ns.exec(AGENT, target, { threads: 1, preventDuplicates: true, temporary: true }, JSON.stringify(cfg));
-	emit(ns, cfg, { kind: "deployed", host: target, pid });
+	if (!await ns.scp(DEPLOY_FILES, target, "home")) { emit(ns, cfg, { kind: "blocked", host: target, reason: "scp-failed" }); return; }
+	const crawlers = ns.ps(target).filter(p => [AGENT, RUNNER].includes(p.filename));
+	if (crawlers.some(process => agentVersion(process) === AGENT_VERSION)) return;
+	for (const process of crawlers.filter(p => agentVersion(p) !== AGENT_VERSION)) ns.kill(process.pid);
+	const ram = ns.getServerMaxRam(target) - ns.getServerUsedRam(target), agentRam = CRAWLER_RAM;
+	if (ram < agentRam) { emit(ns, cfg, { kind: "blocked", host: target, reason: "agent-ram", freeRam: ram, requiredRam: agentRam }); return; }
+	const phishReserve = cfg.phish && target !== "darkweb" ? ns.getScriptRam(PHISHER, target) : 0;
+	const scalableRam = ram >= agentRam + phishReserve ? ram - phishReserve : ram;
+	const threads = Math.max(1, Math.min(cfg.agentThreads, Math.floor(scalableRam / agentRam)));
+	const pid = ns.exec(RUNNER, target, { threads, ramOverride: agentRam, preventDuplicates: true, temporary: true }, JSON.stringify(cfg));
+	if (!pid) emit(ns, cfg, { kind: "blocked", host: target, reason: "exec-failed", freeRam: ram, requiredRam: agentRam * threads });
+	else emit(ns, cfg, { kind: "deployed", host: target, pid, threads });
 }
 
 async function serviceCurrentHost(ns, cfg) {
@@ -79,13 +88,10 @@ async function serviceCurrentHost(ns, cfg) {
 		for (const file of ns.ls(host, ".cache")) {
 			try { const reward = ns.dnet.openCache(file, true); emit(ns, cfg, { kind: "cache", host, file, reward: reward?.message || "opened" }); } catch {}
 		}
-		if (cfg.stasis && safe(() => ns.dnet.getDepth(host), -1) >= cfg.stasisDepth) {
-			const linked = safe(() => ns.dnet.getStasisLinkedServers(), []), limit = safe(() => ns.dnet.getStasisLinkLimit(), 0);
-			if (!linked.includes(host) && linked.length < limit) { const r = ns.dnet.setStasisLink(true); if (r.success) emit(ns, cfg, { kind: "stasis", host }); }
-		}
+		if (cfg.stasis && safe(() => ns.dnet.getDepth(host), -1) >= cfg.stasisDepth) launchAction(ns, cfg, ACTIONS.stasis);
 		launchPhishing(ns, cfg);
-		if (cfg.promoteStock) await promoteStock(ns, cfg);
-		if (cfg.stormSeed && ns.fileExists("STORM_SEED.exe", host)) { emit(ns, cfg, { kind: "storm", host, state: "armed" }); ns.dnet.unleashStormSeed(); }
+		if (cfg.promoteStock) launchAction(ns, cfg, ACTIONS.stock);
+		if (cfg.stormSeed && ns.fileExists("STORM_SEED.exe", host)) launchAction(ns, cfg, ACTIONS.storm);
 	}
 }
 
@@ -96,21 +102,32 @@ function launchPhishing(ns, cfg) {
 	if (threads > 0) ns.exec(PHISHER, ns.getHostname(), { threads, temporary: true });
 }
 
-async function promoteStock(ns, cfg) {
-	let symbols = cfg.stockSymbols;
-	if (symbols.includes("auto")) {
-		try { symbols = ns.stock.getSymbols().filter(symbol => { const [long,,,short] = ns.stock.getPosition(symbol); return long > 0 || short > 0; }); } catch { return; }
-	}
-	if (!symbols.length) return;
-	const symbol = symbols[Math.floor(Date.now() / 60_000) % symbols.length];
-	try { await ns.dnet.promoteStock(symbol); emit(ns, cfg, { kind: "stock", host: ns.getHostname(), symbol }); } catch {}
-}
-
 async function migrateOne(ns, cfg, neighbors) {
 	for (const host of neighbors) {
 		const details = safe(() => ns.dnet.getServerDetails(host), null);
-		if (details?.isOnline && !details.isStationary && details.depth >= cfg.migrateDepth) { try { await ns.dnet.induceServerMigration(host); emit(ns, cfg, { kind: "migration", host, from: ns.getHostname() }); } catch {} return; }
+		if (details?.isOnline && !details.isStationary && details.depth >= cfg.migrateDepth) { launchAction(ns, cfg, ACTIONS.migrate, host); return; }
 	}
+}
+
+function launchAction(ns, cfg, script, target = "") {
+	if (ns.ps(ns.getHostname()).some(p => p.filename === script && String(p.args?.[1] || "") === String(target))) return 0;
+	return ns.exec(script, ns.getHostname(), { threads: 1, preventDuplicates: true, temporary: true }, JSON.stringify(cfg), target);
+}
+
+export async function visitNeighbors(neighbors, concurrency, visitor) {
+	let next = 0;
+	const worker = async () => { while (next < neighbors.length) { const index = next++; await visitor(neighbors[index]); } };
+	await Promise.all(Array.from({ length: Math.min(neighbors.length, Math.max(1, concurrency)) }, worker));
+}
+
+export function orderedNeighbors(ns, neighbors) {
+	return [...neighbors].sort((a, b) => neighborRank(ns, a) - neighborRank(ns, b));
+}
+
+function neighborRank(ns, host) {
+	const d = safe(() => ns.dnet.getServerDetails(host), null);
+	if (!d) return Number.MAX_SAFE_INTEGER;
+	return (d.hasSession ? -1e12 : 0) + (Number(d.requiredCharismaSkill) || 0) * 1e6 + (Number(d.difficulty) || 0) * 1e3 + (Number(d.depth) || 0);
 }
 
 function cluePassword(ns, target) {
@@ -125,14 +142,17 @@ function cluePassword(ns, target) {
 
 export function parseConfig(raw) {
 	let input = {}; try { input = JSON.parse(String(raw || "{}")); } catch {}
-	return { eventPort: Number(input.eventPort) || PORTS.DARKNET_EVENTS, interval: Math.max(1_000, Number(input.interval) || 5_000),
+	return { version: AGENT_VERSION, eventPort: Number(input.eventPort) || PORTS.DARKNET_EVENTS, interval: Math.max(1_000, Number(input.interval) || 5_000),
 		maxAttempts: Math.max(25, Number(input.maxAttempts) || 600), retryDelay: Math.max(5_000, Number(input.retryDelay) || 60_000),
+		concurrency: Math.max(1, Math.min(16, Number(input.concurrency) || 4)), agentThreads: Math.max(1, Number(input.agentThreads) || 4),
 		phish: input.phish !== false, phishThreads: Math.max(1, Number(input.phishThreads) || 1024),
 		stasis: Boolean(input.stasis), stasisDepth: Math.max(0, Number(input.stasisDepth) || 8), migrate: Boolean(input.migrate),
 		migrateDepth: Math.max(0, Number(input.migrateDepth) || 8), migrateEvery: Math.max(1, Number(input.migrateEvery) || 12),
 		promoteStock: Boolean(input.promoteStock), stockSymbols: String(input.stockSymbols || "auto").split(",").map(v => v.trim()).filter(Boolean),
 		freezeUnknown: Boolean(input.freezeUnknown), freezeDepth: Math.max(0, Number(input.freezeDepth) || 0), stormSeed: Boolean(input.stormSeed) };
 }
+
+function agentVersion(process) { try { return Number(JSON.parse(String(process.args?.[0] || "{}")).version) || 0; } catch { return 0; } }
 
 function emit(ns, cfg, event) { try { ns.getPortHandle(cfg.eventPort).tryWrite({ type: "darknet-event", at: Date.now(), pid: ns.pid, ...event }); } catch {} }
 function compactDetails(d, metrics = null) { return { isOnline: d.isOnline, modelId: d.modelId, depth: d.depth, difficulty: d.difficulty, blockedRam: d.blockedRam, passwordLength: d.passwordLength, passwordFormat: d.passwordFormat, isStationary: d.isStationary,

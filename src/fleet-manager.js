@@ -7,6 +7,7 @@ const HACK = "jit-hack.js";
 const GROW = "jit-grow.js";
 const WEAKEN = "jit-weaken.js";
 const WORKERS = [HACK, GROW, WEAKEN, "lib/jit-worker.js", "background-grow.js", "background-weaken.js"];
+const SURPLUS_COST_MULTIPLE = 4;
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -478,12 +479,6 @@ function cash(value) {
 }
 
 async function buyBestInvestment(ns, cfg, state, names, limit, ramLimit, budget) {
-    const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
-    const now = Date.now();
-    if (snapshot?.type !== "jit-status" || !Number.isFinite(snapshot.generatedAt) || now < snapshot.generatedAt ||
-        now - snapshot.generatedAt > 15000 || !ns.isRunning(snapshot.pid)) {
-        state.investment = "Waiting for fresh live scheduler evidence"; return;
-    }
     const candidates = [];
     if (names.length < limit) {
         for (let ram = cfg.cloud.minRam; ram <= ramLimit; ram *= 2) {
@@ -499,10 +494,34 @@ async function buyBestInvestment(ns, cfg, state, names, limit, ramLimit, budget)
             if (Number.isFinite(cost) && cost > 0 && cost <= budget) candidates.push({ name, ram, added: ram - current, cost });
         }
     }
+    const surplus = chooseSurplusInvestment(candidates, budget);
+    const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
+    const now = Date.now();
+    if (snapshot?.type !== "jit-status" || !Number.isFinite(snapshot.generatedAt) || now < snapshot.generatedAt ||
+        now - snapshot.generatedAt > 15000 || !ns.isRunning(snapshot.pid)) {
+        if (!surplus) { state.investment = "Waiting for fresh live scheduler evidence"; return; }
+        state.investment = `Surplus cash override: ${formatRam(surplus.added)} added for ${cash(surplus.cost)}`;
+        await executeInvestment(ns, cfg, state, surplus);
+        return;
+    }
     const scored = candidates.map(c => ({ ...c, ...evaluateFleetInvestment(snapshot, c.added, c.cost, cfg.cloud.payback) }));
-    const best = scored.filter(c => c.ok).sort((a, b) => a.payback - b.payback || a.cost - b.cost)[0];
-    state.investment = best?.reason || scored[0]?.reason || "Waiting for an affordable RAM upgrade";
+    const roiBest = scored.filter(c => c.ok).sort((a, b) => a.payback - b.payback || a.cost - b.cost)[0];
+    const best = roiBest || surplus;
+    state.investment = roiBest?.reason || (surplus
+        ? `Surplus cash override: ${formatRam(surplus.added)} added for ${cash(surplus.cost)}`
+        : scored[0]?.reason || "Waiting for an affordable RAM upgrade");
     if (!best) return;
+    await executeInvestment(ns, cfg, state, best);
+}
+
+function chooseSurplusInvestment(candidates, budget) {
+    if (!candidates.length) return null;
+    const cheapest = Math.min(...candidates.map(candidate => candidate.cost));
+    if (!(cheapest > 0) || budget < cheapest * SURPLUS_COST_MULTIPLE) return null;
+    return [...candidates].sort((a, b) => b.added - a.added || a.cost - b.cost)[0];
+}
+
+async function executeInvestment(ns, cfg, state, best) {
     // Read current cash and the goal again immediately before the transaction.
     const cashNow = ns.getServerMoneyAvailable(HOME);
     const floor = Math.max(cfg.cloud.cashFloor, cashNow * cfg.cloud.cashReserve, readSavings(ns).floor, readStockReserveFloor(ns, cfg.stockPort));

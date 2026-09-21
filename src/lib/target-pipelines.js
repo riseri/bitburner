@@ -1,4 +1,4 @@
-import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam } from "lib/background-prep.js";
+import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, emptySlotIncomeFloor } from "lib/background-prep.js";
 
 // One event loop, one allocation ledger. A pipeline never owns the global ports,
 // process map, or reservation array. Changing its epoch cannot erase a peer.
@@ -616,10 +616,11 @@ function resetPreparedCandidate(prep, reason) {
 // prepared richer target may be the initial earner; a useful smaller ready target
 // can still occupy the second slot. Scouting remains incremental, not a full tune.
 function nextReadyCandidate(ns, pool, anchor, now) {
+	const emptySlotFloor = emptySlotIncomeFloor(anchor.runtime.plan.expected, pool.cfg.switchThreshold);
 	const prepared = pool.cfg.backgroundPrep;
 	if (prepared.status === "READY" && !prepared.active && prepared.target &&
 		!pool.pipelines.has(prepared.target) && (pool.blocked.get(prepared.target) || 0) <= now) {
-		pool.pendingAdmissionFloor = Number(prepared.candidate?.minimumExpected) || anchor.runtime.plan.expected;
+		pool.pendingAdmissionFloor = Number(prepared.candidate?.minimumExpected) || emptySlotFloor;
 		return prepared.target;
 	}
 	if (now < pool.nextReadyScan) return "";
@@ -635,8 +636,7 @@ function nextReadyCandidate(ns, pool, anchor, now) {
 		if (!pool.api.targetHealth(ns, name).clean) continue;
 		const rate = Math.max(0, pool.cfg.maxBatchRate - anchor.runtime.plan.batchRate);
 		const potential = ns.getServerMaxMoney(name) * pool.cfg.maxSteal * 0.95 * ns.hackAnalyzeChance(name) * rate;
-		const threshold = anchor.runtime.plan.expected * pool.cfg.switchThreshold;
-		if (potential > threshold && (!scan.best || potential > scan.best.potential)) {
+		if (potential > emptySlotFloor && (!scan.best || potential > scan.best.potential)) {
 			scan.best = { name, potential };
 		}
 	}
@@ -737,7 +737,7 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 		name = nextReadyCandidate(ns, pool, anchor, now);
 		if (name) {
 			pool.pendingAdmission = name;
-			pool.pendingAdmissionFloor ||= anchor.runtime.plan.expected;
+			pool.pendingAdmissionFloor ||= emptySlotIncomeFloor(anchor.runtime.plan.expected, cfg.switchThreshold);
 		}
 	}
 	// Read-only scouting is allowed in small launch gaps. Background preparation
@@ -770,7 +770,8 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	}
 	if (cfg.backgroundPrep.active && !cancelBackgroundPrep(ns, cfg.backgroundPrep, "admitting an earning target")) return;
 	pool.pendingAdmission = "";
-	const minimumExpected = pool.pendingAdmissionFloor || anchor.runtime.plan.expected;
+	const minimumExpected = pool.pendingAdmissionFloor ||
+		emptySlotIncomeFloor(anchor.runtime.plan.expected, cfg.switchThreshold);
 	pool.pendingAdmissionFloor = 0;
 	const p = createTargetPipeline(name, cfg, api, ns.pid, pool.nextOrdinal++);
 	p.minimumExpected = minimumExpected;

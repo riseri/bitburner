@@ -23,8 +23,10 @@ that the active pipeline is unhealthy.
 Candidate evaluation visits one network entry per 500ms tick. It uses a separate
 120-minute opportunity estimate, without changing the existing ten-minute active
 target ranking. Potential income uses the current cadence, a 5% steal headroom
-and estimated minimum-security hack chance, not an exhaustive target tune. It
-requires potential income above the active model by the existing switch threshold.
+and estimated minimum-security hack chance, not an exhaustive target tune. When
+filling an empty second slot, the candidate must add the incremental improvement
+implied by the switch threshold; it need not outperform the priority lane. Replacing
+an occupied support lane still requires the full switch-threshold improvement.
 Prep and eventual warmup reduce the opportunity score. An estimate is not a
 promise of future income: actual threads, placement, chance and period must be
 re-tuned before a later promotion.

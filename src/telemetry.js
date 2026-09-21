@@ -13,7 +13,7 @@ export async function main(ns) {
     for (const sample of state.samples.filter(s => s.at >= Date.now() - minutes * 60000).slice(-10)) {
         ns.tprint(`${new Date(sample.at).toISOString()} | hack/s ${sample.jit ? ns.format.number(sample.jit.income) : "unavailable"} | RAM ${sample.jit ? `${Math.round(sample.jit.usedRam)}/${Math.round(sample.jit.totalRam)} GB` : "?"} | ${sample.fleet?.action || ""}`);
         if (sample.jit?.note) ns.tprint(`  Scheduler: ${sample.jit.note} | peak loop lag ${sample.jit.lag || 0}ms`);
-        for (const t of sample.jit?.targets || []) ns.tprint(`  ${t.name} ${t.mode}: ${t.reason || "earning"} | RAM failures ${t.allocationFails || 0}, budget skips ${t.admissionSkips || 0}, recoveries ${t.recoveries || 0}`);
+        for (const t of sample.jit?.targets || []) ns.tprint(`  ${t.name} ${t.mode}: ${t.reason || "earning"} | RAM deferrals ${t.allocationFails || 0}, rate-limit deferrals ${t.admissionSkips || 0}, recoveries ${t.recoveries || 0}`);
         if (sample.stock) ns.tprint(`  Stocks: equity ${ns.format.number(sample.stock.equity)}, session realized ${ns.format.number(sample.stock.realized)}`);
     }
     ns.tprint("Full bounded history: data/telemetry.json (1440 samples, one per minute while supervisor runs).");

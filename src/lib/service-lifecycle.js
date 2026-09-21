@@ -107,6 +107,8 @@ export function tickService(ns, service, now = Date.now()) {
 export function serviceLabel(service, now = Date.now()) {
 	if (!service) return "Disabled";
 	if (service.state === "BACKOFF") return `BACKOFF (${Math.max(0, Math.ceil((service.nextStartAt - now) / 1000))}s)`;
+	if (["WAITING_RAM", "WAITING_PRIORITY"].includes(service.state)) return `${service.state.replace("WAITING_", "WAITING ")} (${service.waitReason || "admission deferred"})`;
+	if (service.state === "BLOCKED" && service.waitReason) return `BLOCKED (${service.waitReason})`;
 	return service.state;
 }
 

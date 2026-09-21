@@ -3,6 +3,7 @@ import { progressionPrograms, progressionBackdoors, resetEpoch, pathFromHome, fr
 import { singularityRecommendation } from "lib/augmentation-loop.js";
 
 const HOME = "home";
+const WORLD_DAEMON = "w0r1d_d43m0n";
 const DEFAULT_INTERVAL_MS = 5_000;
 
 const PORT_PROGRAMS = progressionPrograms();
@@ -79,6 +80,7 @@ function buildStatus(ns, fleetStatus) {
 	const backdoors = BACKDOOR_TARGETS.map(target =>
 		analyzeBackdoor(ns, target, discovered, parents, hackingLevel)
 	);
+	const worldDaemon = analyzeNetworkRoute(ns, WORLD_DAEMON, discovered, parents);
 
 	const objectives = planObjectives({ torOwned, programs, backdoors, money });
 	return {
@@ -111,9 +113,19 @@ function buildStatus(ns, fleetStatus) {
 		backdoors,
 		backdoorsInstalled: backdoors.filter(target => target.installed).length,
 		backdoorsTotal: backdoors.length,
+		worldDaemon,
 		nextObjective: objectives.find(objective => objective.ready && objective.affordable !== false) ||
 			objectives[0] || { kind: "faction-progress", label: "Faction backdoors complete; continue faction and augmentation progression" },
 		error: "",
+	};
+}
+
+function analyzeNetworkRoute(ns, host, discovered, parents) {
+	const exists = discovered.has(host) && ns.serverExists(host);
+	return {
+		host,
+		discovered: exists,
+		path: exists ? pathFromHome(parents, host) : [],
 	};
 }
 

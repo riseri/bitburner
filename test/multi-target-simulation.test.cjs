@@ -135,13 +135,13 @@ test('steady promotion replaces the weaker bootstrap lane with a richer prepped 
 });
 
 
-test('a clean poorer server is skipped while a richer second target is prepared and admitted', { timeout: 180_000 }, async () => {
+test('a negligible ready server is skipped while a worthwhile second target is prepared and admitted', { timeout: 180_000 }, async () => {
     const sim = new NetscriptSimulation({
         target: 'phantasy', weakenTime: 78_000, levelPerMinute: 0,
         mainServer: { max: 600e6, money: 600e6, sec: 7, min: 7, required: 30, chance: .8 },
         flags: { target: 'phantasy', 'max-targets': 2 },
         backgroundTargets: {
-            'inferior-ready': { max: 400e6, money: 400e6, sec: 6, min: 6, required: 80, weakenTime: 40_000, chance: .8 },
+            'inferior-ready': { max: 50e6, money: 50e6, sec: 6, min: 6, required: 80, weakenTime: 40_000, chance: .8 },
             'rich-upgrade': { max: 4.96e9, money: 3.5e9, sec: 14, min: 12, required: 300, weakenTime: 60_000, chance: .8 },
         },
     });
@@ -155,7 +155,7 @@ test('a clean poorer server is skipped while a richer second target is prepared 
     assert.ok(!final.pipelines.some(p => p.target === 'inferior-ready'), JSON.stringify(final));
     assert.ok(sim.snapshots.every(snapshot =>
         !snapshot.pipelines?.some(p => p.target === 'inferior-ready' && ['LIVE','WARMUP'].includes(p.mode))),
-        'inferior-ready must never become an earning lane');
+        'a candidate below the marginal improvement floor must never become an earning lane');
     assert.ok(sim.paid.some(p => p.target === 'rich-upgrade'),
         'the richer admitted target should contribute paid income');
 });

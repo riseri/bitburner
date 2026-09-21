@@ -1,0 +1,18 @@
+/** Minimal early-game worker; supervisor.js scales its thread count with home RAM. @param {NS} ns */
+export async function main(ns) {
+	const target = String(ns.args[0] || "n00dles");
+	ns.disableLog("ALL");
+	while (true) {
+		const action = starterAction(ns.getServerMoneyAvailable(target), ns.getServerMaxMoney(target),
+			ns.getServerSecurityLevel(target), ns.getServerMinSecurityLevel(target));
+		if (action === "weaken") await ns.weaken(target);
+		else if (action === "grow") await ns.grow(target);
+		else await ns.hack(target);
+	}
+}
+
+export function starterAction(money, maxMoney, security, minSecurity) {
+	if (security > minSecurity + 3) return "weaken";
+	if (money < maxMoney * 0.90) return "grow";
+	return "hack";
+}

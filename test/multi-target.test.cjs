@@ -281,6 +281,29 @@ test('steady promotion selects only the weaker stable lane and pauses for trial 
     assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), null);
 });
 
+test('ready scan admits an additive lane below the anchor but above the marginal floor', () => {
+    const f = fixture();
+    f.pool.pipelines = new Map([['alpha', f.a]]);
+    f.pool.blocked = new Map();
+    f.pool.network = { servers: ['beta'] };
+    f.pool.cfg.backgroundPrep = { status: 'IDLE', active: null, target: '' };
+    f.pool.cfg.switchThreshold = 1.25;
+    f.pool.cfg.maxSteal = 0.5;
+    f.pool.nextReadyScan = 0;
+    const ns = { ...f.ns,
+        hasRootAccess: () => true,
+        getServerRequiredHackingLevel: () => 1,
+        getHackingLevel: () => 100,
+        getServerMaxMoney: () => 500,
+        hackAnalyzeChance: () => 1,
+    };
+    const candidate = f.multi.nextReadyCandidate(ns, f.pool, f.a, f.clock.now);
+    const potential = 500 * 0.5 * 0.95 * (f.cfg.maxBatchRate - f.a.runtime.plan.batchRate);
+    assert.ok(potential < f.a.runtime.plan.expected);
+    assert.ok(potential > f.a.runtime.plan.expected * (f.pool.cfg.switchThreshold - 1));
+    assert.equal(candidate, 'beta');
+});
+
 
 test('an inferior tuned trial is retired before it can become a LIVE second lane', () => {
     const f = fixture();

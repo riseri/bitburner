@@ -66,10 +66,28 @@ test('fleet chooses a better-value existing upgrade over a new server and honors
     await api.manageOneCloudAction(f.ns, cfg, state);
     assert.deepEqual(actions, [['cloud-00', 64]]);
     assert.equal(state.spent, 100);
+    f.ns.getServerMoneyAvailable = () => 300;
     ports.get(17).peek().generatedAt -= 16000;
     await api.manageOneCloudAction(f.ns, cfg, state);
     assert.equal(actions.length, 1);
     assert.match(state.investment, /fresh/);
+});
+
+test('surplus unprotected cash expands the fleet when conservative ROI evidence is unavailable', async () => {
+    const f=savingsFixture(),api=loadScript('fleet-manager.js',f.clock),ports=new Map([[17,new Port()],[13,new Port()]]);
+    const actions=[];
+    Object.assign(f.ns,{getPortHandle:p=>ports.get(p),isRunning:()=>false,getServerMoneyAvailable:()=>800e9,
+        getServerMaxRam:()=>32,serverExists:name=>name==='cloud-00',scp:async()=>{},
+        cloud:{getServerNames:()=>['cloud-00'],getServerLimit:()=>2,getRamLimit:()=>1024,
+            getServerCost:ram=>ram*1e6,getServerUpgradeCost:(name,ram)=>(ram-32)*1e6,
+            purchaseServer:(name,ram)=>{actions.push(['buy',name,ram]);return name;},
+            upgradeServer:(name,ram)=>{actions.push(['upgrade',name,ram]);return true;}}});
+    const cfg={stockPort:13,cloud:{roi:true,payback:1800,minRam:32,maxAction:.25,cashFloor:0,cashReserve:.1,prefix:'cloud'}};
+    const state={purchases:0,upgrades:0,spent:0};
+    await api.manageOneCloudAction(f.ns,cfg,state);
+    assert.deepEqual(actions,[['buy','cloud-01',1024]]);
+    assert.match(state.investment,/Surplus cash override/);
+    assert.equal(state.purchases,1);
 });
 
 test('augmentation ordering includes prerequisites, avoids owned items and reports gaps', () => {

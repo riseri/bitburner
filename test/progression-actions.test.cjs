@@ -15,6 +15,7 @@ function fixture() {
         isRunning:pid=>processes.has(pid), getScriptRam:()=>8, getServerMaxRam:()=>world.ram, getServerUsedRam:()=>0,
         getServerMoneyAvailable:()=>world.cash, getHackingLevel:()=>world.skill, hasTorRouter:()=>world.tor,
         fileExists:name=>world.owned.has(name), serverExists:host=>Object.hasOwn(parents,host), hasRootAccess:()=>world.roots,
+        getServerRequiredHackingLevel:()=>100,
         getServer:host=>({requiredHackingSkill:100,backdoorInstalled:world.installed.has(host)}),
         run:(filename,threads,...args)=>{const pid=100+launched.length; launched.push({filename,threads,args,pid}); processes.set(pid,{pid,filename,args,threads}); return pid;},
         kill:()=>assert.fail('actions must not kill income workers'),
@@ -201,6 +202,47 @@ test('supervisor shows the run4theh111z path as soon as it is discovered', () =>
     supervisor.renderNextSteps({...f.ns,print:line=>logs.push(String(line))},{progression,
         cfg:{augmentationActions:false},goal:{floor:0},augmentation:null,actions:null});
     assert.match(logs.join('\n'),/BitRunners\s+home -> n00dles -> run4theh111z/);
+});
+
+test('compact dashboard keeps progression recommendations visible during an active action', () => {
+    const f=fixture(),supervisor=loadScript('supervisor.js',f.clock),logs=[];
+    const progression={nextObjective:{label:'Acquire BruteSSH.exe'},recommendations:['Save for TOR router','Raise hacking to 50']};
+    supervisor.renderNextSteps({...f.ns,print:line=>logs.push(String(line))},{progression,
+        cfg:{dashboardDetails:false,augmentationActions:false},goal:{floor:0},augmentation:null,
+        actions:{current:{reason:'Installing CSEC backdoor'}}});
+    const text=logs.join('\n');
+    assert.match(text,/In progress\s+Installing CSEC backdoor/);
+    assert.match(text,/Recommended\s+Acquire BruteSSH.exe/);
+    assert.match(text,/Recommended\s+Save for TOR router/);
+});
+
+test('progression manager discovers the w0r1d_d43m0n path from the fleet map', () => {
+    const f=fixture();
+    f.parents.run4theh111z='b';f.parents.w0r1d_d43m0n='run4theh111z';
+    const fleet=f.ports.get(19).peek();
+    fleet.network.servers=['home','a','b','run4theh111z','w0r1d_d43m0n'];
+    const status=f.manager.buildStatus(f.ns,fleet);
+    assert.equal(status.worldDaemon.discovered,true);
+    assert.deepEqual([...status.worldDaemon.path],['home','a','b','run4theh111z','w0r1d_d43m0n']);
+});
+
+test('supervisor shows the w0r1d_d43m0n path as soon as it is discovered', () => {
+    const f=fixture(),supervisor=loadScript('supervisor.js',f.clock),logs=[];
+    const progression={programsOwned:0,programsTotal:6,backdoorsInstalled:0,backdoorsTotal:4,
+        recommendations:[],backdoors:[],worldDaemon:{host:'w0r1d_d43m0n',discovered:true,
+            path:['home','n00dles','run4theh111z','w0r1d_d43m0n']},nextObjective:{label:'Acquire BruteSSH.exe'}};
+    supervisor.renderNextSteps({...f.ns,print:line=>logs.push(String(line))},{progression,
+        cfg:{augmentationActions:false},goal:{floor:0},augmentation:null,actions:null});
+    assert.match(logs.join('\n'),/World daemon\s+home -> n00dles -> run4theh111z -> w0r1d_d43m0n/);
+});
+
+test('supervisor derives the world daemon route when an old progression manager omits it', () => {
+    const f=fixture(),supervisor=loadScript('supervisor.js',f.clock);
+    const progression={type:'progression-status'};
+    const fleet={network:{servers:['home','n00dles','w0r1d_d43m0n'],
+        parents:{home:null,n00dles:'home',w0r1d_d43m0n:'n00dles'}}};
+    const enriched=supervisor.withWorldDaemonRoute(progression,fleet);
+    assert.deepEqual([...enriched.worldDaemon.path],['home','n00dles','w0r1d_d43m0n']);
 });
 
 test('supervisor retains a result after the actor exits and across dashboard redraws', () => {

@@ -17,9 +17,13 @@ process's prepared-candidate state, so the ready scan also supports starting on
 the richer target and adding a useful smaller target later.
 
 If no useful ready target exists, the protected background G/W preparation path
-continues. Admission rechecks actual health and builds a **fresh** plan with real
-hack chance, thread requirements, timing and shared resource constraints. The
-scouting upper bound is never treated as an earning rate. Live tuning yields
+continues. An empty second slot accepts a candidate that provides the incremental
+income improvement implied by the switch threshold, even when that candidate earns
+less than the priority lane. Replacing an occupied support lane still requires the
+candidate to beat that lane by the full switch threshold. Admission rechecks actual
+health and builds a **fresh** plan with real hack chance, thread requirements,
+timing and shared resource constraints. The scouting upper bound is never treated
+as an earning rate. Live tuning yields
 between small search steps rather than running the entire search in the hot loop.
 The peer keeps earning during tuning and initial warmup. Once both slots are
 occupied and both lanes are stable and productive, spare RAM can prepare a third

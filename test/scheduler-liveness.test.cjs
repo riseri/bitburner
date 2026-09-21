@@ -118,7 +118,18 @@ test('normal dashboard exposes an empty lane and its admission failure without d
     f.api.renderSchedulerDashboard({...f.ns,pid:1,getHackingLevel:()=>510,getPortHandle:()=>status,
         clearLog(){},print:text=>logs.push(text)},f.pool);
     assert.equal(status.peek().pipelines[0].mode,'IDLE');
-    assert.ok(logs.some(line=>line.includes('ATTENTION')));
-    assert.ok(logs.some(line=>line.includes('12 budget skips')));
+	assert.ok(logs.some(line=>line.includes('ATTENTION')));
+	assert.ok(logs.some(line=>line.includes('12 rate-limit deferrals')));
     assert.ok(logs.some(line=>line.includes('fragmented batch')));
+});
+
+test('historical RAM deferrals do not remain a current capacity alert',()=>{
+    const f=fixture(),logs=[],status=new Port();
+    f.pool.started=f.clock.now-60000;f.pool.targetAnalysis=[];f.pool.cloudState={count:0,limit:25,totalRam:0};
+    f.pool.network={hosts:[],servers:[],rooted:0};f.pool.lagMax=0;
+    f.p.mode='LIVE';f.peer.mode='LIVE';f.p.stats.allocationFails=51;f.p.admissionReason='';
+    f.api.renderSchedulerDashboard({...f.ns,pid:1,getHackingLevel:()=>510,getPortHandle:()=>status,
+        clearLog(){},print:text=>logs.push(text)},f.pool);
+    assert.equal(logs.some(line=>line.includes('SCHEDULER CAPACITY')),false);
+    assert.equal(logs.some(line=>line.includes('RAM failures')),false);
 });

@@ -21,7 +21,8 @@ export function diagnoseAutomation(ns) {
     const processes = ns.ps("home"), issues = [], visited = new Set();
     const entries = ["supervisor.js", "daemon.js", "fleet-manager.js", "contract-manager.js", "progression-manager.js",
         "stock-trader.js", "go-bot.js", "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js",
-        "progression-purchase.js", "progression-backdoor.js", "darknet-manager.js", "darknet-agent.js", "darknet-phish.js",
+        "progression-purchase.js", "progression-backdoor.js", "darknet-manager.js", "darknet-bootstrap.js", "darknet-agent.js", "darknet-phish.js",
+        "darknet-stasis.js", "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js",
         "jit-hack.js", "jit-grow.js", "jit-weaken.js"];
     const inspect = file => {
         if (visited.has(file)) return;
@@ -39,7 +40,8 @@ export function diagnoseAutomation(ns) {
         if (!ram) issues.push(`RAM analysis failed or missing: ${file}`);
         if (active.length > 1 && !file.startsWith("jit-")) issues.push(`Duplicate ${file}: PIDs ${active.map(p => p.pid).join(", ")}`);
         if (!active.length && !file.startsWith("jit-") && !["progression-purchase.js", "progression-backdoor.js",
-            "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js", "darknet-agent.js", "darknet-phish.js"].includes(file)) additionalRam += ram;
+            "augmentation-manager.js", "augmentation-planner.js", "bootstrap.js", "darknet-bootstrap.js", "darknet-agent.js", "darknet-phish.js",
+            "darknet-stasis.js", "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js"].includes(file)) additionalRam += ram;
         lines.push(`${file}: ${ram.toFixed(2)} GB | ${active.length ? active.map(p => `PID ${p.pid} ${JSON.stringify(p.args)}`).join("; ") : "stopped"}`);
     }
     const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");

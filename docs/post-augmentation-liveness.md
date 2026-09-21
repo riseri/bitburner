@@ -34,8 +34,10 @@ every batch. A permanently insufficient fleet can remain blocked pending capacit
 ## Visibility
 
 The scheduler/supervisor status distinguishes an empty overdue lane as `IDLE`.
-Batch RAM failures and shared-budget skips are visible in the normal daemon view,
-with the current rejection reason. Secondary admission reports actual progress
+Current batch admission waits are visible as `Scheduler capacity` in the normal
+daemon view, with the current reason. Historical RAM and rate-limit deferrals stay
+in the detailed diagnostics and do not keep an attention banner visible after the
+scheduler is accepting again. Secondary admission reports actual progress
 instead of retaining its initial 'waiting for productive runtime' message forever.
 No timing, worker semantics, progression flag, Formulas API or extra target count
 is introduced. Start with `run supervisor.js --profile assist` as before.
@@ -54,6 +56,6 @@ The injected infeasible plan reproduces the *class* of clean/empty starvation,
 not the exact unobserved trigger in the user's save. The original screenshot lacks
 admission counters and does not establish why its first admission failure occurred.
 These simulations do not emulate Netscript RAM analysis, real API CPU cost or
-Electron pauses. Inspect `Batch slots`, `Idle replans`, per-target income and
+Electron pauses. Inspect `Batch admission`, `Idle replans`, per-target income and
 recovery after deploying. A cold deployment still requires one supervisor/daemon
 restart and normal warmup; this change is not hot migration of existing workers.

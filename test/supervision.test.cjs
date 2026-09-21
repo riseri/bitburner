@@ -193,6 +193,20 @@ test('supervisor makes realized stock profit and per-trade profit explicit', () 
     assert.match(text,/Per trade\s+avg \+\$7\.00m \| last \+\$9\.00m \| 5W\/1L/);
 });
 
+test('compact automation dashboard follows the service admission priority', () => {
+    const api=loadScript('supervisor.js',new Clock()),logs=[];
+    api.renderAutomationSummary({print:value=>logs.push(String(value))},{
+        cfg:{progression:false,contracts:false,augmentationActions:false,stocks:false,go:false,darknet:false,
+            diagnostics:false,augmentations:false,utilityJobs:[]},
+        daemon:null,fleet:null,stocks:null,contracts:null,progression:null,go:null,augmentation:null,darknet:null,
+        actions:null,services:[],stockAccess:{ok:false,missing:[]},
+    });
+    const text=logs.join('\n');
+    const labels=['1 Money engine','2 Fleet','3 Progression','4 Contracts','5 Aug loop','6 Stocks',
+        '7 IPvGO','8 Darknet','9 Diagnostics','10 Aug plan'];
+    for(let index=1;index<labels.length;index++) assert.ok(text.indexOf(labels[index-1])<text.indexOf(labels[index]));
+});
+
 
 test('supervisor manages exactly one Go bot on its informational status port', () => {
     const api=loadScript('supervisor.js',new Clock());
@@ -203,7 +217,11 @@ test('supervisor manages exactly one Go bot on its informational status port', (
     assert.equal(go[0].port,12);
     assert.equal(go[0].heartbeatType,'go-status');
     assert.equal(go[0].heartbeatRequired,false);
-    assert.deepEqual(Array.from(go[0].args),['--port',12]);
+    assert.deepEqual(Array.from(go[0].args),['--port',12,'--takeover',true]);
+	const manual=api.createManagedServices({ps:()=>[]},
+		{contracts:false,progression:false,stocks:false,go:true,goTakeover:false},[])
+		.find(s=>s.name==='go-bot.js');
+	assert.equal(manual.args[manual.args.indexOf('--takeover')+1],false);
 });
 
 test('supervisor wires the opt-in augmentation loop and reset safety gates', () => {
@@ -227,10 +245,28 @@ test('supervisor profiles collapse common action flags while explicit overrides 
     api.applySupervisorProfile(assist,['--profile','assist']);
     assert.equal(assist['progression-actions'],true); assert.equal(assist['augmentation-actions'],true);
     assert.equal(assist['auto-install'],false);
-    const handsOff={profile:'hands-off','progression-actions':false,'augmentation-actions':false,'auto-install':false};
-    api.applySupervisorProfile(handsOff,['--profile=hands-off','--auto-install',false]);
+    const handsOff={profile:'hands-off','progression-actions':false,'augmentation-actions':false,'auto-install':false,'go-takeover':false};
+    api.applySupervisorProfile(handsOff,['--profile=hands-off','--auto-install',false,'--go-takeover=false']);
     assert.equal(handsOff['progression-actions'],true); assert.equal(handsOff['augmentation-actions'],true);
     assert.equal(handsOff['auto-install'],false);
+	assert.equal(handsOff['go-takeover'],false);
+});
+
+test('supervisor takeover policy retries only the recoverable IPvGO ownership stop', () => {
+    const clock=new Clock(),api=loadScript('supervisor.js',clock),status=new Port(),killed=[];
+    const process={pid:42,filename:'go-bot.js',threads:1,args:['--port',12,'--takeover',false]};
+    const service=api.createManagedServices({ps:()=>[process]},
+        {contracts:false,progression:false,stocks:false,go:true,goTakeover:true},[])
+        .find(item=>item.name==='go-bot.js');
+    service.pid=42;service.args=[...process.args];
+    const ns={ps:()=>[process],kill:pid=>{killed.push(pid);return true;},getPortHandle:()=>status};
+    const recoverable={terminal:true,error:'Unowned or interrupted game found. Use --takeover true to finish it'};
+    assert.equal(api.recoverableGoOwnershipStop(recoverable),true);
+    assert.equal(api.prepareGoTakeoverRetry(ns,service,1234),true);
+    assert.deepEqual(killed,[42]);
+    assert.equal(service.args[service.args.indexOf('--takeover')+1],true);
+    assert.equal(service.state,'STOPPED');
+    assert.equal(api.recoverableGoOwnershipStop({terminal:true,error:'Go board changed outside this bot'}),false);
 });
 
 test('Go safety stops block automatic restart instead of replaying uncertain state', () => {
@@ -281,4 +317,85 @@ test('reserved automation channels are rejected by fleet and daemon configuratio
     for(const config of [{port:14,fleetPort:19,controlPort:15},{port:20,fleetPort:14,controlPort:15},{port:20,fleetPort:19,controlPort:14},{port:13,fleetPort:19,controlPort:15},{port:12,fleetPort:19,controlPort:15}]) {
         assert.throws(()=>daemon.validateDaemonPorts(config),/reserved/);
     }
+});
+
+test('supervisor yields only the fleet manager when that RAM can restore a missing daemon', () => {
+    const api=loadScript('supervisor.js',new Clock()), killed=[];
+    const processes=new Map([[9,{filename:'fleet-manager.js',pid:9,args:[],threads:1}]]);
+    const ns={ps:()=>[...processes.values()],getServerMaxRam:()=>64,getServerUsedRam:()=>58,
+        getScriptRam:file=>file==='daemon.js'?10:8,
+        kill:pid=>{killed.push(pid);return processes.delete(pid);}};
+    const services=api.createManagedServices(ns,{contracts:false,progression:false,stocks:false,go:false},[]);
+    const core=['daemon.js','fleet-manager.js'].map(name=>services.find(service=>service.name===name));
+    assert.equal(api.yieldFleetRamToDaemon(ns,core,1234),true);
+    assert.deepEqual(killed,[9]);
+    const fleet=core.find(service=>service.name==='fleet-manager.js');
+    assert.equal(fleet.state,'BACKOFF');
+    assert.match(fleet.lastEvent,/money engine/);
+});
+
+test('stale Go terminal status from a dead reset process is not displayed as current', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    const service=api.createManagedServices({ps:()=>[]},
+        {contracts:false,progression:false,stocks:false,go:true},[])
+        .find(item=>item.name==='go-bot.js');
+    const stale={type:'go-status',terminal:true,producerPid:1,error:'NS instance has already been killed'};
+    assert.equal(api.ownedServiceStatus({ps:()=>[]},service,stale),null);
+    service.pid=42;
+    assert.equal(api.ownedServiceStatus({ps:()=>[]},service,{...stale,producerPid:42}).producerPid,42);
+});
+
+test('8 GB starter mode scales its worker and graduates automatically at core capacity', async () => {
+    const api=loadScript('supervisor.js',new Clock()), processes=new Map(),launched=[],killed=[],logs=[];
+    let homeRam=8, nextPid=10;
+    const costs={'supervisor.js':5.05,'daemon.js':15.75,'fleet-manager.js':10.25,'starter-worker.js':2.4};
+    const ns={getServerMaxRam:()=>homeRam,getScriptRam:file=>costs[file]||0,
+        getServerUsedRam:()=>5.05+[...processes.values()].reduce((sum,p)=>sum+2.4*p.threads,0),
+        ps:()=>[...processes.values()],run:(filename,threads,...args)=>{const p={pid:nextPid++,filename,threads,args};processes.set(p.pid,p);launched.push(p);return p.pid;},
+        kill:pid=>{killed.push(pid);return processes.delete(pid);},clearLog(){},print:text=>logs.push(text),tprint:text=>logs.push(text),
+        sleep:async()=>{homeRam=processes.values().next().value?.threads===1?16:32;}};
+    await api.runStarterMode(ns);
+    assert.deepEqual(launched.map(p=>[p.filename,p.threads,p.args[0]]),[
+        ['starter-worker.js',1,'n00dles'],['starter-worker.js',4,'n00dles']]);
+    assert.equal(killed.length,2);
+    assert.ok(logs.some(line=>String(line).includes('STARTER MODE')));
+});
+
+test('starter worker chooses weaken, grow, then hack from target health', () => {
+    const api=loadScript('starter-worker.js',new Clock());
+    assert.equal(api.starterAction(1e6,1e6,8,1),'weaken');
+    assert.equal(api.starterAction(1e5,1e6,1,1),'grow');
+    assert.equal(api.starterAction(1e6,1e6,1,1),'hack');
+});
+
+test('priority admission holds RAM for important services and preempts exact lower PIDs', () => {
+    const clock=new Clock(),supervisor=loadScript('supervisor.js',clock);
+    const lifecycle=loadScript('lib/service-lifecycle.js',clock);
+    const costs={'high.js':12,'medium.js':10,'low.js':5};
+    const processes=new Map(),launched=[],killed=[];
+    let maxRam=20,nextPid=10;
+    const ns={ps:()=>[...processes.values()],fileExists:()=>true,isRunning:pid=>processes.has(pid),
+        getScriptRam:file=>costs[file]||0,getServerMaxRam:()=>maxRam,
+        getServerUsedRam:()=>[...processes.values()].reduce((sum,p)=>sum+costs[p.filename]*p.threads,0),
+        run:(filename,threads,...args)=>{const p={pid:nextPid++,filename,threads,args};processes.set(p.pid,p);launched.push(p);return p.pid;},
+        kill:pid=>{killed.push(pid);return processes.delete(pid);}};
+    const services=['high.js','medium.js','low.js'].map(name=>lifecycle.createService(name));
+
+    assert.match(supervisor.tickServicePriority(ns,services),/medium\.js/);
+    assert.deepEqual(launched.map(p=>p.filename),['high.js']);
+    assert.equal(services[1].state,'WAITING_RAM');
+    assert.equal(services[2].state,'WAITING_PRIORITY');
+
+    maxRam=27;
+    supervisor.tickServicePriority(ns,services);
+    assert.deepEqual(launched.map(p=>p.filename),['high.js','medium.js','low.js']);
+
+    const high=processes.values().find(p=>p.filename==='high.js');
+    processes.delete(high.pid);
+    maxRam=20;
+    supervisor.tickServicePriority(ns,services);
+	clock.now+=5000;
+	supervisor.tickServicePriority(ns,services);
+    assert.deepEqual(killed.map(pid=>launched.find(p=>p.pid===pid).filename),['low.js','medium.js']);
+    assert.equal([...processes.values()].some(p=>p.filename==='high.js'),true);
 });

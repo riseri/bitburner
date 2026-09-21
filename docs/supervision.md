@@ -10,6 +10,13 @@ startup rather than silently rewriting either process.
 
 ## Service lifecycle
 
+On the initial 8 GB home, `supervisor.js` remains the resident controller and uses
+the rest of home RAM for `starter-worker.js`, a small multithreaded weaken/grow/hack
+loop against rooted `n00dles`. It rescales the worker as home grows. Every cycle
+rechecks the static RAM cost of supervisor, daemon, and fleet manager; once those
+three fit, it stops the starter PID and begins the ordinary managed-service
+lifecycle without another command.
+
 New/adopted managers get 60 seconds of startup grace. After that, an old or missing
 heartbeat must remain suspect for another 15 seconds before recovery. The normal
 stale threshold is 15 seconds, or three advertised heartbeat intervals when longer.
@@ -21,6 +28,25 @@ failures back off exponentially to five minutes. Two minutes of healthy operatio
 reset the failure streak, not the cumulative restart count. Failed PID cancellation
 never grants permission to launch a duplicate. Startup/launch failures and the last
 recovery remain visible after the dashboard clears its log.
+
+On a fresh reset, the daemon and fleet manager get the first opportunity to claim
+home RAM, with the income-producing daemon first. Diagnostic/planning helpers and
+new optional managers wait until both core processes have started. If an existing
+fleet manager is the only thing preventing a missing daemon from fitting, the
+supervisor stops that exact manager PID and retries it later; remote workers and
+unrelated processes are untouched. Already-running optional services are adopted
+and monitored. The complete admission order is daemon, fleet, progression,
+contracts, augmentation loop, stocks, IPvGO, Darknet, then one-shot planning and
+diagnostic jobs. If a higher-priority manager needs RAM held by lower-priority
+managed services, the supervisor stops only enough of those exact PIDs (least
+important first), starts the higher-priority manager, and admits the others again
+as RAM becomes available. Capability-locked services are skipped rather than
+blocking the queue.
+
+The compact `Automation priority` dashboard lists that admission order explicitly,
+including disabled and capability-locked entries. `Next up` shows the current actor
+and the manager's next progression recommendations at the same time, so an active
+purchase or backdoor no longer hides the following objective.
 
 The daemon is checked for process existence only. Preparation, recovery and slow
 log refreshes are not heartbeat failures. Its bootstrap now leaves an existing
@@ -84,6 +110,13 @@ service restart/backoff. Safety exits are different: the bot publishes terminal
 `go-status` before exiting, and the supervisor marks that exact PID `BLOCKED`
 instead of starting another bot against an uncertain board. Restarting the supervisor
 or explicitly starting a new Go bot is therefore a conscious retry boundary.
+Terminal status is accepted only from the PID owned by the current supervisor
+session, so a killed pre-reset process cannot leave a false `BLOCKED` dashboard row.
+Every profile defaults to `--go-takeover true`: an ordinary unfinished board found at
+bot startup is adopted and completed without resetting it. The supervisor retries
+that specific ownership stop automatically; corrupt state, unsupported opponents,
+API failures, and later external board changes remain blocked. Set it false when
+playing manually.
 
 
 ## Action protocol

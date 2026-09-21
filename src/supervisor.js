@@ -5,8 +5,11 @@ import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashb
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
+import { pathFromHome } from "lib/progression-protocol.js";
 
 const HOME = "home";
+const SUPERVISOR = "supervisor.js";
+const STARTER_WORKER = "starter-worker.js";
 const DAEMON = "daemon.js";
 const FLEET = "fleet-manager.js";
 const CONTRACTS = "contract-manager.js";
@@ -33,10 +36,13 @@ export async function main(ns) {
 		["stocks", true],
 		["stock-cash-reserve", 0.20],
 		["go", true],
+		["go-takeover", true],
 		["darknet", true],
 		["darknet-phish", true],
 		["darknet-phish-threads", 1024],
 		["darknet-max-attempts", 600],
+		["darknet-concurrency", 4],
+		["darknet-agent-threads", 4],
 		["darknet-stasis", false],
 		["darknet-stasis-depth", 8],
 		["darknet-migrate", false],
@@ -75,7 +81,7 @@ export async function main(ns) {
 	applySupervisorProfile(flags, ns.args);
 
 	ns.disableLog("ALL");
-	if (ns.getHostname() !== HOME || ns.ps(HOME).some(process => process.filename === "supervisor.js" && process.pid !== ns.pid)) {
+	if (ns.getHostname() !== HOME || ns.ps(HOME).some(process => process.filename === SUPERVISOR && process.pid !== ns.pid)) {
 		ns.tprint("ERROR: run one supervisor on home; refusing duplicate ownership");
 		return;
 	}
@@ -108,10 +114,13 @@ export async function main(ns) {
 		stocks: asBoolean(flags.stocks),
 		stockCashReserve: clampFraction(flags["stock-cash-reserve"]),
 		go: asBoolean(flags.go),
+		goTakeover: asBoolean(flags["go-takeover"]),
 		darknet: asBoolean(flags.darknet),
 		darknetPhish: asBoolean(flags["darknet-phish"]),
 		darknetPhishThreads: Number(flags["darknet-phish-threads"]),
 		darknetMaxAttempts: Number(flags["darknet-max-attempts"]),
+		darknetConcurrency: Number(flags["darknet-concurrency"]),
+		darknetAgentThreads: Number(flags["darknet-agent-threads"]),
 		darknetStasis: asBoolean(flags["darknet-stasis"]),
 		darknetStasisDepth: Number(flags["darknet-stasis-depth"]),
 		darknetMigrate: asBoolean(flags["darknet-migrate"]),
@@ -127,13 +136,13 @@ export async function main(ns) {
 
 	validateSupervisorOptions(flags, cfg);
 	await saveSupervisorBootstrap(ns);
-	const required = [DAEMON, FLEET];
+	const required = [DAEMON, FLEET, STARTER_WORKER];
 	if (cfg.contracts) required.push(CONTRACTS);
 	if (cfg.progression) required.push(PROGRESSION);
 	if (cfg.stocks) required.push(STOCK_TRADER);
 	if (cfg.go) required.push(GO_BOT);
 	required.push("lib/formulas.js");
-	if (cfg.darknet) required.push(DARKNET_MANAGER, "darknet-agent.js", "darknet-phish.js", "lib/darknet-solvers.js");
+	if (cfg.darknet) required.push(DARKNET_MANAGER, "darknet-bootstrap.js", "darknet-agent.js", "darknet-phish.js", "darknet-stasis.js", "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js", "lib/darknet-solvers.js", "lib/darknet-formulas.js");
 	if (cfg.augmentationActions) required.push(AUGMENTATION_MANAGER, "bootstrap.js");
 	if (cfg.progression && cfg.progressionActions) {
 		required.push(PROGRESSION_PURCHASE, PROGRESSION_BACKDOOR);
@@ -145,6 +154,8 @@ export async function main(ns) {
 			return;
 		}
 	}
+
+	await runStarterMode(ns);
 
 	if (cfg.contractSelftest && ns.fileExists(CONTRACT_SELFTEST, HOME)) {
 		await runOnce(ns, CONTRACT_SELFTEST);
@@ -170,32 +181,50 @@ export async function main(ns) {
 	const telemetry = cfg.telemetry ? loadTelemetry(ns) : null;
 
 	while (true) {
-		// Keep optional child computations out of the supervisor and serialize their RAM use.
+		// Reconcile persistent services in priority order. A lower-priority service
+		// cannot consume RAM being held for the first higher-priority service that
+		// does not fit. Existing processes are always adopted and monitored.
+		const stockGate = stockAccess(ns);
+		const coreServices = [DAEMON, FLEET].map(name => services.find(service => service.name === name));
+		const admittedServices = [...coreServices];
+		for (const service of services.filter(service => !coreServices.includes(service))) {
+			if (service.name === STOCK_TRADER && !stockGate.ok) {
+				blockStockService(ns, service, stockGate);
+				continue;
+			}
+			if (service.name === AUGMENTATION_MANAGER && !augmentationAccess(ns) && !findProcess(ns, service.name)) {
+				blockCapabilityService(service, "Singularity is locked");
+				continue;
+			}
+			if (service.name === DARKNET_MANAGER && !darknetAccess(ns) && !findProcess(ns, service.name)) {
+				blockCapabilityService(service, "DarkscapeNavigator.exe is locked");
+				continue;
+			}
+			if (service.name === GO_BOT) {
+				const stopped = goSafetyStop(ns, service);
+				if (stopped) {
+					if (!(cfg.goTakeover && recoverableGoOwnershipStop(stopped) && prepareGoTakeoverRetry(ns, service))) {
+						blockGoService(ns, service, stopped);
+						continue;
+					}
+				}
+			}
+			admittedServices.push(service);
+		}
+		yieldFleetRamToDaemon(ns, coreServices);
+		const serviceBlocker = tickServicePriority(ns, admittedServices);
+
+		// Short-lived helpers are lower priority than every enabled persistent service.
 		for (const job of jobs) {
 			const other = jobs.find(candidate => candidate !== job && ns.ps(HOME).some(p => p.filename === candidate.script));
 			const gate = job.type === "augmentation-plan" && !augmentationAccess(ns) ? "Singularity is locked"
-				: other ? `Waiting for ${other.script}` : "";
+				: serviceBlocker || (other ? `Waiting for ${other.script}` : "");
 			tickUtilityJob(ns, job, gate);
 		}
 		cfg.utilityJobs = jobs;
 		cfg.augmentationPlan = currentAugmentationPlan(ns, jobs.find(job => job.type === "augmentation-plan"));
 		try { await updateSupervisorSavings(ns, cfg, cfg.augmentationPlan); }
 		catch (error) { cfg.savingsStatus = `Savings update failed: ${String(error.message || error)}`; }
-		const stockGate = stockAccess(ns);
-		for (const service of services) {
-			if (service.name === STOCK_TRADER && !stockGate.ok) {
-				blockStockService(ns, service, stockGate);
-				continue;
-			}
-			if (service.name === GO_BOT) {
-				const stopped = goSafetyStop(ns, service);
-				if (stopped) {
-					blockGoService(ns, service, stopped);
-					continue;
-				}
-			}
-			tickService(ns, service);
-		}
 		const snapshot = name => {
 			const service = services.find(item => item.name === name);
 			return service?.port ? ns.getPortHandle(service.port).peek() : null;
@@ -203,7 +232,8 @@ export async function main(ns) {
 		cfg.fleetStatusPort = services.find(service => service.name === FLEET).port;
 		const fleetStatus = snapshot(FLEET), contractStatus = snapshot(CONTRACTS),
 			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER),
-			goStatus = snapshot(GO_BOT), augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER);
+			goStatus = ownedServiceStatus(ns, services.find(service => service.name === GO_BOT), snapshot(GO_BOT)),
+			augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
 		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
 		cfg.telemetryError = telemetry?.error || "";
@@ -211,6 +241,132 @@ export async function main(ns) {
 		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, darknetStatus, stockAccess: stockGate });
 		await ns.sleep(cfg.interval);
 	}
+}
+
+function tickServicePriority(ns, services, blockedBy = "") {
+	let blocker = blockedBy;
+	for (let index = 0; index < services.length; index++) {
+		const service = services[index];
+		const process = findProcess(ns, service.name);
+		if (process) {
+			service.waitReason = "";
+			tickService(ns, service);
+			continue;
+		}
+		if (blocker) {
+			service.state = "WAITING_PRIORITY";
+			service.waitReason = blocker;
+			continue;
+		}
+		// Let lifecycle accounting observe exits and honor retry backoff before
+		// displacing healthy lower-priority processes for a launch attempt.
+		if (service.pid || Date.now() < service.nextStartAt) {
+			service.waitReason = "";
+			tickService(ns, service);
+			continue;
+		}
+		const needed = ns.getScriptRam(service.name, HOME) * Math.max(1, service.threads || 1);
+		let free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+		if (needed > free) {
+			preemptLowerPriorityServices(ns, service, services.slice(index + 1), needed - free);
+			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+		}
+		if (needed > 0 && needed > free) {
+			service.state = "WAITING_RAM";
+			service.waitReason = `needs ${needed.toFixed(2)} GB; ${Math.max(0, free).toFixed(2)} GB free`;
+			blocker = `${service.name} ${service.waitReason}`;
+			continue;
+		}
+		service.waitReason = "";
+		tickService(ns, service);
+	}
+	return blocker;
+}
+
+function preemptLowerPriorityServices(ns, owner, lowerServices, shortfall) {
+	const victims = lowerServices.map(service => ({service, process: findProcess(ns, service.name)}))
+		.filter(item => item.process)
+		.reverse();
+	const reclaimable = victims.reduce((sum, item) =>
+		sum + ns.getScriptRam(item.process.filename, HOME) * Math.max(1, item.process.threads || 1), 0);
+	if (reclaimable < shortfall) return false;
+	let reclaimed = 0;
+	for (const {service, process} of victims) {
+		if (!ns.kill(process.pid)) continue;
+		reclaimed += ns.getScriptRam(process.filename, HOME) * Math.max(1, process.threads || 1);
+		service.pid = 0;
+		service.state = "WAITING_PRIORITY";
+		service.waitReason = `yielded RAM to ${owner.name}`;
+		service.healthySince = null;
+		service.staleSince = null;
+		if (reclaimed >= shortfall) break;
+	}
+	return reclaimed >= shortfall;
+}
+
+// A new player has only 8 GB on home. Keep the canonical entry point resident
+// and spend the remaining RAM on a small, scalable n00dles worker until the full
+// supervisor + daemon + fleet stack fits.
+async function runStarterMode(ns) {
+	const target = "n00dles";
+	while (true) {
+		const maxRam = ns.getServerMaxRam(HOME);
+		const coreRam = ns.getScriptRam(SUPERVISOR, HOME) + ns.getScriptRam(DAEMON, HOME) + ns.getScriptRam(FLEET, HOME);
+		const process = findProcess(ns, STARTER_WORKER);
+		if (coreRam > 0 && maxRam >= coreRam) {
+			if (process) ns.kill(process.pid);
+			if (process) ns.tprint(`Starter mode complete at ${maxRam.toFixed(2)} GB home RAM; launching the full automation stack`);
+			return;
+		}
+
+		const workerRam = ns.getScriptRam(STARTER_WORKER, HOME);
+		const usedWithoutWorker = ns.getServerUsedRam(HOME) - (process ? workerRam * Math.max(1, process.threads || 1) : 0);
+		const desiredThreads = workerRam > 0 ? Math.max(0, Math.floor((maxRam - usedWithoutWorker) / workerRam)) : 0;
+		if (process && process.threads !== desiredThreads) ns.kill(process.pid);
+		if ((!process || process.threads !== desiredThreads) && desiredThreads > 0) ns.run(STARTER_WORKER, desiredThreads, target);
+
+		ns.clearLog();
+		dashboardTitle(ns, "BITBURNER AUTOMATION :: STARTER MODE");
+		dashboardSection(ns, "Income bootstrap");
+		dashboardRow(ns, "Target", target);
+		dashboardRow(ns, "Worker", desiredThreads > 0 ? `${desiredThreads} thread${desiredThreads === 1 ? "" : "s"}` : "WAITING FOR RAM");
+		dashboardSection(ns, "Upgrade path");
+		dashboardRow(ns, "Home RAM", `${formatRam(maxRam)} / ${formatRam(coreRam)} needed for supervisor + daemon + fleet`);
+		dashboardRow(ns, "Next", "Upgrade home RAM; full automation starts automatically when it fits");
+		await ns.sleep(5_000);
+	}
+}
+
+// The daemon can discover and use the current fleet without the background fleet
+// manager, but the fleet manager cannot produce income without the daemon. On a
+// low-RAM reset, yield only the exact fleet PID when doing so is sufficient to let
+// the daemon start. Remote workers and unrelated processes are never touched.
+function yieldFleetRamToDaemon(ns, coreServices, now = Date.now()) {
+	const daemon = coreServices.find(service => service.name === DAEMON);
+	const fleet = coreServices.find(service => service.name === FLEET);
+	if (!daemon || !fleet || findProcess(ns, DAEMON)) return false;
+	const fleetProcess = findProcess(ns, FLEET);
+	if (!fleetProcess) return false;
+	const free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+	const daemonRam = ns.getScriptRam(DAEMON, HOME) * Math.max(1, daemon.threads || 1);
+	const fleetRam = ns.getScriptRam(FLEET, HOME) * Math.max(1, fleetProcess.threads || 1);
+	if (!(daemonRam > free && daemonRam <= free + fleetRam)) return false;
+	if (!ns.kill(fleetProcess.pid)) return false;
+	fleet.pid = 0;
+	fleet.state = "BACKOFF";
+	fleet.nextStartAt = now + 5_000;
+	fleet.healthySince = null;
+	fleet.staleSince = null;
+	fleet.lastEvent = "Yielded home RAM to restore the money engine";
+	fleet.lastEventAt = now;
+	return true;
+}
+
+function ownedServiceStatus(ns, service, status) {
+	if (!service || !status || !status.producerPid) return null;
+	const process = findProcess(ns, service.name);
+	const ownerPid = process?.pid || service.pid;
+	return ownerPid && status.producerPid === ownerPid ? status : null;
 }
 
 // Resolve dependencies once at startup; adopting a process never rewrites its arguments.
@@ -239,23 +395,10 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	}
 	// New dependents follow the adopted fleet; existing dependents retain their own args.
 	const launchDaemonArgs = existingDaemon ? daemonArgs : [...daemonArgs, "--fleet-port", fleetPort];
-	const services = [createService(FLEET, fleetArgs, "fleet-status", fleetPort),
-		createService(DAEMON, launchDaemonArgs)];
-	if (cfg.contracts) services.push(createService(CONTRACTS, ["--fleet-port", fleetPort], "contract-status", PORTS.CONTRACT_STATUS));
+	const services = [createService(DAEMON, launchDaemonArgs),
+		createService(FLEET, fleetArgs, "fleet-status", fleetPort)];
 	if (cfg.progression) services.push(createService(PROGRESSION, ["--fleet-port", fleetPort], "progression-status", PORTS.PROGRESSION_STATUS));
-	if (cfg.stocks) services.push(createService(STOCK_TRADER,
-		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve], "stock-status", PORTS.STOCK_STATUS));
-	// Go publishes status for the dashboard, but slow opponent API calls are allowed to wait indefinitely.
-	// Process liveness owns restart decisions; the generic heartbeat watchdog does not.
-	if (cfg.go) services.push(createService(GO_BOT, ["--port", PORTS.GO_STATUS], "go-status", PORTS.GO_STATUS, false));
-	if (cfg.darknet) services.push(createService(DARKNET_MANAGER,
-		["--port", PORTS.DARKNET_STATUS, "--event-port", PORTS.DARKNET_EVENTS,
-			"--phish", cfg.darknetPhish, "--phish-threads", cfg.darknetPhishThreads, "--max-attempts", cfg.darknetMaxAttempts,
-			"--stasis", cfg.darknetStasis, "--stasis-depth", cfg.darknetStasisDepth,
-			"--migrate", cfg.darknetMigrate, "--migrate-depth", cfg.darknetMigrateDepth,
-			"--promote-stock", cfg.darknetPromoteStock, "--stock-symbols", cfg.darknetStockSymbols,
-			"--freeze-unknown", cfg.darknetFreezeUnknown, "--freeze-depth", cfg.darknetFreezeDepth,
-			"--storm-seed", cfg.darknetStormSeed], "darknet-status", PORTS.DARKNET_STATUS));
+	if (cfg.contracts) services.push(createService(CONTRACTS, ["--fleet-port", fleetPort], "contract-status", PORTS.CONTRACT_STATUS));
 	if (cfg.augmentationActions) services.push(createService(AUGMENTATION_MANAGER,
 		["--port", PORTS.AUGMENTATION_STATUS, "--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget,
 			"--cash-reserve", cfg.augmentationCashReserve, "--join-factions", cfg.augmentationJoinFactions,
@@ -264,6 +407,21 @@ function createManagedServices(ns, cfg, daemonArgs) {
 			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
 			"--auto-install", cfg.autoInstall, "--min-install", cfg.minInstall],
 		"augmentation-status", PORTS.AUGMENTATION_STATUS));
+	if (cfg.stocks) services.push(createService(STOCK_TRADER,
+		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve], "stock-status", PORTS.STOCK_STATUS));
+	// Go publishes status for the dashboard, but slow opponent API calls are allowed to wait indefinitely.
+	// Process liveness owns restart decisions; the generic heartbeat watchdog does not.
+	if (cfg.go) services.push(createService(GO_BOT,
+		["--port", PORTS.GO_STATUS, "--takeover", cfg.goTakeover ?? true], "go-status", PORTS.GO_STATUS, false));
+	if (cfg.darknet) services.push(createService(DARKNET_MANAGER,
+		["--port", PORTS.DARKNET_STATUS, "--event-port", PORTS.DARKNET_EVENTS,
+			"--phish", cfg.darknetPhish, "--phish-threads", cfg.darknetPhishThreads, "--max-attempts", cfg.darknetMaxAttempts,
+			"--concurrency", cfg.darknetConcurrency, "--agent-threads", cfg.darknetAgentThreads,
+			"--stasis", cfg.darknetStasis, "--stasis-depth", cfg.darknetStasisDepth,
+			"--migrate", cfg.darknetMigrate, "--migrate-depth", cfg.darknetMigrateDepth,
+			"--promote-stock", cfg.darknetPromoteStock, "--stock-symbols", cfg.darknetStockSymbols,
+			"--freeze-unknown", cfg.darknetFreezeUnknown, "--freeze-depth", cfg.darknetFreezeDepth,
+			"--storm-seed", cfg.darknetStormSeed], "darknet-status", PORTS.DARKNET_STATUS));
 	return services;
 }
 
@@ -298,11 +456,31 @@ function blockStockService(ns, service, access, now = Date.now()) {
 	service.healthySince = null;
 	service.staleSince = null;
 	const reason = `Market access unavailable: ${access.missing.join(", ")}`;
+	service.waitReason = reason;
 	if (service.lastEvent !== reason) {
 		service.lastEvent = reason;
 		service.lastEventAt = now;
 	}
 	return service;
+}
+
+function blockCapabilityService(service, reason) {
+	service.pid = 0;
+	service.state = "BLOCKED";
+	service.nextStartAt = 0;
+	service.failures = 0;
+	service.healthySince = null;
+	service.staleSince = null;
+	service.waitReason = reason;
+	return service;
+}
+
+function darknetAccess(ns) {
+	try {
+		return ns.fileExists("DarkscapeNavigator.exe", HOME) || Number(ns.getResetInfo()?.currentNode) === 15;
+	} catch {
+		return false;
+	}
 }
 
 function goSafetyStop(ns, service) {
@@ -357,7 +535,9 @@ function render(ns, state) {
 	const daemon = readDaemonDashboard(ns);
 	const fleet = fleetStatus?.type === "fleet-status" ? fleetStatus : null;
 	const contracts = contractStatus?.type === "contract-status" ? contractStatus : null;
-	const progression = progressionStatus?.type === "progression-status" ? progressionStatus : null;
+	const progression = progressionStatus?.type === "progression-status"
+		? withWorldDaemonRoute(progressionStatus, fleet)
+		: null;
 	const stocks = stockStatus?.type === "stock-status" ? stockStatus : null;
 	const go = goStatus?.type === "go-status" ? goStatus : null;
 	const augmentation = augmentationStatus?.type === "augmentation-status" ? augmentationStatus : null;
@@ -371,7 +551,7 @@ function render(ns, state) {
 			services: state.services, stockAccess: state.stockAccess });
 		renderOverview(ns, daemon, fleet);
 		renderNextSteps(ns, { cfg, goal, progression, augmentation, actions: state.actions });
-		renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, darknet,
+		renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet,
 			actions: state.actions, services: state.services, stockAccess: state.stockAccess });
 		ns.print("  More detail: restart with --dashboard-details true");
 		return;
@@ -445,6 +625,43 @@ function render(ns, state) {
 	if (daemon) renderTargetAnalysis(ns, daemon.targets);
 }
 
+function recoverableGoOwnershipStop(status) {
+	return status?.terminal === true && /Unowned or interrupted game found/i.test(String(status.error || ""));
+}
+
+function prepareGoTakeoverRetry(ns, service, now = Date.now()) {
+	const process = findProcess(ns, GO_BOT);
+	if (process && !ns.kill(process.pid)) return false;
+	const args = [...service.args];
+	const index = args.findIndex(value => value === "--takeover" || String(value).startsWith("--takeover="));
+	if (index < 0) args.push("--takeover", true);
+	else if (String(args[index]).startsWith("--takeover=")) args[index] = "--takeover=true";
+	else if (index + 1 < args.length && !String(args[index + 1]).startsWith("--")) args[index + 1] = true;
+	else args.splice(index + 1, 0, true);
+	service.args = args;
+	service.pid = 0;
+	service.state = "STOPPED";
+	service.nextStartAt = 0;
+	service.healthySince = null;
+	service.staleSince = null;
+	service.lastEvent = "Adopting the unfinished IPvGO board under takeover policy";
+	service.lastEventAt = now;
+	try { ns.getPortHandle(service.port).clear(); } catch {}
+	return true;
+}
+
+function withWorldDaemonRoute(progression, fleet) {
+	if (progression?.worldDaemon?.path?.length) return progression;
+	const network = fleet?.network;
+	const servers = Array.isArray(network?.servers) ? network.servers : [];
+	const discovered = servers.includes("w0r1d_d43m0n");
+	const path = discovered ? pathFromHome(network?.parents, "w0r1d_d43m0n") : [];
+	return {
+		...progression,
+		worldDaemon: { host: "w0r1d_d43m0n", discovered, path },
+	};
+}
+
 function renderOverview(ns, daemon, fleet) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Overview");
@@ -494,9 +711,13 @@ function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) 
 	const row = (label, value) => dashboardRow(ns, label, value);
 	const entries = [];
 	if (actions?.current) entries.push(["In progress", actions.current.reason]);
-	else if (progression?.nextObjective?.label) entries.push(["Progression", progression.nextObjective.label]);
+	const progressionAdvice = [progression?.nextObjective?.label, ...(progression?.recommendations || [])]
+		.filter((value, index, all) => value && all.indexOf(value) === index && value !== actions?.current?.reason)
+		.slice(0, cfg.dashboardDetails ? 4 : 2);
+	for (const advice of progressionAdvice) entries.push(["Recommended", advice]);
 	const bitRunners = progression?.backdoors?.find(target => target.host === "run4theh111z");
 	if (bitRunners?.path?.length) entries.push(["BitRunners", bitRunners.path.join(" -> ")]);
+	if (progression?.worldDaemon?.path?.length) entries.push(["World daemon", progression.worldDaemon.path.join(" -> ")]);
 	if (cfg.augmentationActions && augmentation?.recommendation) entries.push(["Augmentation", augmentation.recommendation]);
 	else if (cfg.augmentationPlan?.order?.length) {
 		const next = cfg.augmentationPlan.order[0];
@@ -509,50 +730,75 @@ function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) 
 	for (const [label, value] of entries) row(label, value);
 }
 
-function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, augmentation, darknet, actions, services, stockAccess }) {
+function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet, actions, services, stockAccess }) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	const status = (state, value) => `[${state}] ${value}`;
-	const disabled = [];
-	dashboardSection(ns, "Automation");
+	const managed = name => services?.find(service => service.name === name);
+	const waiting = (name, message) => status("WAIT", `${serviceLabel(managed(name))}; ${message}`);
+	dashboardSection(ns, "Automation priority");
 
-	if (!cfg.stocks) disabled.push("stocks");
-	else if (!stockAccess?.ok) row("Stocks", status("LOCKED", `missing ${stockAccess?.missing?.join(", ") || "market access"}`));
-	else if (!stocks) row("Stocks", status("WAIT", "starting; waiting for market snapshot"));
-	else row("Stocks", status("OK", `session ${cashSigned(stocks.realized)} net | ${Number(stocks.sells) > 0 ? `avg ${cashSigned(stocks.avgTradePnl)} per trade` : "no closed trades"}`));
+	row("1 Money engine", daemon
+		? status("OK", `${daemon.target || "scheduler active"}${daemon.state ? ` | ${humanState(daemon.state)}` : ""}`)
+		: waiting(DAEMON, "waiting for daemon dashboard"));
+	row("2 Fleet", fleet
+		? status("OK", `${Number(fleet.network?.rooted) || 0}/${fleet.network?.servers?.length || 0} rooted | ${fleet.network?.hosts?.length || 0} workers`)
+		: waiting(FLEET, "waiting for fleet status"));
 
-	if (!cfg.contracts) disabled.push("contracts");
-	else if (!contracts) row("Contracts", status("WAIT", "starting; waiting for scan"));
-	else if (contracts.error) row("Contracts", status("BLOCKED", contracts.error));
-	else row("Contracts", status("OK", `${Number(contracts.waiting) || 0} waiting | ${Number(contracts.solved) || 0} solved`));
-
-	if (!cfg.progression) disabled.push("progression");
-	else if (!progression) row("Progression", status("WAIT", "starting; waiting for snapshot"));
-	else if (progression.error) row("Progression", status("BLOCKED", progression.error));
+	if (!cfg.progression) row("3 Progression", status("OFF", "disabled by profile"));
+	else if (!progression) row("3 Progression", waiting(PROGRESSION, "waiting for snapshot"));
+	else if (progression.error) row("3 Progression", status("BLOCKED", progression.error));
 	else {
-		row("Progression", status("OK", `${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`));
+		row("3 Progression", status("OK", `${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`));
 	}
-	if (cfg.augmentationActions) row("Aug loop", augmentation
+
+	if (!cfg.contracts) row("4 Contracts", status("OFF", "disabled by profile"));
+	else if (!contracts) row("4 Contracts", waiting(CONTRACTS, "waiting for scan"));
+	else if (contracts.error) row("4 Contracts", status("BLOCKED", contracts.error));
+	else row("4 Contracts", status("OK", `${Number(contracts.waiting) || 0} waiting | ${Number(contracts.solved) || 0} solved`));
+
+	if (cfg.augmentationActions) row("5 Aug loop", augmentation
 		? status(augmentation.error ? "BLOCKED" : "OK", `${augmentation.state} / ${augmentation.phase || "WAIT"} | ${augmentation.action || augmentation.recommendation || "waiting"}`)
-		: status("WAIT", "starting; waiting for status"));
-	else disabled.push("augmentation actions");
+		: waiting(AUGMENTATION_MANAGER, "waiting for status"));
+	else row("5 Aug loop", status("OFF", "disabled by profile"));
+
+	if (!cfg.stocks) row("6 Stocks", status("OFF", "disabled by profile"));
+	else if (!stockAccess?.ok) row("6 Stocks", status("LOCKED", `missing ${stockAccess?.missing?.join(", ") || "market access"}`));
+	else if (!stocks) row("6 Stocks", waiting(STOCK_TRADER, "waiting for market snapshot"));
+	else row("6 Stocks", status("OK", `session ${cashSigned(stocks.realized)} net | ${Number(stocks.sells) > 0 ? `avg ${cashSigned(stocks.avgTradePnl)} per trade` : "no closed trades"}`));
 
 	const goService = services?.find(service => service.name === GO_BOT);
-	if (!cfg.go) disabled.push("IPvGO");
-	else if (go?.terminal) row("IPvGO", status("BLOCKED", go.error || "board ownership requires review"));
-	else if (!go) row("IPvGO", status("WAIT", `${serviceLabel(goService)}; waiting for game status`));
-	else row("IPvGO", status("OK", `${go.opponent || "unknown"} ${go.size || "?"}x${go.size || "?"} | ${Number(go.wins) || 0}W/${Number(go.losses) || 0}L | +${Number(go.bonusPercent || 0).toFixed(3)}%`));
-	if (!cfg.darknet) disabled.push("darknet");
-	else if (!darknet) row("Darknet", status("WAIT", "starting; waiting for status"));
-	else if (!darknet.unlocked) row("Darknet", status("LOCKED", "saving for DarkscapeNavigator.exe"));
-	else row("Darknet", status("OK", `${darknet.authenticated}/${darknet.known} authenticated | ${darknet.activeAgents} agents | ${darknet.caches} caches`));
+	if (!cfg.go) row("7 IPvGO", status("OFF", "disabled by profile"));
+	else if (go?.terminal) row("7 IPvGO", status("BLOCKED", `${go.error || "board ownership requires review"}${cfg.goTakeover ? "" : "; enable --go-takeover true to adopt it"}`));
+	else if (!go) row("7 IPvGO", status("WAIT", `${serviceLabel(goService)}; waiting for game status`));
+	else row("7 IPvGO", status("OK", `${go.opponent || "unknown"} ${go.size || "?"}x${go.size || "?"} | ${Number(go.wins) || 0}W/${Number(go.losses) || 0}L | +${Number(go.bonusPercent || 0).toFixed(3)}% | takeover ${cfg.goTakeover ? "ON" : "OFF"}`));
+	if (!cfg.darknet) row("8 Darknet", status("OFF", "disabled by profile"));
+	else if (!darknet) row("8 Darknet", waiting(DARKNET_MANAGER, "waiting for status"));
+	else if (!darknet.unlocked) row("8 Darknet", status("LOCKED", "saving for DarkscapeNavigator.exe"));
+	else if (darknet.state === "BLOCKED" || (darknet.currentBlockers?.length && !Number(darknet.deployments))) row("8 Darknet", status("BLOCKED", darknet.blocker || formatDarknetBlocker(darknet.currentBlockers[0]) || darknet.last || "crawler could not start"));
+	else {
+		const cracking = Array.isArray(darknet.cracking) ? darknet.cracking : [];
+		const activity = cracking.length ? `cracking ${cracking.slice(0, 3).map(item => item.host).join(", ")}${cracking.length > 3 ? ` +${cracking.length - 3}` : ""}` : (darknet.last || "waiting for probe");
+		row("8 Darknet", status(cracking.length ? "RUN" : "OK", `${darknet.authenticated}/${darknet.known} authenticated | ${darknet.activeAgents} agents | ${activity}`));
+		row("Darknet results", `${Number(darknet.deployments) || 0} deployments | ${Number(darknet.caches) || 0} caches | ${Number(darknet.blocked) || 0} blocked | ${Number(darknet.errors) || 0} errors`);
+	}
 
 	if (actions?.current) row("Active action", status("RUN", actions.current.reason));
 	const diagnostics = cfg.utilityJobs?.find(job => job.type === "diagnostics");
 	if (diagnostics) {
 		const state = ["ERROR", "CONFLICT"].includes(diagnostics.state) ? "BLOCKED"
 			: diagnostics.state === "READY" ? "OK" : "WAIT";
-		row("Diagnostics", status(state, diagnostics.message));
+		row("9 Diagnostics", status(state, diagnostics.message));
 	}
+	else if (cfg.diagnostics) row("9 Diagnostics", status("WAIT", "not started"));
+	else row("9 Diagnostics", status("OFF", "disabled by profile"));
+	const planner = cfg.utilityJobs?.find(job => job.type === "augmentation-plan");
+	if (planner) {
+		const state = ["ERROR", "CONFLICT"].includes(planner.state) ? "BLOCKED"
+			: planner.state === "READY" ? "OK" : "WAIT";
+		row("10 Aug plan", status(state, planner.message));
+	}
+	else if (cfg.augmentations) row("10 Aug plan", status("WAIT", "not started"));
+	else row("10 Aug plan", status("OFF", "disabled by profile"));
 	if (services?.length) {
 		const ready = services.filter(service => service.state === "RUNNING").length;
 		const pending = services.filter(service => service.state !== "RUNNING")
@@ -561,7 +807,6 @@ function renderAutomationSummary(ns, { cfg, stocks, contracts, progression, go, 
 			? status("WAIT", `${ready}/${services.length} running | ${pending.join(" | ")}`)
 			: status("OK", `all ${services.length} running`));
 	}
-	if (disabled.length) row("Off", disabled.join(" | "));
 }
 
 function renderAttention(ns, { cfg, goal, daemon, fleet, contracts, progression, go, augmentation, services }) {
@@ -716,6 +961,7 @@ function renderProgression(ns, progression, cfg, actions = null) {
 		`${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} faction backdoors`);
 	const bitRunners = progression.backdoors?.find(target => target.host === "run4theh111z");
 	if (bitRunners?.path?.length) row("BitRunners", bitRunners.path.join(" -> "));
+	if (progression.worldDaemon?.path?.length) row("World daemon", progression.worldDaemon.path.join(" -> "));
 	if (cfg.dashboardDetails) {
 		row("BitNode", `BN${Number(progression.currentNode) || "?"}`);
 		row("Singularity", progression.singularity?.available ? `Available (${progression.singularity.source})` : "Locked; requires BN4 or Source-File 4");
@@ -926,13 +1172,23 @@ function renderDarknet(ns, darknet, cfg) {
 	if (!cfg.darknet) { row("Status", "Disabled"); return; }
 	if (!darknet) { row("Status", "Starting / waiting for coordinator"); return; }
 	if (!darknet.unlocked) { row("Status", "Locked; DarkscapeNavigator.exe is the next Darknet prerequisite"); return; }
+	if (darknet.state === "BLOCKED") row("Status", `Blocked: ${darknet.blocker || "crawler could not start"}`);
 	row("Coverage", `${Number(darknet.authenticated) || 0}/${Number(darknet.known) || 0} authenticated | ${Number(darknet.activeAgents) || 0} active agents`);
+	const cracking = Array.isArray(darknet.cracking) ? darknet.cracking : [];
+	row("Activity", cracking.length ? `Cracking ${cracking.map(item => `${item.host} (${item.modelId || "unknown"})`).join(", ")}` : (darknet.last || "Waiting for probe"));
 	row("Planning", darknet.formulas ? "Exact Darknet Formulas" : "Adaptive fallback; switches live when Formulas.exe appears");
 	row("Loot", `${Number(darknet.caches) || 0} caches | ${Number(darknet.deployments) || 0} deployments | ${Number(darknet.blocked) || 0} blocked attempts`);
 	row("Stability", `${Number(darknet.stasis) || 0} stasis links | auth +${(100 * Number(darknet.instability?.authenticationDurationMultiplier - 1 || 0)).toFixed(1)}% | timeout ${(100 * Number(darknet.instability?.authenticationTimeoutChance || 0)).toFixed(1)}%`);
 	if (darknet.last) row("Last event", darknet.last);
+	for (const blocker of (darknet.currentBlockers || []).slice(0, 5)) row("Blocker", formatDarknetBlocker(blocker));
 	const risky = Object.entries(darknet.risky || {}).filter(([, enabled]) => enabled).map(([name]) => name);
 	row("Risky policies", risky.length ? risky.join(", ") : "All disabled");
+}
+
+function formatDarknetBlocker(blocker) {
+	if (!blocker) return "";
+	const ram = Number.isFinite(blocker.freeRam) && Number.isFinite(blocker.requiredRam) ? ` | ${Number(blocker.freeRam).toFixed(2)}/${Number(blocker.requiredRam).toFixed(2)} GB` : "";
+	return `${blocker.host || "server"}: ${blocker.reason || "blocked"}${ram}`;
 }
 
 function processStatus(ns, script) {
@@ -1117,6 +1373,8 @@ function validateSupervisorOptions(flags, cfg) {
 	if (!Number.isSafeInteger(cfg.minInstall) || cfg.minInstall < 1) throw new Error("min-install must be a positive integer");
 	if (!Number.isSafeInteger(cfg.darknetMaxAttempts) || cfg.darknetMaxAttempts < 25) throw new Error("darknet-max-attempts must be an integer of at least 25");
 	if (!Number.isSafeInteger(cfg.darknetPhishThreads) || cfg.darknetPhishThreads < 1) throw new Error("darknet-phish-threads must be positive");
+	if (!Number.isSafeInteger(cfg.darknetConcurrency) || cfg.darknetConcurrency < 1 || cfg.darknetConcurrency > 16) throw new Error("darknet-concurrency must be an integer from 1 to 16");
+	if (!Number.isSafeInteger(cfg.darknetAgentThreads) || cfg.darknetAgentThreads < 1) throw new Error("darknet-agent-threads must be positive");
 	if (cfg.autoInstall && !cfg.augmentationActions) throw new Error("auto-install requires augmentation-actions");
 	if (cfg.savingsMode === "augmentations" && !cfg.augmentations) throw new Error("Augmentation savings requires augmentation planning");
 }

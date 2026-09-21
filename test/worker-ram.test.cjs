@@ -56,6 +56,14 @@ test('all three entry files carry the dependency revision to invalidate cached c
     }
 });
 
+test('daemon source avoids DOM-reserved identifiers that add a 25 GB RAM penalty', () => {
+    const daemon = fs.readFileSync(path.join(root, 'src', 'daemon.js'), 'utf8');
+    assert.deepEqual(domIdentifiers(daemon), []);
+    assert.ok(domIdentifiers(daemon.replace(/windowMs/g, 'window')).length > 0);
+    assert.doesNotMatch(daemon, /ns\.cloud\./);
+    assert.doesNotMatch(daemon, /ns\.scriptKill\s*\(/);
+});
+
 for (const [name, options] of [
     ['clean Hack invocation and completion', {}],
     ['own-target pause latch', { paused: true }],

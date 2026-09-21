@@ -31,6 +31,15 @@ export function backgroundPrepRam(state, host) {
 	return state?.active && (!host || state.active.host === host) ? state.active.ram : 0;
 }
 
+// The switch threshold describes the desired improvement over current income.
+// Filling an empty lane is additive, so only the incremental portion is the
+// candidate's hurdle. Replacing an occupied lane still uses the full multiplier.
+export function emptySlotIncomeFloor(activeRate, switchThreshold) {
+	const rate = Math.max(0, Number(activeRate) || 0);
+	const threshold = Math.max(1, Number(switchThreshold) || 1);
+	return rate * (threshold - 1);
+}
+
 // Only the recorded PID is eligible for cancellation. Never scriptKill/killall,
 // and never touch JIT events, JIT control, or the active target's batch state.
 export function cancelBackgroundPrep(ns, state, reason = "active hacking needs RAM") {
@@ -112,17 +121,13 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 					? replacementBatchRate : 1000 / ctx.runtime.plan.period))
 			: Math.max(ctx.runtime.plan.period, 4 * ctx.cfg.gap + 20);
 	const potential = h.max * ctx.cfg.maxSteal * 0.95 * chance * 1000 / period;
-	// Filling an empty second lane is additive. Promotion is different: both
-	// lanes already earn, so a candidate must beat the weaker lane's prepped
-	// steady estimate by the configured switch threshold.
-	if (slotFill) {
-		// An empty slot is not worth filling with a downgrade. Require the same
-		// quality hurdle used for replacement so the second lane starts as an
-		// upgrade candidate, not merely positive additive income.
-		if (!(potential > activeRate * ctx.cfg.switchThreshold)) return null;
-	} else if (promotion) {
-		if (!(potential > replacementRate * ctx.cfg.switchThreshold)) return null;
-	} else if (!(potential > activeRate * ctx.cfg.switchThreshold)) return null;
+	const requiredPotential = slotFill
+		? emptySlotIncomeFloor(activeRate, ctx.cfg.switchThreshold)
+		: promotion ? replacementRate * ctx.cfg.switchThreshold : activeRate * ctx.cfg.switchThreshold;
+	// Filling an empty second lane is additive: require enough marginal income
+	// to clear the configured improvement hurdle, not enough to beat the anchor.
+	// Promotion is different because it replaces an already-earning lane.
+	if (!(potential > requiredPotential)) return null;
 
 	const budget = prepBudget(ctx);
 	const wSlots = Math.floor(budget / ns.getScriptRam(WEAKEN, "home"));
@@ -165,8 +170,7 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 			Math.max(0, ctx.state.horizon - prepMs - warmupMs) / ctx.state.horizon;
 	}
 	if (!(score > 0) || !Number.isFinite(score)) return null;
-	const minimumExpected = slotFill ? activeRate
-		: promotion ? replacementRate * ctx.cfg.switchThreshold : 0;
+	const minimumExpected = slotFill || promotion ? requiredPotential : 0;
 	return { name, potential, score, prepMs, warmupMs, upperBound, slotFill, promotion, minimumExpected,
 		formulas: Boolean(exact) };
 }

@@ -62,6 +62,12 @@ planning, startup diagnostics, periodic augmentation advice, and telemetry. Lock
 capabilities appear as blocked; optional helpers wait for RAM without stopping
 other services. All results appear in the supervisor dashboard.
 
+The same command also works on a completely new 8 GB home. The supervisor enters
+starter mode and uses all remaining home RAM for a small multithreaded worker that
+weakens, grows, and hacks `n00dles`. It rescales that worker after RAM upgrades,
+displays the combined core RAM target, and automatically launches the normal
+daemon/fleet stack after home RAM is large enough for all three core processes.
+
 Three profiles cover the normal operating modes:
 
 ```text
@@ -108,6 +114,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | Flag | Default | Behavior |
 | --- | --- | --- |
 | `--profile` | `observe` | `observe`, `assist`, or `hands-off`; explicit flags override profile settings |
+| `--go-takeover` | `true` | Finish an existing ordinary IPvGO board on startup; set false when playing manually |
 | `--diagnostics` | `true` | Run `doctor.js` once at startup; show warnings |
 | `--augmentations` | `true` | Refresh advice about once a minute; requires BN4 or SF4 level 1+ |
 | `--augmentation-focus` | `hacking` | `hacking` or `all` |
@@ -128,6 +135,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--home-reserve` | `8` | Minimum daemon reserve; automatically raised for optional helper RAM |
 | `--darknet` / `--darknet-phish` | `true` / `true` | Supervise resilient exploration, cache collection, RAM reclamation, and idle phishing after Darkscape unlock |
 | `--darknet-phish-threads` / `--darknet-max-attempts` | `1024` / `600` | Bound per-server phishing workers and password attempts |
+| `--darknet-concurrency` / `--darknet-agent-threads` | `4` / `4` | Crack several visible neighbors concurrently and scale roaming calls when a server has spare RAM |
 | `--darknet-stasis` / `--darknet-stasis-depth` | `false` / `8` | Opt in to scarce stasis links on sufficiently deep servers |
 | `--darknet-migrate` / `--darknet-migrate-depth` | `false` / `8` | Opt in to induced migration of deep movable neighbors |
 | `--darknet-promote-stock` / `--darknet-stock-symbols` | `false` / `auto` | Opt in to volatility promotion for held or explicitly listed symbols |
@@ -183,6 +191,22 @@ Agents solve every current upstream server-model family, traverse the Labyrinth,
 reclaim blocked RAM, open caches, and use otherwise-idle RAM for phishing. Darknet
 RAM is intentionally separate from the timing-sensitive JIT allocator.
 
+The roaming crawler enters through a 15.90 GB dynamic-RAM bootstrap, below the
+16 GB `darkweb` limit; the game still enforces every API actually called. Expensive
+optional calls (stasis, migration, stock promotion, freezing, and Storm Seed) run
+as isolated one-shot workers so enabling their code cannot prevent exploration.
+Neighbor authentication is bounded-concurrent, preventing one slow server from
+stalling every other visible route.
+
+To restart a supervisor-launched coordinator without reproducing its arguments,
+run `darknet-restart.js` on home. It resolves and stops the real manager PID, then
+waits for the supervisor or starts a replacement directly.
+Run `darknet-status.js` for a one-shot activity report, or
+`darknet-status.js --watch` for a live tail window showing coverage, agents,
+deployments, caches, blockers, and the most recent event.
+After syncing dashboard changes, run `supervisor-restart.js` to reload the
+supervisor while preserving its saved profile and command-line flags.
+
 When `Formulas.exe` becomes available, active agents immediately use Darknet
 formulas to estimate authentication and Heartbleed timing, retry cooldowns, and
 the number of memory-reallocation calls. The coordinator and dashboard expose the
@@ -206,7 +230,11 @@ by estimated payback. After bootstrapping the first cloud server, it requires a
 fresh live scheduler snapshot, productive lanes, and RAM pressure. It defers when
 batch/worker/launch pressure suggests a throughput bottleneck. Estimated marginal
 income uses current income per used GB, a 50% discount, and batch-rate headroom;
-it is a heuristic, not a guarantee. Default maximum payback is 1800 seconds.
+it is a heuristic, not a guarantee. Default maximum payback is 1800 seconds. If
+the available action budget is at least four times the cheapest RAM improvement,
+a surplus-cash override buys the affordable candidate adding the most RAM even
+when conservative scheduler/ROI evidence is unavailable or rejects every candidate.
+Savings, stock, percentage and per-action cash limits still apply.
 
 Configure it directly at supervisor startup:
 
@@ -214,8 +242,9 @@ Configure it directly at supervisor startup:
 run supervisor.js --profile assist --cloud-payback 3600
 ```
 
-`--cloud-roi false` restores affordability-based purchases. Use it if the
-conservative gate prevents capacity growth you want. Existing managers must be
+`--cloud-roi false` restores unconditional affordability-based purchases. The
+default surplus override prevents large unprotected balances from stalling fleet
+growth while retaining ROI discipline at smaller balances. Existing managers must be
 restarted to change flags. The dashboard's `RAM investment` row explains decisions.
 
 ## Plan augmentations

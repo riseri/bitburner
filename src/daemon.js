@@ -171,18 +171,12 @@ export async function main(ns) {
 	publishHackPause(controlPort, 0, "startup");
 
 	// Stop the old single-host controller if it exists.
-	ns.scriptKill("jit.js", HOME);
+	for (const process of ns.ps(HOME).filter(process => process.filename === "jit.js")) ns.kill(process.pid);
 
 	const deployed = new Set([HOME]);
 
 	const cloudState =
 		createCloudState();
-
-	refreshCloudState(
-		ns,
-		cfg,
-		cloudState
-	);
 
 	startFleetManager(
 		ns,
@@ -407,155 +401,6 @@ function applyFleetStatus(
 	}
 }
 
-function refreshCloudState(
-	ns,
-	cfg,
-	state
-) {
-	state.enabled =
-		cfg.cloud.enabled;
-
-	const names =
-		ns.cloud.getServerNames();
-
-	const limit =
-		ns.cloud.getServerLimit();
-
-	const ramLimit =
-		ns.cloud.getRamLimit();
-
-	const servers =
-		names.map(
-			name => ({
-				name,
-				ram:
-					ns.getServerMaxRam(
-						name
-					),
-			})
-		);
-
-	state.count =
-		names.length;
-
-	state.limit =
-		limit;
-
-	state.ramLimit =
-		ramLimit;
-
-	state.totalRam =
-		servers.reduce(
-			(sum, server) =>
-				sum +
-				server.ram,
-			0
-		);
-
-	state.minRam =
-		servers.length
-			? Math.min(
-				...servers.map(
-					server =>
-						server.ram
-				)
-			)
-			: 0;
-
-	state.maxRam =
-		servers.length
-			? Math.max(
-				...servers.map(
-					server =>
-						server.ram
-				)
-			)
-			: 0;
-
-	state.nextAction =
-		describeNextCloudAction(
-			ns,
-			cfg,
-			servers,
-			limit,
-			ramLimit
-		);
-}
-
-function describeNextCloudAction(
-	ns,
-	cfg,
-	servers,
-	limit,
-	ramLimit
-) {
-	if (!cfg.cloud.enabled) {
-		return "management disabled";
-	}
-
-	if (
-		servers.length <
-		limit
-	) {
-		const ram =
-			Math.min(
-				ramLimit,
-				cfg.cloud.minRam
-			);
-
-		const cost =
-			ns.cloud.getServerCost(
-				ram
-			);
-
-		return (
-			`buy ${formatRam(ram)} ` +
-			`for ${cash(cost)}`
-		);
-	}
-
-	const weakest =
-		servers
-			.filter(
-				server =>
-					server.ram <
-					ramLimit
-			)
-			.sort(
-				(a, b) =>
-					(
-						a.ram -
-						b.ram
-					) ||
-					a.name.localeCompare(
-						b.name
-					)
-			)[0];
-
-	if (!weakest) {
-		return "fleet maxed";
-	}
-
-	const targetRam =
-		Math.min(
-			ramLimit,
-			weakest.ram * 2
-		);
-
-	const cost =
-		ns.cloud.getServerUpgradeCost(
-			weakest.name,
-			targetRam
-		);
-
-	return (
-		`upgrade ${weakest.name} -> ` +
-		`${formatRam(targetRam)} ` +
-		`for ${cash(cost)}`
-	);
-}
-
-
 /* =========================================================
 	 NETWORK / ROOTING
 	 ========================================================= */
@@ -569,21 +414,6 @@ async function refreshNetwork(
 ) {
 	const servers =
 		scanNetwork(ns);
-
-	for (
-		const cloudServer
-		of ns.cloud.getServerNames()
-	) {
-		if (
-			!servers.includes(
-				cloudServer
-			)
-		) {
-			servers.push(
-				cloudServer
-			);
-		}
-	}
 
 	if (manage) {
 		for (
@@ -823,13 +653,10 @@ function killWorkerScripts(
 		of hosts
 	) {
 		for (
-			const script
-			of WORKERS
+			const process
+			of ns.ps(host.name)
 		) {
-			ns.scriptKill(
-				script,
-				host.name
-			);
+			if (WORKERS.includes(process.filename)) ns.kill(process.pid);
 		}
 	}
 }
@@ -4037,9 +3864,12 @@ function consumeEvents(ns, port, batches, stats, target, runtime, cfg, running, 
 			}
 			if (chunk.phase === "W2") {
 				stats.lastW2 = Number(event.finishedAt);
-				// Use the worker's completion snapshot, not potentially newer dirty
-				// state sampled by a controller consuming a delayed event.
-				if (Number.isFinite(event.moneyAfter) && Number.isFinite(event.securityAfter)) {
+				// A phase may be split across hosts. Earlier W2 chunks are only a
+				// partial weaken and are not expected to restore the target by themselves.
+				// The final event's snapshot is taken after every earlier reported chunk
+				// has already applied its effect, so validate only the completed phase.
+				if (batch.phases.W2.complete &&
+					Number.isFinite(event.moneyAfter) && Number.isFinite(event.securityAfter)) {
 					if (event.moneyAfter < ns.getServerMaxMoney(target) * 0.995 ||
 						event.securityAfter > ns.getServerMinSecurityLevel(target) + 0.02) {
 						problem ??= { kind: "recover", reason: "target not restored at W2 completion" };
@@ -4523,6 +4353,7 @@ function renderDashboard(
 		}
 		if ((Number(stats.restarts) || 0) > 0 || (Number(stats.resyncs) || 0) > 0) {
 			row("Restarts", `${stats.restarts} session | ${stats.resyncs} safety resyncs`);
+			if (stats.lastReason && stats.lastReason !== "none") row("Last resync", stats.lastReason);
 		}
 		if (cloudState.error) row("Cloud error", cloudState.error);
 		if (prep?.error) row("Prep error", prep.error);
@@ -4608,6 +4439,7 @@ function renderSchedulerDashboard(ns, pool) {
 			restarts: p.stats.restarts, resyncs: p.stats.resyncs, admissionSkips: p.admissionSkips,
 			allocationFails: p.stats.allocationFails, idleRetunes: p.idleRetunes || 0, admissionReason: p.admissionReason || "",
 			note: p.recovery?.reason || p.drain?.reason || p.admissionReason || p.note,
+			lastReason: p.stats.lastReason || "",
 			workerRam: p.runningRam, epoch: p.epoch };
 	});
 	const totalRam = pool.network.hosts.reduce((n, host) => n + host.maxRam, 0);
@@ -4645,17 +4477,16 @@ function renderSchedulerDashboard(ns, pool) {
 		renderDashboard(ns, p.name, p.runtime, pool.network, p.cfg, p.stats, p.queue,
 			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
 			p.drain, p.recovery, pool.foreign);
-		const slotPressure = p.admissionReason || p.stats.allocationFails;
+		const currentSlotPressure = Boolean(p.admissionReason);
+		const slotHistory = currentSlotPressure || p.stats.allocationFails || p.admissionSkips;
 		if (p.cfg.dashboardDetails) {
-			if (slotPressure || p.idleRetunes || pool.cfg.maxTargets > 1) dashboardSection(ns, "Scheduler diagnostics");
-			if (slotPressure) dashboardRow(ns, "Batch slots",
-				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+			if (slotHistory || p.idleRetunes || pool.cfg.maxTargets > 1) dashboardSection(ns, "Scheduler diagnostics");
+			if (slotHistory) dashboardRow(ns, "Batch admission", batchAdmissionSummary(p));
 			if (p.idleRetunes) dashboardRow(ns, "Idle replans", p.idleRetunes);
 			if (pool.cfg.maxTargets > 1) dashboardRow(ns, "Target slots", `1/${pool.cfg.maxTargets} | ${pool.note}`);
-		} else if (slotPressure) {
-			dashboardSection(ns, "Scheduler attention");
-			dashboardRow(ns, "Batch slots",
-				`${p.stats.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+		} else if (currentSlotPressure) {
+			dashboardSection(ns, "Scheduler capacity");
+			dashboardRow(ns, "Batch admission", batchAdmissionSummary(p));
 		}
 		return;
 	}
@@ -4686,14 +4517,15 @@ function renderSchedulerDashboard(ns, pool) {
 
 	const problemRows = rows.filter(p => !["LIVE", "WARMUP"].includes(p.mode) ||
 		hasDashboardCounters(p.misses) || p.local || p.fallback || p.restarts ||
-		p.admissionReason || p.allocationFails);
+		p.admissionReason);
 	if (problemRows.length || pool.cloudState.error) {
 		dashboardSection(ns, "Attention");
 		for (const p of problemRows) {
 			if (!["LIVE", "WARMUP"].includes(p.mode) && p.note) row(p.target, `${p.mode}: ${p.note}`);
 			if (hasDashboardCounters(p.misses)) row(`${p.target} misses`, dashboardCounters(p.misses));
 			if (p.local || p.fallback || p.restarts) row(`${p.target} recovery`, `${p.local} local | ${p.fallback} fallback | ${p.restarts} rebuilds`);
-			if (p.admissionReason || p.allocationFails) row(`${p.target} slots`, `${p.allocationFails} RAM failures | ${p.admissionSkips} budget skips | ${p.admissionReason || "accepting"}`);
+			if (p.restarts && p.lastReason && p.lastReason !== "none") row(`${p.target} last`, p.lastReason);
+			if (p.admissionReason) row(`${p.target} admission`, batchAdmissionSummary(p));
 		}
 		if (pool.cloudState.error) row("Cloud error", pool.cloudState.error);
 	}
@@ -4709,7 +4541,7 @@ function renderSchedulerDashboard(ns, pool) {
 			row("Pipe recovery", `${p.local} local | ${p.fallback} fallback | ${p.restarts} target rebuilds`);
 			row("Timing", `gap ${p.gap}ms | period ${dashboardTime(p.period)} | lead ${p.lead}ms`);
 			row("Drift", `max ${p.drift.toFixed(2)}ms | spacing ${p.spacing === null ? "n/a" : `${p.spacing.toFixed(1)}ms`}`);
-			row("Admission", `${p.admissionSkips} load limited | ${p.allocationFails} RAM failures | ${p.admissionReason || "accepting"}`);
+			row("Admission", batchAdmissionSummary(p));
 			row("Target earned", `${cash(p.earned)} | ${p.paid} paid batches`);
 		}
 
@@ -4726,6 +4558,11 @@ function renderSchedulerDashboard(ns, pool) {
 	} else {
 		ns.print("  Details: restart with --dashboard-details true");
 	}
+}
+
+function batchAdmissionSummary(p) {
+	const state = p.admissionReason ? `waiting: ${p.admissionReason}` : "currently accepting";
+	return `${state} | ${p.allocationFails || 0} RAM deferrals | ${p.admissionSkips || 0} rate-limit deferrals`;
 }
 
 function renderPrep(
@@ -4771,12 +4608,12 @@ function renderPrep(
 
 function incomeRate(
 	stats,
-	window,
+	windowMs,
 	now
 ) {
 	const cutoff =
 		now -
-		window;
+		windowMs;
 
 	const money =
 		stats.income.reduce(
@@ -4795,7 +4632,7 @@ function incomeRate(
 		Math.max(
 			1,
 			Math.min(
-				window,
+				windowMs,
 				now -
 				stats.started
 			)
@@ -4812,13 +4649,13 @@ function incomeRate(
 
 function countRate(
 	samples,
-	window,
+	windowMs,
 	started,
 	now
 ) {
 	const cutoff =
 		now -
-		window;
+		windowMs;
 
 	const count =
 		samples.filter(
@@ -4831,7 +4668,7 @@ function countRate(
 		Math.max(
 			1,
 			Math.min(
-				window,
+				windowMs,
 				now -
 				started
 			)

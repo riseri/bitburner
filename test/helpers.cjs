@@ -61,9 +61,10 @@ class Port {
 }
 
 function loadScript(file, clock, extra = {}) {
-	if (['daemon.js', 'darknet-agent.js', 'augmentation-manager.js', 'lib/background-prep.js'].includes(file)) {
+	if (['daemon.js', 'augmentation-manager.js', 'lib/background-prep.js'].includes(file)) {
 		extra = { ...loadScript('lib/formulas.js', clock), ...extra };
 	}
+	if (file === 'darknet-agent.js') extra = { ...loadScript('lib/darknet-formulas.js', clock), ...extra };
     if (['progression-manager.js', 'augmentation-manager.js'].includes(file)) extra = { ...loadScript('lib/augmentation-loop.js', clock), ...extra };
     if (file === 'darknet-agent.js') extra = { ...loadScript('lib/darknet-solvers.js', clock), ...extra };
     if (file === 'augmentation-manager.js') extra = { ...loadScript('lib/augmentation-plan.js', clock), ...extra };

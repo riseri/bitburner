@@ -120,6 +120,24 @@ test('out-of-order delivery and split W2 finalize only after every chunk is term
     assert.equal(f.stats.profitable, 1); assert.equal(f.running.size, 0);
 });
 
+test('a partial split W2 snapshot does not claim the target failed restoration', () => {
+    const f = fixture(), b = f.batch('1', f.clock.now + 1000, true); f.track(b);
+    f.done(b, 'W2', 0, { moneyAfter: 1000, securityAfter: 16 });
+    assert.equal(f.consume(), null);
+    assert.equal(b.phases.W2.complete, false);
+    f.done(b, 'W2', 0, { moneyAfter: 1000, securityAfter: 12 });
+    assert.equal(f.consume(), null);
+    assert.equal(b.phases.W2.complete, true);
+});
+
+test('the final split W2 snapshot still detects a real restoration failure', () => {
+    const f = fixture(), b = f.batch('1', f.clock.now + 1000, true); f.track(b);
+    f.done(b, 'W2', 0, { moneyAfter: 1000, securityAfter: 16 });
+    assert.equal(f.consume(), null);
+    f.done(b, 'W2', 0, { moneyAfter: 1000, securityAfter: 13 });
+    assert.match(f.consume().reason, /not restored/);
+});
+
 test('a W2 safety fault still finalizes the batch instead of creating an overdue ghost', () => {
     const f = fixture(), b = f.batch(); f.track(b);
     for (const phase of ['H', 'W1', 'G']) { f.done(b, phase, phase === 'H' ? 250 : 0); f.consume(); }
