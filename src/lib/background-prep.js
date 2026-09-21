@@ -10,6 +10,12 @@ const SLOT_FILL_HORIZON_MS = 10 * 60_000;
 const GROW = "background-grow.js";
 const WEAKEN = "background-weaken.js";
 
+export function recentPipelineIncome(stats, runtime, now = Date.now()) {
+	const period = Math.max(0, Number(runtime?.plan?.period) || 0);
+	const tolerance = Math.max(10_000, period * 2 + 1_000);
+	return Number.isFinite(stats?.lastHackAt) && now - stats.lastHackAt < tolerance;
+}
+
 export function backgroundPrepFiles() { return [GROW, WEAKEN]; }
 
 export function createBackgroundPrep(options = {}) {
@@ -204,7 +210,7 @@ function stepPrep(ns, ctx, now) {
 	if (state.trouble && trouble !== state.trouble) state.quietUntil = now + QUIET_MS;
 	state.trouble = trouble;
 	const productive = stats.pipeline.completed * runtime.plan.period >= PRODUCTIVE_MS;
-	const recentIncome = Number.isFinite(stats.lastHackAt) && now - stats.lastHackAt < 10_000;
+	const recentIncome = recentPipelineIncome(stats, runtime, now);
 	const healthy = ctx.healthy && productive && recentIncome && now >= state.quietUntil;
 
 	if (!state.enabled || (!ctx.repair && (!healthy || state.target === ctx.target || ctx.activeTargets?.has(state.target)))) {

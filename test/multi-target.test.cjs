@@ -246,6 +246,17 @@ test('one target cannot electively retune while its peer is warming up',()=>{
     assert.equal(f.a.drain,null);assert.equal(f.b.drain,null);
 });
 
+test('the sole earning target is never drained for an elective retune',()=>{
+    const f=fixture();f.pool.pipelines.delete('beta');
+    f.a.stats.pipeline.completed=2000;f.a.stats.lastHackAt=f.clock.now;
+    f.a.tunedLevel=1;f.a.runtime.capacity=100;f.a.runtime.plan.ramTime=100000;
+    f.a.tunedCapacity=100;f.a.lastCapacityRetune=f.clock.now-20*60*1000;
+    f.pool.network={hosts:[{name:'cloud',maxRam:10000,cores:1}]};
+    f.multi.servicePipelineMaintenance({...f.ns,getHackingLevel:()=>500},f.pool);
+    assert.equal(f.a.drain,null);
+    assert.equal(f.a.mode,'RUNNING');
+});
+
 test('retiring a repairing lane retains its RAM until its owned prep PID is confirmed gone',()=>{
     const f=fixture();
     f.b.repair={enabled:true,active:{pid:999,host:'cloud',ram:40},preemptions:0};

@@ -1,4 +1,4 @@
-import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, emptySlotIncomeFloor } from "lib/background-prep.js";
+import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, emptySlotIncomeFloor, recentPipelineIncome } from "lib/background-prep.js";
 
 // One event loop, one allocation ledger. A pipeline never owns the global ports,
 // process map, or reservation array. Changing its epoch cannot erase a peer.
@@ -563,18 +563,20 @@ function servicePipelineMaintenance(ns, pool) {
 		// A long-running daemon changes model only after its owned work drains,
 		// preserving every already-scheduled landing while adopting the newly
 		// unlocked formulas without requiring a restart.
+		const peers = [...pool.pipelines.values()].filter(other => other !== p && other.mode !== "RETIRED");
+		const hasProductiveCoverage = peers.some(other => productive(other, Date.now()));
 		const formulaMode = pool.api.hackingFormulasAvailable
 			? pool.api.hackingFormulasAvailable(ns) : Boolean(p.runtime?.formulas);
-		if (p.mode === "RUNNING" && Boolean(p.runtime?.formulas) !== formulaMode) {
+		if (p.mode === "RUNNING" && hasProductiveCoverage && Boolean(p.runtime?.formulas) !== formulaMode) {
 			beginPipelineDrain(pool, p, { kind: "drain", afterKind: "retune",
 				reason: `${formulaMode ? "Formulas.exe unlocked" : "Formulas API unavailable"}; retune ${p.name}` });
 			return;
 		}
 		// Elective work must never take down the other earner during a peer's
 		// initial trial, recovery or warmup. Only the affected target is drained.
-		const peerBusy = [...pool.pipelines.values()].some(other => other !== p &&
+		const peerBusy = peers.some(other =>
 			(other.mode !== "RUNNING" || other.recovery || other.trial || !productive(other, Date.now())));
-		if (p.mode === "RUNNING" && !p.recovery && !p.trial && !peerBusy) {
+		if (p.mode === "RUNNING" && !p.recovery && !p.trial && hasProductiveCoverage && !peerBusy) {
 			const earnedMs = p.stats.pipeline.completed * p.runtime.plan.period;
 			const levelRetune = earnedMs >= 15 * 60_000 &&
 				ns.getHackingLevel() >= Math.max(p.tunedLevel + 10, Math.ceil(p.tunedLevel * 1.10));
@@ -594,7 +596,7 @@ function servicePipelineMaintenance(ns, pool) {
 function productive(p, now) {
 	return p?.mode === "RUNNING" && !p.recovery && !p.drain &&
 		p.stats.pipeline.completed * p.runtime.plan.period >= PRODUCTIVE_MS &&
-		Number.isFinite(p.stats.lastHackAt) && now - p.stats.lastHackAt < 10_000;
+		recentPipelineIncome(p.stats, p.runtime, now);
 }
 
 function steadyPromotionSupport(pool, now) {

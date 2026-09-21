@@ -30,6 +30,12 @@ occupied and both lanes are stable and productive, spare RAM can prepare a third
 candidate. A stronger ready candidate replaces the support lane after its owned
 work drains; at most two earning lanes remain active.
 
+Formula, skill, and capacity retunes are elective. The daemon never drains its only
+productive lane for one of those optimizations; it waits until another fully
+productive lane can cover income. Safety recovery may still pause the affected
+target. Pipeline health treats income as recent for at least two planned batch
+periods, so a valid low-rate plan does not falsely block background preparation.
+
 ## Shared limits and priority
 
 The whole controller has one host RAM reservation ledger, one process map and one

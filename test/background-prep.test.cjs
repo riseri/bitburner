@@ -2,6 +2,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Clock, loadScript } = require('./helpers.cjs');
 
+test('pipeline income freshness scales with the planned payout period',()=>{
+    const clock=new Clock(),api=loadScript('lib/background-prep.js',clock);
+    assert.equal(api.recentPipelineIncome({lastHackAt:clock.now-15000},{plan:{period:20000}},clock.now),true);
+    assert.equal(api.recentPipelineIncome({lastHackAt:clock.now-50000},{plan:{period:20000}},clock.now),false);
+});
+
 function fixture(options = {}) {
     const clock = new Clock();
     const prep = loadScript('lib/background-prep.js', clock);

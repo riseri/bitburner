@@ -1,7 +1,7 @@
 import { runTargetPipelines } from "lib/target-pipelines.js";
 import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
-import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary } from "lib/background-prep.js";
+import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary, recentPipelineIncome } from "lib/background-prep.js";
 import { hackingFormulasAvailable, preparedHackingModel } from "lib/formulas.js";
 
 const HOME = "home";
@@ -4305,7 +4305,7 @@ function renderDashboard(
 	const pending = nextPendingHackLanding(batches);
 	const hackStatus = drain ? `DRAINING | ${running.size} workers left`
 		: recovery ? `PAUSED | deadline ${dashboardTime(Math.max(0, recovery.deadline - now))}`
-		: Number.isFinite(stats.lastHackAt) && now - stats.lastHackAt < 10_000 ? "LIVE"
+		: recentPipelineIncome(stats, runtime, now) ? "LIVE"
 		: Number.isFinite(pending)
 			? pending > now ? `ETA ${dashboardTime(pending - now)}` : `DUE +${dashboardTime(now - pending)}`
 			: "WAITING";
@@ -4325,7 +4325,7 @@ function renderDashboard(
 	row("Model", `${cash(p.expected)}/s estimate`);
 	row("Money", `${moneyPct.toFixed(1)}% | ${cash(money)} / ${cash(maxMoney)}`);
 	row("Security", `+${secDelta.toFixed(3)} | ${sec.toFixed(3)} / ${minSec.toFixed(3)}`);
-	row("Pipeline", `${running.size} running | ${queue.length} queued | ${batch60.toFixed(3)} batches/s`);
+	row("Pipeline", `${running.size} running | ${queue.length} queued | ${batch60.toFixed(3)}/s actual | ${p.batchRate.toFixed(3)}/s planned`);
 	row("RAM online", `${formatRam(usedRam)} / ${formatRam(totalRam)} (${(100 * usedRam / Math.max(1, totalRam)).toFixed(1)}%)`);
 
 	if (prep?.target || prep?.candidate || prep?.status && prep.status !== "DISABLED") {
@@ -4425,7 +4425,7 @@ function renderSchedulerDashboard(ns, pool) {
 		const mode = p.retiring ? "RETIRING" : p.drain ? "DRAINING" : p.recovery ? "RECOVERING" :
 			p.mode !== "RUNNING" ? p.mode : !p.running.size && !p.queue.length &&
 				now >= p.firstLanding ? "IDLE" :
-				Number.isFinite(p.stats.lastHackAt) && now - p.stats.lastHackAt < 10_000 ? "LIVE" : "WARMUP";
+				recentPipelineIncome(p.stats, p.runtime, now) ? "LIVE" : "WARMUP";
 		return { target: p.name, mode, role: p.trial ? "TRIAL" : p.name === pool.anchor ? "PRIORITY" : "SUPPORT",
 			income60: incomeRate(p.stats, 60_000, now), model: p.runtime?.plan.expected || 0,
 			earned: p.stats.money, paid: p.stats.profitable, running: p.running.size, queued: p.queue.length,
