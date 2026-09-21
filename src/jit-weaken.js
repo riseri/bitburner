@@ -1,4 +1,4 @@
-// Worker dependency revision: dynamic-start-window-v2. Refreshes cached entry RAM after helper changes.
+// Worker dependency revision: generation-control-v3. Refreshes cached entry RAM after helper changes.
 import { runJitWorker } from "lib/jit-worker.js";
 
 /** @param {NS} ns */

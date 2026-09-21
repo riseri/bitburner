@@ -14,6 +14,7 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 	const plannedLaunch = Number(ns.args[9] ?? Date.now());
 	const prep = phase.startsWith("PREP-");
 	const epoch = String(ns.args[12] ?? "");
+	const generation = Number(ns.args[13] ?? 0);
 	const port = ns.getPortHandle(Number(portArg));
 	const controlPort = controlNumber > 0 ? ns.getPortHandle(controlNumber) : null;
 	const minSecurity = ns.getServerMinSecurityLevel(target);
@@ -26,14 +27,23 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 		const controlSnapshot = controlPort?.peek();
 		const control = controlSnapshot?.version === 2 ? controlSnapshot.targets?.[target] : controlSnapshot;
 		if (!prep && epoch && (controlSnapshot?.version !== 2 || control?.epoch !== epoch)) {
-			await report(ns, port, { type: "skip", phase, batchId, chunkId, target,
+			await report(ns, port, { type: "skip", phase, batchId, chunkId, target, epoch, generation,
 				finishedAt: now, reason: "stale or missing target epoch" });
+			return;
+		}
+		if (!prep && (generation > 0 || control?.generations) &&
+			(controlSnapshot?.type !== "jit-control" || !Number.isInteger(generation) ||
+			 !Array.isArray(control?.generations) || !control.generations.includes(generation) || !epoch ||
+			 !Number.isSafeInteger(controlSnapshot.ownerPid) || controlSnapshot.ownerPid <= 0 ||
+			 String(controlSnapshot.ownerPid) !== epoch.split(":")[0] || !ns.isRunning(controlSnapshot.ownerPid))) {
+			await report(ns, port, { type: "skip", phase, batchId, chunkId, target, epoch, generation,
+				finishedAt: now, reason: "unknown or retired generation/owner" });
 			return;
 		}
 		// A call-time latch, not a comparison of a 2s pause with a landing 90s away.
 		// The controller separately cancels hacks which have already called ns.hack.
 		if (!prep && phase === "H" && (controlSnapshot?.type === "jit-control") && control?.paused) {
-			await report(ns, port, { type: "skip", phase, batchId, chunkId, target,
+			await report(ns, port, { type: "skip", phase, batchId, chunkId, target, epoch, generation,
 				finishedAt: now, reason: "H call suppressed during recovery" });
 			return;
 		}
@@ -61,7 +71,7 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 
 		const options = hackOptions ? hackOptions(target) : {};
 		if (options === null) {
-			await report(ns, port, { type: "skip", phase, batchId, chunkId, target,
+			await report(ns, port, { type: "skip", phase, batchId, chunkId, target, epoch, generation,
 				finishedAt: Date.now(), reason: "H no longer fits the planned steal budget" });
 			return;
 		}
@@ -74,11 +84,11 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 			return;
 		}
 		// Start notifications are optional telemetry. Terminal notifications are reliable.
-		port.tryWrite({ type: "started", phase, batchId, chunkId, target, startedAt,
+		port.tryWrite({ type: "started", phase, batchId, chunkId, target, epoch, generation, startedAt,
 			duration: actualDuration, plannedDuration, landAt, security });
 		const result = await execute(target, { ...options, additionalMsec });
 		const finishedAt = Date.now();
-		await report(ns, port, { type: "done", phase, batchId, chunkId, target, result,
+		await report(ns, port, { type: "done", phase, batchId, chunkId, target, epoch, generation, result,
 			landAt, startedAt, finishedAt, drift: finishedAt - landAt,
 			duration: actualDuration, plannedDuration, security,
 			...(phase === "W2" ? { moneyAfter: ns.getServerMoneyAvailable(target),
@@ -90,7 +100,7 @@ export async function runJitWorker(ns, getDuration, execute, hackOptions = null)
 	async function reportMiss(code, duration, security) {
 		const now = Date.now();
 		await report(ns, port, {
-			type: "miss", code, phase, batchId, chunkId, target, landAt,
+			type: "miss", code, phase, batchId, chunkId, target, epoch, generation, landAt,
 			finishedAt: now,
 			// Separate actual launch lateness from duration inflation due to security.
 			lateBy: Math.max(0, now + duration - landAt),

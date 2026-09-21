@@ -90,6 +90,52 @@ test('probe rejects fragmented launch bursts and rolls back without touching pee
     assert.equal(f.pool.launchBuckets.size,0);
 });
 
+function fragmentedFleet() {
+    const f=fixture();
+    f.pool.network.hosts=[{name:'cloud',maxRam:10000,cores:1},
+        ...Array.from({length:20},(_,i)=>({name:'small-'+i,maxRam:64,cores:8}))];
+    Object.assign(f.ns,{getServerUsedRam:()=>0,growthAnalyzeSecurity:t=>t*.004,
+        weakenAnalyze:(t,c=1)=>t*.05*(1+(c-1)/16)});
+    f.plan={...f.p.runtime.plan,H:4,gEffective:500,hackSecurity:.008};
+    f.landing=f.clock.now+10000;
+    return f;
+}
+
+for(const limit of ['launches','workers']) test(`whole-phase fallback fits ${limit} without leaving rejected reservations`,()=>{
+    const f=fragmentedFleet();if(limit==='workers')f.pool.cfg.maxWorkers=4;
+    const sentinel={host:'peer-host',start:0,end:Infinity,ram:10,chunk:{owner:f.peer,status:'called'}};
+    f.pool.reservations.push(sentinel);f.api.rebuildReservationIndex(f.pool.reservations);
+    const normal=f.api.reserveBatch(f.ns,f.p.name,'normal',f.landing,f.plan,f.pool.network.hosts,
+        f.p.cfg,f.pool.reservations,f.pool.running,f.pool.foreign);
+    assert.ok(normal.chunks.length>8,'core-first placement must actually fragment this batch');
+    assert.equal(f.multi.fitsLaunchBudget(f.pool.launchBuckets,normal.chunks,32),false);
+    f.api.rollbackReservations(f.pool.reservations,1);
+    const result=f.multi.reserveBudgetedBatch(f.ns,f.pool,f.p,'compact',f.landing,f.plan,f.p.cfg);
+    assert.equal(result.compact,true);assert.equal(result.chunks.length,4);
+    assert.equal(f.multi.fitsLaunchBudget(f.pool.launchBuckets,result.chunks,32),true);
+    assert.equal(f.pool.reservations.length,5);assert.equal(f.pool.reservations[0],sentinel);
+    assert.ok(f.pool.reservations.slice(1).every(r=>result.chunks.includes(r.chunk)));
+    assert.equal(f.pool.launchBuckets.size,0,'a successful reservation is not a committed launch');
+    const g=result.chunks.filter(c=>c.phase==='G'),w2=result.chunks.filter(c=>c.phase==='W2');
+    assert.equal(g[0].host,'cloud');assert.equal(g[0].threads,500);
+    assert.ok(w2.reduce((n,c)=>n+f.ns.weakenAnalyze(c.threads,c.cores),0)>=500*.004,
+        'W2 must cover the actual grow thread count after sacrificing the core bonus');
+});
+
+test('compact fallback cannot bypass peer launch reservations and rolls back both placements',()=>{
+    const f=fragmentedFleet(),sentinel={host:'cloud',start:0,end:Infinity,ram:100,
+        chunk:{owner:f.peer,status:'called'}};
+    f.pool.reservations.push(sentinel);f.api.rebuildReservationIndex(f.pool.reservations);
+    const growSlot=Math.floor((f.landing+2*f.cfg.gap-f.plan.times.G-f.cfg.lead)/250);
+    f.pool.launchBuckets.set(growSlot,8);
+    const before=[...f.pool.launchBuckets];
+    const result=f.multi.reserveBudgetedBatch(f.ns,f.pool,f.p,'blocked',f.landing,f.plan,f.p.cfg);
+    assert.equal(result.chunks,null);assert.match(result.reason,/launch budget/);
+    assert.deepEqual(f.pool.reservations,[sentinel]);
+    assert.equal(f.api.reservationIndex(f.pool.reservations).get('cloud')[0],sentinel);
+    assert.deepEqual([...f.pool.launchBuckets],before);
+});
+
 test('yielding tuner can choose a smaller genuinely admissible plan and rejects all-impossible cases',()=>{
     const f=fixture();const host={name:'home',maxRam:131072,cores:6};
     const ns={getServerUsedRam:()=>0,weakenAnalyze:(t,c=1)=>t*.05*(1+(c-1)/16),

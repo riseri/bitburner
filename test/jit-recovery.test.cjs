@@ -416,7 +416,7 @@ test('daemon default dashboard is summary-first and hides the ranking spreadshee
     assert.match(text, /CURRENT RUN/);
     assert.match(text, /Income 60s\s+\$587\.74m\/s/);
     assert.match(text, /Money\s+53\.0% \| \$317\.88m \/ \$600\.00m/);
-    assert.match(text, /Pipeline\s+1 running \| 182 queued \| 2\.267 batches\/s/);
+    assert.match(text, /Pipeline\s+1 running \| 182 queued \| 2\.267\/s actual/);
     assert.match(text, /NEXT TARGET/);
     assert.match(text, /Background\s+the-hub \| WEAKEN \| ETA 44m 10s/);
     assert.doesNotMatch(text, /AUTO TARGET RANKING|Run total|Batch rate|Pipe drift|Core bonus/);

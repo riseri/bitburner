@@ -27,7 +27,7 @@ A new process still needs target preparation when dirty and one initial pipeline
 - Local recovery has an immutable 15-second deadline, checked before deferred health polling. Repeated faults cannot extend it. Money and security must remain clean before the latch opens.
 - A security excursion above minimum +5 is a circuit-breaker event. Stop planning, cancel damaging H/G work in bounded slices, retain useful W tails, then re-evaluate/prep. Do not keep launching batches against an invalid security model.
 - Worker terminal events settle each chunk exactly once. Start events never release RAM. Split phases and out-of-order event delivery must not finalize a batch prematurely. Actual earned money is recorded even when the rest of the batch is recovered.
-- Stale unplanned landing slots are skipped. Productive runtime is required before elective level/capacity retunes, preventing repeated warmup-only reconfiguration.
+- Stale unplanned landing slots are skipped. Elective formula/level/capacity retunes use [same-target generation hot swaps](jit-hot-swap.md): the existing plan keeps earning through shadow tuning and rejected preflights.
 - A growing hacking level causes H threads to be capped at invocation against the reserved steal budget, with growth headroom. Large stat changes can still require safe reconfiguration.
 
 ## Diagnostics

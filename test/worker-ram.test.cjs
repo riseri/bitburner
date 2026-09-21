@@ -52,7 +52,7 @@ test('worker source avoids DOM-reserved identifiers, including the imported help
 
 test('all three entry files carry the dependency revision to invalidate cached costs on sync', () => {
     for (const file of ['jit-hack.js', 'jit-grow.js', 'jit-weaken.js']) {
-        assert.match(fs.readFileSync(path.join(root, 'src', file), 'utf8'), /dynamic-start-window-v2/);
+        assert.match(fs.readFileSync(path.join(root, 'src', file), 'utf8'), /generation-control-v3/);
     }
 });
 

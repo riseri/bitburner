@@ -2378,7 +2378,9 @@ function reserveBatch(
 	for (const chunk of chunks) {
 		chunk.target = target;
 		chunk.epoch = cfg.epoch || "";
+		chunk.generation = cfg.generation;
 	}
+	for (const r of reservations.slice(snapshot)) { r.generation = cfg.generation; r.epoch = cfg.epoch || ""; }
 	return { chunks };
 }
 
@@ -2642,6 +2644,7 @@ function allocateGrow(
 			)
 			.sort(
 				(a, b) =>
+					(cfg.compactPlacement ? compactPlacementOrder(a, b, "bonus", effectiveThreads) : 0) ||
 					(
 						b.bonus -
 						a.bonus
@@ -2800,6 +2803,7 @@ function allocateWeaken(
 			)
 			.sort(
 				(a, b) =>
+					(cfg.compactPlacement ? compactPlacementOrder(a, b, "effect", securityNeeded) : 0) ||
 					(
 						b.effect -
 						a.effect
@@ -2896,6 +2900,16 @@ function allocateWeaken(
 		complete,
 		delivered,
 	};
+}
+
+// Prefer one-process placement when core efficiency would fragment a phase.
+// If no host can hold the whole phase, fill the largest effective capacities
+// first. Actual grow threads still determine the matching W2 security budget.
+function compactPlacementOrder(a, b, weight, needed) {
+	const aWhole = a.capacity * a[weight] >= needed;
+	const bWhole = b.capacity * b[weight] >= needed;
+	if (aWhole !== bWhole) return bWhole ? 1 : -1;
+	return aWhole ? 0 : b.capacity * b[weight] - a.capacity * a[weight];
 }
 
 function createChunk(
@@ -3561,7 +3575,7 @@ function makeBatchState(id, chunks) {
 		landing[chunk.phase] = chunk.landAt;
 		chunk.status = "queued";
 	}
-	return { id: String(id), expected, landing,
+	return { id: String(id), generation: chunks[0]?.generation, epoch: chunks[0]?.epoch, expected, landing,
 		chunks: new Map(chunks.map(chunk => [chunk.chunkId, chunk])),
 		moneyEarned: 0, poisoned: false, paidCounted: false,
 		phases: { H: phaseState(), W1: phaseState(), G: phaseState(), W2: phaseState() } };
@@ -3586,6 +3600,10 @@ function recordPhaseMiss(stats, phase, execFailure = false) {
 function settleChunk(batch, chunk, event, stats) {
 	if (isTerminalChunk(chunk)) return false;
 	chunk.status = event.type;
+	if (batch.generationState) {
+		if (event.type !== "done") batch.generationState.failed = true;
+		if (event.type === "done" && chunk.phase === "H") batch.generationState.hackLanded = true;
+	}
 	const state = batch.phases[chunk.phase];
 	state.count++;
 	if (event.type === "done") {
@@ -3598,7 +3616,7 @@ function settleChunk(batch, chunk, event, stats) {
 			batch.moneyEarned += earned;
 			stats.lastHackAt = finished;
 			stats.lastHackLanding = chunk.landAt;
-			stats.income.push({ time: finished, money: earned });
+			stats.income.push({ time: finished, money: earned, generation: batch.generation });
 		}
 	} else {
 		state.skipped = true;
@@ -3626,7 +3644,7 @@ function finishReadyBatches(batches, stats, cfg) {
 			const spacing = b.min - a.max;
 			stats.minSpacing = Math.min(stats.minSpacing, spacing);
 			stats.pipeline.minSpacing = Math.min(stats.pipeline.minSpacing, spacing);
-			if (spacing < minimumSpacing(cfg)) {
+			if (spacing < minimumSpacing(batch.cfg || cfg)) {
 				batch.poisoned = true;
 				problem ??= { kind: "recover", reason: `unsafe ${order[i - 1]} -> ${order[i]} spacing ${spacing.toFixed(1)}ms` };
 			}
@@ -3637,6 +3655,11 @@ function finishReadyBatches(batches, stats, cfg) {
 			stats.completed++;
 			stats.pipeline.completed++;
 			stats.batchTimes.push(batch.phases.W2.max);
+		}
+		if (batch.generationState) {
+			if (batch.poisoned || batch.phases.H.skipped) batch.generationState.failed = true;
+			else if (batch.restored) batch.generationState.confirmed = true;
+			else if (batch.generationState.state === "CUTOVER") batch.generationState.failed = true;
 		}
 		// Finalize even when a safety check fails. No early-return orphan batch.
 		batches.delete(id);
@@ -3817,6 +3840,8 @@ function consumeEvents(ns, port, batches, stats, target, runtime, cfg, running, 
 		const batch = batches.get(String(event.batchId));
 		const chunk = batch?.chunks.get(String(event.chunkId));
 		if (!chunk || chunk.phase !== event.phase || isTerminalChunk(chunk)) continue;
+		if (batch.generation != null && (event.generation !== batch.generation || event.epoch !== batch.epoch)) continue;
+		const batchCfg = batch.cfg || cfg;
 		if (event.type === "started") {
 			chunk.status = "called";
 			chunk.startedAt = Number(event.startedAt);
@@ -3851,14 +3876,16 @@ function consumeEvents(ns, port, batches, stats, target, runtime, cfg, running, 
 			stats.pipeline.driftSum += drift;
 			stats.pipeline.driftCount++;
 			stats.pipeline.driftMax = Math.max(stats.pipeline.driftMax, drift);
-			if (drift >= cfg.gap - minimumSpacing(cfg)) {
+			if (drift >= batchCfg.gap - minimumSpacing(batchCfg)) {
+				if (batch.generationState) batch.generationState.failed = true;
 				problem ??= { kind: "recover", reason: `${chunk.phase} completion drift ${drift.toFixed(1)}ms` };
 			}
 			if (chunk.phase === "H" && Number.isFinite(stats.lastW2)) {
 				const spacing = Number(event.finishedAt) - stats.lastW2;
 				stats.minSpacing = Math.min(stats.minSpacing, spacing);
 				stats.pipeline.minSpacing = Math.min(stats.pipeline.minSpacing, spacing);
-				if (spacing < minimumSpacing(cfg)) {
+				if (spacing < minimumSpacing(batchCfg)) {
+					if (batch.generationState) batch.generationState.failed = true;
 					problem ??= { kind: "recover", reason: `unsafe W2 -> H spacing ${spacing.toFixed(1)}ms` };
 				}
 			}
@@ -3872,8 +3899,9 @@ function consumeEvents(ns, port, batches, stats, target, runtime, cfg, running, 
 					Number.isFinite(event.moneyAfter) && Number.isFinite(event.securityAfter)) {
 					if (event.moneyAfter < ns.getServerMaxMoney(target) * 0.995 ||
 						event.securityAfter > ns.getServerMinSecurityLevel(target) + 0.02) {
+						if (batch.generationState) batch.generationState.failed = true;
 						problem ??= { kind: "recover", reason: "target not restored at W2 completion" };
-					}
+					} else batch.restored = true;
 				}
 			}
 		}
@@ -3884,8 +3912,8 @@ function consumeEvents(ns, port, batches, stats, target, runtime, cfg, running, 
 
 function findOverdueBatch(batches, cfg) {
 	const now = Date.now();
-	const grace = Math.max(500, cfg.gap * 3);
 	for (const batch of batches.values()) {
+		const grace = Math.max(500, (batch.cfg || cfg).gap * 3);
 		if (batch.landing.H > now) break;
 		for (const chunk of batch.chunks.values()) {
 			if (isTerminalChunk(chunk) || now <= chunk.landAt + grace) continue;
@@ -3960,8 +3988,8 @@ function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runnin
 		chunk.launchIssued = true;
 		const launch = () => ns.exec(chunk.script, chunk.host, chunk.threads,
 			target, chunk.landAt, chunk.batchId, cfg.port, chunk.phase, chunk.chunkId,
-			Math.max(20, cfg.gap), cfg.controlPort, chunk.duration, chunk.launchAt,
-			chunk.stealBudget ?? 0, chunk.threads, chunk.epoch || "");
+			Math.max(20, (batch.cfg || cfg).gap), cfg.controlPort, chunk.duration, chunk.launchAt,
+			chunk.stealBudget ?? 0, chunk.threads, chunk.epoch || "", chunk.generation ?? 0);
 		let pid = launch();
 		if (!pid && reclaimPrepRam(ns, cfg, chunk.host)) pid = launch();
 		if (!pid) {
@@ -4440,7 +4468,19 @@ function renderSchedulerDashboard(ns, pool) {
 			allocationFails: p.stats.allocationFails, idleRetunes: p.idleRetunes || 0, admissionReason: p.admissionReason || "",
 			note: p.recovery?.reason || p.drain?.reason || p.admissionReason || p.note,
 			lastReason: p.stats.lastReason || "",
-			workerRam: p.runningRam, epoch: p.epoch };
+			workerRam: p.runningRam, epoch: p.epoch, generation: p.generation,
+			generations: [...(p.generations?.values() || [])].map(g => ({ number: g.number, state: g.state, level: g.level,
+				model: g.runtime.plan.expected, batchRate: g.runtime.plan.batchRate })),
+			shadow: p.shadow ? { number: p.shadow.number, state: p.shadow.state, trigger: p.shadow.trigger,
+				oldLevel: p.tunedLevel, newLevel: p.shadow.inputs.level,
+				oldIncome: p.runtime?.plan.expected, newIncome: p.shadow.runtime?.plan.expected,
+				oldRate: p.runtime?.plan.batchRate, newRate: p.shadow.runtime?.plan.batchRate,
+				inputs: p.shadow.inputs, createdAt: p.shadow.createdAt, retryAt: p.shadow.retryAt,
+				reason: p.shadow.reason, period: p.shadow.runtime?.plan.period,
+				threads: p.shadow.runtime ? { H: p.shadow.runtime.plan.H, G: p.shadow.runtime.plan.estimatedG,
+					W1: p.shadow.runtime.plan.estimatedW1, W2: p.shadow.runtime.plan.estimatedW2 } : null } : null,
+			cutover: p.swap ? { ...p.swap, eta: Math.max(0, p.swap.firstH - now) } : null,
+			lastSwap: p.lastSwap || null, hotSwaps: { ...p.hotSwaps } };
 	});
 	const totalRam = pool.network.hosts.reduce((n, host) => n + host.maxRam, 0);
 	const prepRam = backgroundPrepRam(pool.cfg.prepStates);
@@ -4477,6 +4517,7 @@ function renderSchedulerDashboard(ns, pool) {
 		renderDashboard(ns, p.name, p.runtime, pool.network, p.cfg, p.stats, p.queue,
 			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
 			p.drain, p.recovery, pool.foreign);
+		renderGenerationStatus(ns, rows[0], pool.cfg.dashboardDetails);
 		const currentSlotPressure = Boolean(p.admissionReason);
 		const slotHistory = currentSlotPressure || p.stats.allocationFails || p.admissionSkips;
 		if (p.cfg.dashboardDetails) {
@@ -4513,6 +4554,7 @@ function renderSchedulerDashboard(ns, pool) {
 	dashboardSection(ns, "Active targets");
 	for (const p of rows) {
 		row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s | money ${(100 * p.money / Math.max(1, p.maxMoney)).toFixed(1)}% | sec +${Math.max(0, p.security - p.minSecurity).toFixed(3)}`);
+		renderGenerationStatus(ns, p, pool.cfg.dashboardDetails);
 	}
 
 	const problemRows = rows.filter(p => !["LIVE", "WARMUP"].includes(p.mode) ||
@@ -4558,6 +4600,26 @@ function renderSchedulerDashboard(ns, pool) {
 	} else {
 		ns.print("  Details: restart with --dashboard-details true");
 	}
+}
+
+function renderGenerationStatus(ns, p, details) {
+	if (!p.generations?.length) return;
+	const plans = p.generations.map(g => `gen ${g.number} ${g.state}`);
+	if (p.shadow) plans.push(`gen ${p.shadow.number} ${p.shadow.state}`);
+	dashboardRow(ns, "Plan", plans.join(p.cutover ? " -> " : " | "));
+	if (p.cutover) dashboardRow(ns, "Cutover", `first new Hack ETA ${dashboardTime(p.cutover.eta)}`);
+	if (p.shadow?.reason) dashboardRow(ns, "Plan waiting", p.shadow.reason);
+	if (!details) return;
+	const s = p.cutover || p.shadow || p.lastSwap;
+	if (s) {
+		dashboardRow(ns, "Plan trigger", `${s.trigger} | level ${s.oldLevel} -> ${s.newLevel}`);
+		if (Number.isFinite(s.newIncome)) dashboardRow(ns, "Plan income", `${cash(s.oldIncome)}/s -> ${cash(s.newIncome)}/s modeled`);
+		if (Number.isFinite(s.newRate)) dashboardRow(ns, "Plan rates", `${s.oldRate}/s -> ${s.newRate}/s`);
+		if (Number.isFinite(s.firstH)) dashboardRow(ns, "Plan boundary", `old W2 ${s.finalOldW2} | new H ${s.firstH} | overlap ${formatRam(s.overlapRam)}`);
+		if (s.reason) dashboardRow(ns, "Plan reason", s.reason);
+	}
+	if (p.shadow) dashboardRow(ns, "Shadow", `${p.shadow.trigger} | level ${p.shadow.inputs.level} | retry ${dashboardTime(Math.max(0, p.shadow.retryAt - Date.now()))}`);
+	dashboardRow(ns, "Hot swaps", `${p.hotSwaps.completed || 0} completed | ${p.hotSwaps.aborted || 0} aborted`);
 }
 
 function batchAdmissionSummary(p) {

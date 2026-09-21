@@ -29,6 +29,7 @@ export function telemetrySnapshot(ns, fleetPort = PORTS.FLEET_STATUS, now = Date
         jit: jit ? { pid: jit.pid, income: jit.income60, earned: jit.earned, usedRam: jit.usedRam, totalRam: jit.totalRam,
             lag: jit.loopLag, note: jit.note,
             targets: (jit.pipelines || []).map(p => ({ name: p.target, mode: p.mode, income: p.income60,
+				generation: p.generation, generations: p.generations, shadow: p.shadow, cutover: p.cutover, hotSwaps: p.hotSwaps,
                 allocationFails: p.allocationFails, admissionSkips: p.admissionSkips, recoveries: p.fallback,
                 local: p.local, idleRetunes: p.idleRetunes, reason: p.admissionReason || p.note })),
             retired: (jit.retired || []).slice(-4) } : null,

@@ -1,316 +1,238 @@
 # Bitburner automation
 
-Two-target JIT hacking, fleet management, contracts, 4S trading, IPvGO, Darknet exploration, and opt-in
-program, backdoor, faction-work, augmentation-purchase, and reset actions.
-`supervisor.js` owns service restarts and the dashboard.
+Start one supervisor to manage hacking, server purchases, contracts, stocks,
+IPvGO, and Darknet exploration. It also shows progression and augmentation advice,
+with optional automatic purchases and resets.
 
-## BitNode, Source-File, and API requirements
+**Start with `run supervisor.js` on `home`.** You do not need Singularity or
+`Formulas.exe` for the hacking system. Features you have not unlocked wait while
+available services keep running.
 
-**You do not need Singularity to run the supervisor.** Individual features have
-their own requirements. BN means your **current BitNode**; SF means an owned
-**Source-File**, which can unlock a feature outside its original BitNode.
+[Quick start](#quick-start) · [Profiles](#choose-a-profile) ·
+[Dashboard help](#understand-the-dashboard) · [Updating](#update-without-killing-everything) ·
+[Useful commands](#useful-commands) · [Full reference](docs/usage-reference.md)
 
-| Feature / command option | Required unlock | Behavior without it |
-| --- | --- | --- |
-| Supervisor, hacking, fleet management, contracts, diagnostics, telemetry | No specific BN or SF gate in this repo; sufficient RAM and the relevant servers/APIs must be available | Normal resource and capability limits still apply |
-| Progression status and recommendations | No Singularity requirement | Reports missing programs/backdoors; does not execute actions |
-| `--progression-actions true`: TOR/program purchases, DarkscapeNavigator, and faction backdoors | **BN4 or SF4 level 1+** (Singularity) | Actions are blocked; other services continue |
-| Darknet exploration | `DarkscapeNavigator.exe`, or BN15/SF15 access that grants it | Coordinator reports `LOCKED`; other services continue |
-| Automatic program savings (`--savings auto` or `programs`) | **BN4 or SF4 level 1+**, plus enabled progression and `--progression-actions true` | Waits instead of creating a new automatic program goal |
-| Augmentation planning (`--augmentations true`, `--augmentation-focus`, `--augmentation-target`, or standalone planner) | **BN4 or SF4 level 1+** | Planner shows `BLOCKED: Singularity is locked` |
-| Augmentation loop (`--augmentation-actions true`) | **BN4 or SF4 level 1+** | Reports how to unlock Singularity and performs no actions |
-| Automatic installation (`--auto-install true`) | **BN4 or SF4 level 1+**, augmentation actions, and the configured queued-augmentation threshold | Remains advisory; no reset occurs |
-| `--savings augmentations` | **BN4 or SF4 level 1+**, enabled augmentation planning, and a fresh complete plan | Automatic savings waits for a plan; an existing goal is preserved |
-| Fixed savings (`--save-amount`, `--save-label`, or standalone `savings.js`) | **No Singularity, BN, or SF requirement** | Cash protection works independently of planning; automatic spending on a program still requires Singularity |
-| 4S stock trading, including long positions | **WSE Account + TIX API + 4S Market Data TIX API access**; no specific BN/SF gate for longs | Stock service is blocked until all three are available; it does not buy access automatically |
-| Short stock positions | All stock access above, plus **BN8 or SF8 level 2+** | Trader uses long-only entries and leaves existing shorts untouched |
-| IPvGO bot | Ordinary `ns.go` API; **no Singularity requirement** | The bot reports API/game errors if unavailable; it does not use the SF14.2-only `go.cheat` APIs |
+## Quick start
 
-These are feature gates in this implementation, not a promise of identical income
-or server availability in every BitNode. BitNode rules and multipliers still apply.
-The hacking daemon does **not** require `Formulas.exe`. It uses a conservative
-fallback model until the program appears, then safely drains each lane and retunes
-with exact hacking formulas without restarting the daemon. Background target
-admission switches on its next candidate evaluation.
+### 1. Sync the files from your computer
 
-SF4 level 1 is enough to unlock Singularity, but outside BN4 its APIs have higher
-RAM costs at lower SF4 levels. An unlocked planner or progression actor can still
-show `WAITING_RAM`; the supervisor never kills workers to force a helper to fit.
-
-The `assist` and `hands-off` profiles need Singularity for their progression
-actions; augmentation savings also needs it for planning. Fixed savings does not.
-**Selecting a profile does not unlock the required API.**
-
-## Setup and start
-
-Use Node 22 locally:
+Install Node.js 22, then open a terminal **in this repository** and run:
 
 ```sh
 npm ci
 npm run dev
 ```
 
-Connect the game's remote file API to the Filesync server on port 12525. Filesync
-uploads **all of `src`**, including `lib`. In the game's terminal on home:
+Keep that terminal open. In Bitburner, connect the game's **Remote File API** to
+Filesync on port **12525**. Wait for the upload to finish. The sync includes
+all of `src`, including its `lib` folder.
+
+### 2. Start automation in the game
+
+In **Bitburner's terminal on `home`**, run:
 
 ```text
 run supervisor.js
 ```
 
-That one command starts the money engine, fleet, contracts, stocks, Go, progression
-planning, startup diagnostics, periodic augmentation advice, and telemetry. Locked
-capabilities appear as blocked; optional helpers wait for RAM without stopping
-other services. All results appear in the supervisor dashboard.
+Run only one supervisor. It starts and monitors the other services, so you do not
+need to launch `daemon.js` or the individual managers yourself. Open the
+supervisor's script log for the overall dashboard; the daemon's log shows the
+hacking dashboard.
 
-The same command also works on a completely new 8 GB home. The supervisor enters
-starter mode and uses all remaining home RAM for a small multithreaded worker that
-weakens, grows, and hacks `n00dles`. It rescales that worker after RAM upgrades,
-displays the combined core RAM target, and automatically launches the normal
-daemon/fleet stack after home RAM is large enough for all three core processes.
+### 3. Let it get established
 
-Three profiles cover the normal operating modes:
+- **New 8 GB home:** starter mode runs a small n00dles worker. Upgrade home RAM as
+  you progress; the supervisor switches to the full hacking stack when it fits.
+- **Full hacking stack:** a target may need preparation, followed by an initial
+  warmup before the first Hack lands. A startup income gap is normal.
+- **Locked features:** `BLOCKED` or `LOCKED` usually means an API or program is
+  missing. It does not mean all automation has stopped.
 
-```text
-run supervisor.js --profile observe
-run supervisor.js --profile assist
-run supervisor.js --profile hands-off
-```
+## Choose a profile
 
-`observe` is the default and performs no Singularity mutations. `assist` enables
-programs, backdoors, safe faction joins, reputation work, donations, and
-augmentation purchases, but leaves installation manual. `hands-off` additionally
-installs after the configured threshold and restarts the same profile. The latter
-two require BN4 or SF4 level 1+.
+Use **one** of these startup commands:
 
-Individual flags remain available as profile overrides. For example:
+| Profile | In-game command | Behavior |
+| --- | --- | --- |
+| **Observe — default** | `run supervisor.js` | Runs the money engine and available side services; gives progression and augmentation advice. No Singularity actions or automatic resets. |
+| **Assist** | `run supervisor.js --profile assist` | Also buys programs, installs faction backdoors, joins eligible factions, works for reputation, donates, and buys augmentations when allowed. Installation stays manual. |
+| **Hands-off** | `run supervisor.js --profile hands-off` | Adds automatic augmentation installation at the configured threshold and restarts the saved profile afterward. |
+
+`assist` and `hands-off` require **BitNode 4 or Source-File 4 level 1+** for their
+Singularity actions. Selecting a profile does not unlock an API. `observe` is
+**not a dry run**: enabled fleet and stock services can still spend money.
+
+Explicit flags override profile defaults. For example, on a new startup:
 
 ```text
 run supervisor.js --profile hands-off --min-install 8 --augmentation-city-faction Aevum
 ```
 
-The exact supervisor arguments are saved and restored through `bootstrap.js` after
-installation. Without Singularity, the same dashboard stays read-only and explains
-that BN4 or SF4 is required while the other automation continues normally.
+This allows installation after eight queued augmentations and permits the loop
+to join Aevum when eligible. The default installation threshold is five; city
+factions are skipped unless explicitly selected.
 
-Run only one supervisor and one daemon. To deploy changes, let Filesync finish,
-use `ps` to find the supervisor and stop its PID first, then stop the daemon and
-the changed managers by their individual PIDs. Let an active backdoor actor finish.
-Restart the supervisor with your intended flags; diagnostics runs automatically. Existing
-services are adopted with their original arguments; restarting the supervisor
-alone does not apply new code or flags to those processes.
+Already running? Follow [Changing settings](#changing-settings) instead of
+starting a second supervisor.
 
-## Supervisor controls
+## Understand the dashboard
 
-No separate utility commands are required. Examples below are alternative startup
-commands, not additional supervisors to run concurrently:
+Read **Income 60s**, target health, and current waiting reasons together. A large
+model estimate or a mostly empty RAM bar does not by itself mean the scheduler
+can launch more work.
 
-```text
-run supervisor.js --profile assist
-run supervisor.js --profile assist --cloud-payback 3600
-run supervisor.js --savings augmentations --augmentation-focus hacking
-run supervisor.js --save-amount 1000000000 --save-label "My fund"
-```
+| What you see | What it means |
+| --- | --- |
+| `Income 60s` | Measured hacking income over the recent window. Use this to judge actual earnings. |
+| `Model` | Estimated income from current plans. Warmup, Hack chance, rejected batches, and recovery can reduce actual income. |
+| `Potential` | An estimate for a candidate after preparation; it is not income being earned now. |
+| `Target slots 1/2` | One target is admitted, with room for **up to two**. The second needs to be worthwhile, prepared, and able to fit shared limits. Two slots are not guaranteed to stay occupied. |
+| `LIVE` / `WARMUP` / `TRIAL` | Recent Hacks are completing / waiting for initial landings / evaluating a newly admitted second target. |
+| `waiting for two productive minutes` | A gate based on completed batches × modeled batch period, plus a recent Hack. Deferrals can make this take longer than two wall-clock minutes. |
+| `shared launch budget / fragmented batch` | A complete batch still exceeds the process-launch budget after retrying placement on fewer hosts. Free RAM does not remove this limit. |
+| `WAITING_RAM` | A service or helper cannot fit its required RAM yet. |
+| `gen 1 ACTIVE` and `gen 2 SHADOW` | The current plan keeps earning while a replacement is being built. |
+| `DRAINING -> CUTOVER` in the Plan row | Old committed batches are finishing while the new generation takes over at a safe landing boundary. |
+| Rebuild or deferral counts | Cumulative history. Check the current reason and whether the counts are still increasing. |
 
-| Flag | Default | Behavior |
-| --- | --- | --- |
-| `--profile` | `observe` | `observe`, `assist`, or `hands-off`; explicit flags override profile settings |
-| `--go-takeover` | `true` | Finish an existing ordinary IPvGO board on startup; set false when playing manually |
-| `--diagnostics` | `true` | Run `doctor.js` once at startup; show warnings |
-| `--augmentations` | `true` | Refresh advice about once a minute; requires BN4 or SF4 level 1+ |
-| `--augmentation-focus` | `hacking` | `hacking` or `all` |
-| `--augmentation-target` | empty | Plan for one named augmentation and its prerequisites |
-| `--augmentation-price-multiplier` | `1` | Assumed price growth per purchase; 1 gives a lower bound |
-| `--augmentation-actions` | `false` | Join safe invitations, work for reputation, and purchase the planned augmentations |
-| `--augmentation-cash-reserve` | `0.10` | Cash fraction retained after an automatic augmentation purchase |
-| `--augmentation-city-faction` | empty | The only city faction the loop may auto-join; city invitations are skipped when empty |
-| `--augmentation-join-factions` / `--augmentation-work` / `--augmentation-donate` / `--augmentation-purchase` | `true` | Individual action gates within an enabled loop; donations also require favor and `Formulas.exe` |
-| `--augmentation-focus-work` | `false` | Whether automatic faction work takes focus |
-| `--auto-install` | `false` | Install queued augmentations and restart through `bootstrap.js`; requires augmentation actions |
-| `--min-install` | `5` | Minimum queued augmentations before automatic installation |
-| `--savings` | `auto` | Automatic program/augmentation modes require Singularity; see requirements above |
-| `--save-amount` | unset | Set a fixed manual goal instead of automatic savings; no Singularity required |
-| `--save-label` / `--save-target` | `Savings` / empty | Label and optional allowed program purchase for a fixed goal |
-| `--cloud-roi` / `--cloud-payback` | `true` / `1800` | Fleet investment policy for newly started fleet managers |
-| `--telemetry` | `true` | Record history and show a rolling one-hour summary |
-| `--home-reserve` | `8` | Minimum daemon reserve; automatically raised for optional helper RAM |
-| `--darknet` / `--darknet-phish` | `true` / `true` | Supervise resilient exploration, cache collection, RAM reclamation, and idle phishing after Darkscape unlock |
-| `--darknet-phish-threads` / `--darknet-max-attempts` | `1024` / `600` | Bound per-server phishing workers and password attempts |
-| `--darknet-concurrency` / `--darknet-agent-threads` | `4` / `4` | Crack several visible neighbors concurrently and scale roaming calls when a server has spare RAM |
-| `--darknet-stasis` / `--darknet-stasis-depth` | `false` / `8` | Opt in to scarce stasis links on sufficiently deep servers |
-| `--darknet-migrate` / `--darknet-migrate-depth` | `false` / `8` | Opt in to induced migration of deep movable neighbors |
-| `--darknet-promote-stock` / `--darknet-stock-symbols` | `false` / `auto` | Opt in to volatility promotion for held or explicitly listed symbols |
-| `--darknet-freeze-unknown` / `--darknet-freeze-depth` | `false` / `0` | Destructively freeze unsolved servers; they lose all RAM and experience |
-| `--darknet-storm-seed` | `false` | Execute a discovered `STORM_SEED.exe`; catastrophic and deliberately never profile-enabled |
+**Why might n00dles be the second target?** An empty slot seeks additional income.
+With the default threshold, its candidate model needs to reach 25% of the primary
+target's model; it does not have to beat the primary. Already-prepared targets can
+start sooner. Once both targets are stable, promotion can replace the weaker one
+with a better prepared target. See [target selection and hot swaps](docs/jit-hot-swap.md).
 
-Savings modes: `auto` advances through TOR, missing port openers, and `DarkscapeNavigator.exe`, then follows
-the augmentation loop when it is enabled; `programs` stops after the Darknet unlock;
-`augmentations` follows the next fresh, complete augmentation recommendation;
-`keep` preserves the current goal without automatic updates; `none` clears it at
-startup and disables automatic updates. Active manual goals are preserved by
-automatic modes. Use `--savings none` for a startup that clears the current goal,
-or set a new fixed amount explicitly. Augmentation savings does not buy or reset.
+Formula, skill, and fleet-capacity changes use background plan tuning. If a safe
+overlap cannot fit, the old plan continues earning. Safety faults can still pause
+a target. A **plan** hot swap does not reload changed JavaScript files.
 
-Diagnostics and planning run as short-lived children, one at a time, with bounded
-retry delays. Their Singularity calls stay out of the supervisor's imports. A newly
-launched daemon leaves extra home RAM for helpers; an adopted daemon keeps its old
-reserve, so restart it if the dashboard reports `WAITING_RAM`. Reports are in
-`data/diagnostics.json` and `data/augmentation-plan.json`. PID, timestamp, and reset
-checks reject old reports. Augmentation advice expires after two minutes without
-refreshing. Enable `--dashboard-details true` for the shopping list and more warnings.
+If the actual batch rate stays near zero with thousands of launch deferrals and
+mostly unused RAM, update and restart the daemon as described below. Older
+versions could spread Grow/Weaken across too many small, higher-core servers and
+reject nearly every batch. The scheduler now retries with fewer worker processes
+before deferring a batch; no launch-limit flag change is needed for this fix.
 
-## Save for a goal
+For more information, see [dashboard details](docs/dashboard.md),
+[multi-target scheduling](docs/multi-target.md), and [recovery](docs/jit-recovery.md).
 
-The `assist` and `hands-off` profiles manage this automatically.
-These standalone commands remain available for changing goals while it runs:
+## Update without killing everything
+
+**Sync first, then restart the affected process. You do not need `killall`.**
+Running scripts retain their loaded code even after Filesync updates the files.
+
+### Hacking or hot-swap updates
+
+1. Wait for Filesync to finish uploading all changed files, including `lib` and
+   the three `jit-*` workers.
+2. Leave the supervisor running. On `home`, run `ps` and find the PID for `daemon.js`.
+3. Run `kill <PID>`, replacing `<PID>` with that number.
+4. Let the supervisor restart the daemon with its existing arguments. There is a
+   restart delay; repeated failures increase that delay.
+
+The daemon cleans up old JIT workers and deploys updated worker files. There will
+be a one-time preparation/warmup period. With the hot-swap version loaded, the
+daemon dashboard includes a `Plan` row with a generation number.
+
+### Supervisor dashboard or telemetry updates
+
+On `home`, run:
 
 ```text
-run savings.js --next-program
-run savings.js --amount 1000000000 --label "Augmentation fund"
-run savings.js
-run savings.js --clear
+run supervisor-restart.js
 ```
 
-One goal at a time, stored in `data/savings.json` on home. Setting a goal replaces
-the previous one. Fleet, stock entries and progression purchases preserve its
-absolute cash floor in addition to their own reserve policies. Stock exits and
-free backdoors remain allowed. `--next-program` saves for TOR or the next missing
-program unlock, including the default 10% progression reserve. It is a one-time goal,
-not automatic advancement through every program. The matching actor may spend
-the protected funds; once owned, that goal becomes inactive. Other goals stay
-protected until manually cleared/replaced. Goals become inactive after an
-augmentation or BitNode reset. Corrupt configuration blocks spending until fixed.
-Manual purchases and scripts outside this repo do not obey this policy.
+This reloads the supervisor with its saved arguments. Existing managers keep
+running and are adopted again; this does **not** reload their code or change their
+arguments. If you updated both daemon and supervisor helpers, restart both using
+the steps above.
 
-## Explore the Darknet
+For Darknet coordinator updates, use `run darknet-restart.js` while the supervisor
+is running. For other manager updates, stop that manager's PID and let the
+supervisor replace it. Let an active backdoor actor finish before a broader restart.
 
-Darknet automation starts automatically once `DarkscapeNavigator.exe` is owned. The
-home coordinator keeps reset-bound discoveries and credentials in
-`data/darknet-state.json`; disposable agents spread neighbor-to-neighbor because
-Darknet probing and execution are local and servers can move, restart, or disappear.
-Agents solve every current upstream server-model family, traverse the Labyrinth,
-reclaim blocked RAM, open caches, and use otherwise-idle RAM for phishing. Darknet
-RAM is intentionally separate from the timing-sensitive JIT allocator.
+### Changing settings
 
-The roaming crawler enters through a 15.90 GB dynamic-RAM bootstrap, below the
-16 GB `darkweb` limit; the game still enforces every API actually called. Expensive
-optional calls (stasis, migration, stock promotion, freezing, and Storm Seed) run
-as isolated one-shot workers so enabling their code cannot prevent exploration.
-Neighbor authentication is bounded-concurrent, preventing one slow server from
-stalling every other visible route.
+New supervisor flags apply to newly started services. Existing services keep
+their original arguments.
 
-To restart a supervisor-launched coordinator without reproducing its arguments,
-run `darknet-restart.js` on home. It resolves and stops the real manager PID, then
-waits for the supervisor or starts a replacement directly.
-Run `darknet-status.js` for a one-shot activity report, or
-`darknet-status.js --watch` for a live tail window showing coverage, agents,
-deployments, caches, blockers, and the most recent event.
-After syncing dashboard changes, run `supervisor-restart.js` to reload the
-supervisor while preserving its saved profile and command-line flags.
+1. Use `ps` to find the relevant PIDs.
+2. Stop the supervisor first, then the manager(s) whose settings you are changing.
+3. Start one supervisor with your desired profile and flags.
 
-When `Formulas.exe` becomes available, active agents immediately use Darknet
-formulas to estimate authentication and Heartbleed timing, retry cooldowns, and
-the number of memory-reallocation calls. The coordinator and dashboard expose the
-active mode; no Darknet service restart is needed.
-
-The ordinary `observe`, `assist`, and `hands-off` profiles enable exploration,
-loot, and phishing but do not enable consequential topology mutations. Stasis,
-migration, stock promotion, freezing, and Storm Seed each require their explicit
-flag. Freezing destroys the target's RAM and experience; Storm Seed can catastrophically
-alter the network. Stop and restart the supervisor to change these policies.
-
-The dashboard shows protected cash and an approximate ETA using gross hacking
-income. It excludes future stock returns and other spending. This does not force
-stock liquidation to fund a goal. A fresh stock heartbeat can retain the previous
-floor briefly after a goal is cleared.
-
-## Buy RAM when it can help
-
-Fleet's `--cloud-roi true` default compares affordable new servers and upgrades
-by estimated payback. After bootstrapping the first cloud server, it requires a
-fresh live scheduler snapshot, productive lanes, and RAM pressure. It defers when
-batch/worker/launch pressure suggests a throughput bottleneck. Estimated marginal
-income uses current income per used GB, a 50% discount, and batch-rate headroom;
-it is a heuristic, not a guarantee. Default maximum payback is 1800 seconds. If
-the available action budget is at least four times the cheapest RAM improvement,
-a surplus-cash override buys the affordable candidate adding the most RAM even
-when conservative scheduler/ROI evidence is unavailable or rejects every candidate.
-Savings, stock, percentage and per-action cash limits still apply.
-
-Configure it directly at supervisor startup:
+For example, detailed hacking diagnostics require a newly started daemon. After
+stopping the supervisor and daemon, restart with your usual flags plus
+`--dashboard-details true`:
 
 ```text
-run supervisor.js --profile assist --cloud-payback 3600
+run supervisor.js --profile observe --dashboard-details true
 ```
 
-`--cloud-roi false` restores unconditional affordability-based purchases. The
-default surplus override prevents large unprotected balances from stalling fleet
-growth while retaining ROI discipline at smaller balances. Existing managers must be
-restarted to change flags. The dashboard's `RAM investment` row explains decisions.
+Use your own profile in place of `observe`. See the
+[full option reference](docs/usage-reference.md#supervisor-controls) for defaults
+and the services each option affects.
 
-## Plan augmentations
+## Useful commands
 
-The supervisor refreshes advice and shows the next purchase automatically. The
-standalone commands are optional ways to print the full plan:
+Run these in **Bitburner's terminal on `home`**. Reporting commands can run
+alongside the supervisor.
 
-```text
-run augmentation-planner.js
-run augmentation-planner.js --focus all
-run augmentation-planner.js --target "BitWire" --save-goal
-```
+| Task | Command |
+| --- | --- |
+| Inspect running scripts and their PIDs | `ps` |
+| Run read-only diagnostics | `run doctor.js` |
+| Show the last hour of recorded telemetry | `run telemetry.js --minutes 60` |
+| Compare worker RAM costs on a remote host | `run worker-ram-check.js HOSTNAME` — replace `HOSTNAME` with a worker server |
+| Show Darknet activity | `run darknet-status.js` |
+| Watch Darknet activity | `run darknet-status.js --watch` |
+| Show augmentation advice | `run augmentation-planner.js` — requires Singularity |
+| Plan for one augmentation | `run augmentation-planner.js --target "BitWire"` |
+| Show the current savings goal | `run savings.js` |
+| Save $1 billion for a named goal | `run savings.js --amount 1000000000 --label "Augmentation fund"` |
+| Save for the next program unlock | `run savings.js --next-program` |
+| Clear the savings goal | `run savings.js --clear` |
 
-**Requires BN4 or SF4 level 1+ (Singularity).** Looks at joined factions, removes owned/purchased items,
-expands prerequisite chains, selects the faction with the smallest reputation gap,
-and suggests expensive eligible purchases first. It prefers reputation-ready
-purchases. Default focus is hacking; NeuroFlux is excluded. Missing prerequisites
-from unjoined factions are reported. This is a useful ordering heuristic, not a
-global optimization over every faction, donation, or unlock.
+There is one shared savings goal at a time. Setting a new one replaces the old
+one. Participating fleet, stock, and progression services respect its cash floor;
+manual purchases and unrelated scripts do not. Saving does not itself buy an
+augmentation or trigger a reset.
 
-Current quotes are live; the default basket total is a lower bound before future
-purchase inflation. `--price-multiplier N` projects a user-specified per-purchase
-multiplier. Re-run after purchases. The next purchase's cash target uses its live
-quote. `--save-goal` explicitly replaces the shared savings goal with that amount.
-The standalone planner never buys, works for a faction, donates, installs
-augmentations or resets. The separately gated augmentation loop can join invited
-non-city factions, perform faction work, donate when favor and `Formulas.exe` make
-the exact reputation cost available, and buy its next planned item. It never
-interrupts unrelated player activity. City factions require
-`--augmentation-city-faction`, and installation additionally requires
-`--auto-install true` plus the queued-augmentation threshold. Donations retain
-enough cash for the planned purchase, the percentage reserve, and unrelated goals.
+## Feature requirements and advanced options
 
-## Record and diagnose
+The core hacking system works without Singularity or `Formulas.exe`. Other
+features have their own unlocks:
 
-Startup diagnostics and the one-hour history summary are already in the supervisor.
-For an on-demand report or a remote worker RAM check:
+| Feature | Main requirement |
+| --- | --- |
+| Program purchases, faction backdoors, augmentation advice/actions | Singularity: current BN4 or SF4 level 1+. Lower SF4 levels outside BN4 have higher API RAM costs. |
+| Stock trading | WSE Account, TIX API, and 4S Market Data TIX API access. Short entries additionally need BN8 or SF8 level 2+. |
+| Darknet exploration | `DarkscapeNavigator.exe`, or BN15/SF15 access that grants it. |
+| IPvGO | The ordinary `ns.go` API; no Singularity requirement. |
+| Fixed savings goals | No Singularity requirement. |
 
-```text
-run telemetry.js --minutes 60
-run doctor.js
-run worker-ram-check.js cloud-00
-```
+BN means your current **BitNode**; SF means an owned **Source-File**. Missing
+unlocks are reported per feature, and unlocked services still need enough RAM.
 
-Supervisor telemetry is enabled by default (`--telemetry false` disables it).
-It samples once per minute, outside the daemon, and keeps the latest 1440 samples
-in `data/telemetry.json` (about 24 hours of continuous runtime). It records income,
-RAM, admission failures, recoveries, target state, recent retirements, stock
-results, and fleet purchases. History survives service restarts; summaries never
-subtract cumulative counters across process or reset boundaries. Stale/missing
-status is recorded as unavailable, not zero income. Export the JSON for longer
-analysis. Writes are bounded; errors appear on the supervisor dashboard.
+Use the [usage reference](docs/usage-reference.md) for complete requirements,
+all supervisor flags, savings behavior, fleet investment settings, augmentation
+rules, and advanced Darknet options. Destructive Darknet operations are explicitly
+opt-in and are not enabled by any standard profile.
 
-`doctor.js` inspects controller imports, script RAM, home headroom, duplicate
-services, port collisions, snapshot ownership, savings and API access. It changes
-nothing. The separate worker checker compares worker RAM on home and a chosen
-remote host. No Node test substitutes for the game's static RAM analyzer or a
-live soak after deployment.
+## Development and further reading
 
-## Development
+On your computer, in this repository:
 
 ```sh
 npm test
 ```
 
-Tests cover solvers, service lifecycle, spending, planning, telemetry, and virtual
-time hacking simulations. CI runs on Node 22. See [supervision](docs/supervision.md),
-[multi-target scheduling](docs/multi-target.md), [recovery](docs/jit-recovery.md),
-[stocks](docs/stocks.md), [contracts](docs/contracts.md), and [IPvGO](docs/ipvgo.md).
+CI uses Node 22. Tests include deterministic hacking simulations, worker ownership,
+hot swaps, recovery, service restarts, spending, solvers, and telemetry. These do
+not replace the game's RAM analyzer or checking a live run after deployment.
+
+- [Full usage and option reference](docs/usage-reference.md)
+- [Supervisor and service lifecycle](docs/supervision.md)
+- [Multi-target scheduling](docs/multi-target.md)
+- [Plan hot swaps](docs/jit-hot-swap.md)
+- [Background target preparation](docs/background-prep.md)
+- [Recovery and validation](docs/jit-recovery.md)
+- [Stocks](docs/stocks.md), [contracts](docs/contracts.md), and [IPvGO](docs/ipvgo.md)

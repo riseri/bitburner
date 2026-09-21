@@ -13,6 +13,8 @@ const IDLE_REPLAN_MAX_BACKOFF_MS = 300_000;
 export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime = null, stats = null) {
 	const pipeline = {
 		name, ordinal, epochNumber: 1, epoch: `${ownerPid}:${ordinal}:1`,
+		generation: 1, generationSerial: 1, generations: new Map(), shadow: null, swap: null,
+		hotSwaps: { completed: 0, aborted: 0 }, shadowRetryAt: 0,
 		cfg: { ...cfg }, runtime, stats: stats || api.createStats(),
 		mode: runtime ? "RUNNING" : "TUNING", queue: [], batches: new Map(),
 		running: new Map(), runningRam: 0, recovery: null, drain: null,
@@ -24,6 +26,8 @@ export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime 
 		admissionReason: "", completedAtIdleReplan: 0, minimumExpected: 0,
 	};
 	pipeline.cfg.epoch = pipeline.epoch;
+	pipeline.cfg.generation = pipeline.generation;
+	if (runtime) pipeline.generations.set(1, { number: 1, state: "ACTIVE", runtime, cfg: { ...pipeline.cfg } });
 	return pipeline;
 }
 
@@ -34,7 +38,7 @@ export function targetControl(pool, pipeline) {
 		clear() {},
 		tryWrite(value) {
 			pool.controls.set(pipeline.name, { paused: Boolean(value.paused),
-				epoch: pipeline.epoch, reason: String(value.reason || "") });
+				epoch: pipeline.epoch, generations: [...pipeline.generations.keys()], reason: String(value.reason || "") });
 			pool.controlPort.clear();
 			return pool.controlPort.tryWrite({ type: "jit-control", version: 2,
 				ownerPid: pool.ownerPid, targets: Object.fromEntries(pool.controls), generatedAt: Date.now() });
@@ -71,6 +75,10 @@ function activatePipeline(ns, pool, pipeline, runtime, rebuilt) {
 	pipeline.tunedLevel = ns.getHackingLevel();
 	pipeline.tunedCapacity = api.workerFleetCapacity(pool.network.hosts, pipeline.cfg);
 	pipeline.lastCapacityRetune = Date.now();
+	// Activation follows reconciled ownership (initialization or safety recovery).
+	pipeline.generations.clear(); pipeline.shadow = null; pipeline.swap = null;
+	pipeline.generations.set(pipeline.generation, { number: pipeline.generation, state: "ACTIVE",
+		runtime, cfg: { ...pipeline.cfg }, level: pipeline.tunedLevel });
 	pipeline.nextLanding = Date.now() + runtime.plan.times.W + pipeline.cfg.lead + 250;
 	// A deterministic offset avoids synchronizing two startup launch bursts.
 	if (pipeline.ordinal > 0) pipeline.nextLanding += pipeline.cfg.gap * 0.5;
@@ -168,6 +176,9 @@ export function dispatchPipelineEvents(ns, pool) {
 		// Batch ids include owner, target slot and epoch. A foreign/stale message
 		// cannot release RAM or corrupt another target's timing/earnings counters.
 		if (!p || !p.batches.has(String(event.batchId))) continue;
+		const batch = p.batches.get(String(event.batchId));
+		if (batch.generation != null && (event.epoch !== p.epoch || event.generation !== batch.generation ||
+			!p.generations.has(event.generation))) continue;
 		if (!groups.has(p)) groups.set(p, []);
 		groups.get(p).push(event);
 	}
@@ -178,7 +189,8 @@ export function dispatchPipelineEvents(ns, pool) {
 		const problem = pool.api.consumeEvents(ns, inbox, p.batches, p.stats, p.name,
 			p.runtime, p.cfg, pool.running, pool.runningByChunk);
 		if (Number.isFinite(p.stats.lastHackAt)) p.liveSince ||= p.stats.lastHackAt;
-		if (problem && p.mode === "RUNNING" && !p.drain) {
+		const transitionFailure = serviceHotSwapHealth(ns, pool, p);
+		if (problem && !transitionFailure && p.mode === "RUNNING" && !p.drain) {
 			p.recovery = pool.api.beginSoftRecovery(p.recovery, problem, p.control, p.runtime, p.stats);
 		}
 	}
@@ -196,6 +208,7 @@ export function beginPipelineDrain(pool, p, issue, retire = false) {
 
 function servicePipelineSafety(ns, pool, p, now) {
 	const { api } = pool;
+	serviceHotSwapHealth(ns, pool, p);
 	if (p.mode === "RUNNING" && now >= p.nextHealth) {
 		p.nextHealth = now + 250;
 		const health = api.targetHealth(ns, p.name);
@@ -244,14 +257,14 @@ function servicePipelineSafety(ns, pool, p, now) {
 // the ordinary overdue grace. An unrelated or oversized security jump remains
 // an immediate hard fault, and a missing tail stops qualifying at its deadline.
 function expectedSecurityTail(ns, pool, p, health, now) {
-	const grace = Math.max(500, p.cfg.gap * 3);
 	let explained = 0;
 	for (const batch of p.batches.values()) {
+		const gap = (batch.cfg || p.cfg).gap, grace = Math.max(500, gap * 3);
 		for (const [damage, weaken] of [["H", "W1"], ["G", "W2"]]) {
 			const source = batch.phases[damage], tail = batch.phases[weaken];
 			const tailLanding = Number(batch.landing[weaken]);
 			if (!source || !tail || source.skipped || source.count === 0 || tail.skipped || tail.complete ||
-				!Number.isFinite(tailLanding) || now < tailLanding - p.cfg.gap - grace ||
+				!Number.isFinite(tailLanding) || now < tailLanding - gap - grace ||
 				now > tailLanding + grace) continue;
 			const chunks = [...batch.chunks.values()];
 			if (!chunks.some(chunk => chunk.phase === weaken && !pool.api.isTerminalChunk(chunk))) continue;
@@ -328,12 +341,38 @@ function releaseCancelledLaunchBudget(pool) {
 	}
 }
 
+// Try the efficient core-aware placement first, then a bounded whole-phase
+// alternative. A rejected probe must not leave RAM or launch-budget entries.
+// The same admission proof is used by normal work, idle tuning and cutover.
+function reserveBudgetedBatch(ns, pool, p, id, landing, plan, cfg, priorChunks = [], income = false) {
+	const { api } = pool, mark = pool.reservations.length;
+	const pending = [...pool.pipelines.values()].reduce((n, lane) => n + lane.queue.length, pool.running.size);
+	const limit = p.name === pool.anchor ? pool.cfg.maxLaunches : Math.max(4, pool.cfg.maxLaunches - 8);
+	let reason = "", ramFailure = false;
+	for (const compact of [false, true]) {
+		const placement = compact ? { ...cfg, compactPlacement: true } : cfg;
+		const reserve = income && !compact ? api.reserveIncomeBatch : api.reserveBatch;
+		const result = reserve(ns, p.name, id, landing, plan, pool.network.hosts,
+			placement, pool.reservations, pool.running, pool.foreign);
+		if (!result) {
+			api.rollbackReservations(pool.reservations, mark);
+			if (!reason) { reason = "no whole HWGW batch fits host RAM reservations"; ramFailure = true; }
+			break;
+		}
+		const chunks = [...priorChunks, ...result.chunks];
+		if (pending + chunks.length > pool.cfg.maxWorkers) reason = "shared worker-commitment limit";
+		else if (!fitsLaunchBudget(pool.launchBuckets, chunks, limit)) reason = "shared launch budget / fragmented batch";
+		else return { ...result, compact, reason: "", ramFailure: false };
+		api.rollbackReservations(pool.reservations, mark);
+	}
+	return { chunks: null, reason, ramFailure };
+}
+
 export function planPipelineBatch(ns, pool) {
-	const { api } = pool;
 	const candidates = [...pool.pipelines.values()];
 	for (let checked = 0; checked < candidates.length; checked++) {
 		const p = candidates[pool.planCursor++ % candidates.length];
-		if (p.mode !== "RUNNING" || p.recovery || p.drain) continue;
+		if (p.mode !== "RUNNING" || p.recovery || p.drain || p.swap?.restoring) continue;
 		const now = Date.now(), plan = p.runtime.plan;
 		const earliest = now + plan.times.W + p.cfg.lead + 250;
 		if (p.nextLanding < earliest) {
@@ -343,30 +382,14 @@ export function planPipelineBatch(ns, pool) {
 		const horizon = now + plan.times.W + Math.max(2000, p.cfg.lead + 250 + plan.period * 2);
 		if (p.nextLanding > horizon) continue;
 		const id = `${p.epoch}:${++p.serial}`;
-		const snapshot = pool.reservations.length;
-		const result = api.reserveIncomeBatch(ns, p.name, id, p.nextLanding, plan, pool.network.hosts,
-			p.cfg, pool.reservations, pool.running, pool.foreign);
-		if (result) {
-			// Reserve original capacity in the launch budget for the incumbent's
-			// upcoming burst. An optional peer cannot consume its entire margin.
-			const optional = p.name !== pool.anchor;
-			const maxLaunches = optional ? Math.max(4, pool.cfg.maxLaunches - 8) : pool.cfg.maxLaunches;
-			const pending = [...pool.pipelines.values()].reduce((n, lane) => n + lane.queue.length, pool.running.size);
-			if (pending + result.chunks.length > pool.cfg.maxWorkers ||
-				!fitsLaunchBudget(pool.launchBuckets, result.chunks, maxLaunches)) {
-				api.rollbackReservations(pool.reservations, snapshot);
-				p.admissionSkips++;
-				p.admissionReason = pending + result.chunks.length > pool.cfg.maxWorkers
-					? "shared worker-commitment limit" : "shared launch budget / fragmented batch";
-				p.note = `Batch admission blocked: ${p.admissionReason}`;
-			} else {
-				for (const chunk of result.chunks) chunk.owner = p;
-				api.enqueueChunks(p.queue, result.chunks);
-				p.batches.set(id, api.makeBatchState(id, result.chunks));
-				p.stats.scheduled++; p.allocationStreak = 0;
-				p.idleSince = null; p.admissionReason = "";
-				recordLaunchBudget(pool, result.chunks);
-			}
+		const result = reserveBudgetedBatch(ns, pool, p, id, p.nextLanding, plan, p.cfg, [], true);
+		if (result.chunks) {
+			commitGenerationBatch(pool, p, id, result.chunks, p.generations.get(p.generation));
+			p.allocationStreak = 0;
+			p.idleSince = null; p.admissionReason = "";
+		} else if (!result.ramFailure) {
+			p.admissionSkips++; p.admissionReason = result.reason;
+			p.note = `Batch admission blocked: ${p.admissionReason}`;
 		} else {
 			p.stats.allocationFails++; p.allocationStreak++;
 			p.admissionReason = "no whole HWGW batch fits host RAM reservations";
@@ -435,13 +458,7 @@ function idlePlanFits(ns, pool, p, plan) {
 	const boundary = pool.reservations.length;
 	try {
 		const landing = Date.now() + plan.times.W + p.cfg.lead + 250;
-		const result = pool.api.reserveBatch(ns, p.name, `probe:${p.epoch}`, landing, plan,
-			pool.network.hosts, p.cfg, pool.reservations, pool.running, pool.foreign);
-		if (!result) return false;
-		const pending = [...pool.pipelines.values()].reduce((n, lane) => n + lane.queue.length, pool.running.size);
-		const limit = p.name === pool.anchor ? pool.cfg.maxLaunches : Math.max(4, pool.cfg.maxLaunches - 8);
-		return pending + result.chunks.length <= pool.cfg.maxWorkers &&
-			fitsLaunchBudget(pool.launchBuckets, result.chunks, limit);
+		return Boolean(reserveBudgetedBatch(ns, pool, p, `probe:${p.epoch}`, landing, plan, p.cfg).chunks);
 	} finally {
 		pool.api.rollbackReservations(pool.reservations, boundary);
 	}
@@ -514,6 +531,225 @@ function servicePipelineTuning(ns, pool, p) {
 	return true;
 }
 
+// The fingerprint excludes transient target security and live worker RAM: the
+// model normalizes security, and the real allocator validates transient usage.
+function planningInputs(ns, pool, p) {
+	return { target: p.name, level: ns.getHackingLevel(),
+		formulas: pool.api.hackingFormulasAvailable ? pool.api.hackingFormulasAvailable(ns) : Boolean(p.runtime.formulas),
+		capacity: pool.api.workerFleetCapacity(pool.network.hosts, p.cfg),
+		gap: p.cfg.gap, lead: p.cfg.lead,
+		fleet: pool.network.hosts.map(h => `${h.name}:${h.maxRam}:${h.cores}`).join("|"),
+		peerRate: [...pool.pipelines.values()].filter(q => q !== p).reduce((n, q) => n + (q.runtime?.plan.batchRate || 0), 0) };
+}
+
+function commitGenerationBatch(pool, p, id, chunks, generation) {
+	for (const c of chunks) { c.owner = p; c.generation = generation.number; }
+	pool.api.enqueueChunks(p.queue, chunks);
+	const batch = pool.api.makeBatchState(id, chunks);
+	batch.plan = generation.runtime.plan; batch.cfg = generation.cfg; batch.generationState = generation;
+	p.batches.set(id, batch); p.stats.scheduled++;
+	recordLaunchBudget(pool, chunks);
+}
+
+export function serviceShadowTune(ns, pool, p) {
+	const mark = pool.reservations.length, serial = p.generationSerial;
+	try { serviceShadowTuneStep(ns, pool, p); }
+	catch (error) {
+		if (p.generationSerial !== serial) throw error;
+		pool.api.rollbackReservations(pool.reservations, mark);
+		p.lastSwap = { state: "ABORTED", trigger: p.shadow?.trigger,
+			reason: `shadow planning failed: ${String(error?.message || error)}` };
+		p.hotSwaps.aborted++; p.shadow = null; p.shadowRetryAt = Date.now() + 30_000;
+	}
+}
+
+function serviceShadowTuneStep(ns, pool, p) {
+	if (p.mode !== "RUNNING" || p.recovery || p.drain || p.retiring || p.swap || p.generations.size > 1) return;
+	if (!Number.isFinite(p.stats.lastHackAt)) return;
+	const now = Date.now(), inputs = planningInputs(ns, pool, p), fingerprint = JSON.stringify(inputs);
+	const trigger = inputs.formulas !== Boolean(p.runtime.formulas) ? "formulas" :
+		inputs.level >= Math.max(p.tunedLevel + 10, Math.ceil(p.tunedLevel * 1.10)) ? "skill" :
+		inputs.capacity >= Math.max(1, p.tunedCapacity) * 1.25 ? "capacity" : "";
+	if (p.shadow && p.shadow.fingerprint !== fingerprint) {
+		p.shadow.state = "ABORTED"; p.hotSwaps.aborted++; p.shadow = null;
+	}
+	if (!p.shadow) {
+		if (!trigger || now < p.shadowRetryAt) return;
+		p.shadow = { state: "SHADOW", number: p.generationSerial + 1, trigger, inputs, fingerprint,
+			createdAt: now, stableAt: now + 2000, retryAt: 0, attempts: 0, reason: "" };
+		return;
+	}
+	const s = p.shadow;
+	if (now < s.stableAt || now < s.retryAt) return;
+	if (!s.tuner && !s.runtime) {
+		const freeRate = pool.cfg.maxBatchRate - inputs.peerRate;
+		const model = pool.api.createPreppedModel(ns, p.name);
+		if (!model || freeRate <= 0) { s.reason = "waiting for model/shared batch rate"; s.retryAt = now + 5000; return; }
+		s.inputs.times = { ...model.times };
+		s.modelInputs = modelAssumptions(model);
+		// Never mutate active cfg while the incremental search yields.
+		s.cfg = { ...p.cfg, generation: s.number,
+			minimumPeriod: Math.max(1000 / freeRate, pool.cfg.minimumPeriod),
+			ramBudget: Math.max(0, pool.api.poolProfile(ns, pool.network.hosts, pool.cfg, pool.running).capacity -
+				[...pool.pipelines.values()].filter(q => q !== p).reduce((n, q) => n +
+					(q.runtime?.plan.ramTime || 0) / (q.runtime?.plan.period || 1) * 1.25, 0)) };
+		s.tuner = pool.api.tuneTargetSteps(ns, p.name, pool.network.hosts, s.cfg, pool.running, model);
+	}
+	if (s.tuner) {
+		const step = s.tuner.next();
+		if (!step.done) return;
+		s.tuner = null; s.runtime = step.value;
+		if (!s.runtime) {
+			s.state = "ABORTED"; p.hotSwaps.aborted++; p.shadowRetryAt = now + 30_000;
+			p.lastSwap = { state: "ABORTED", trigger: s.trigger, reason: "no replacement plan fits" }; p.shadow = null; return;
+		}
+		if (!(s.runtime.plan.expected > p.runtime.plan.expected * 1.001)) {
+			p.lastSwap = { state: "ABORTED", trigger: s.trigger, reason: "candidate does not improve modeled income" };
+			p.hotSwaps.aborted++; p.shadow = null; p.shadowRetryAt = now + 30_000; return;
+		}
+		s.state = "PREFLIGHT";
+	}
+	preflightHotSwap(ns, pool, p);
+}
+
+export function preflightHotSwap(ns, pool, p) {
+	const s = p.shadow, now = Date.now(), api = pool.api;
+	if (!s?.runtime || p.swap || p.recovery || p.drain || !pool.port.empty()) return false;
+	if (s.fingerprint !== JSON.stringify(planningInputs(ns, pool, p))) return false;
+	const latestModel = api.createPreppedModel(ns, p.name);
+	if (!latestModel || JSON.stringify(modelAssumptions(latestModel)) !== JSON.stringify(s.modelInputs)) {
+		s.state = "ABORTED"; p.hotSwaps.aborted++; p.shadow = null;
+		p.shadowRetryAt = now + 2000; return false;
+	}
+	const old = p.generations.get(p.generation), plan = s.runtime.plan;
+	const finalOldW2 = Math.max(p.stats.lastW2 || 0, ...[...p.batches.values()].map(b => b.landing.W2 || 0));
+	const firstH = Math.max(finalOldW2 + Math.max(old.cfg.gap, s.cfg.gap),
+		now + plan.times.W + s.cfg.lead + 250);
+	// If longer new actions cannot reach the next ordinary payout slot, keep
+	// earning and retry. Elective optimization may not purchase a duration gap.
+	if (!Number.isFinite(finalOldW2) || firstH > finalOldW2 + Math.max(old.runtime.plan.period, 4 * s.cfg.gap) + 1) {
+		s.reason = "cutover would leave an income gap; waiting for a future restoration boundary";
+		s.retryAt = now + 2000; return false;
+	}
+	const mark = pool.reservations.length, batches = [], chunks = [];
+	let reason = "";
+	// Reserve complete HWGW batches against the actual shared ledger, including
+	// old work, peers, foreign usage and prep. This pure path never preempts prep.
+	for (let i = 0; i < 2; i++) {
+		const id = `${p.epoch}:g${s.number}:${p.serial + i + 1}`;
+		const result = reserveBudgetedBatch(ns, pool, p, id, firstH + i * plan.period, plan, s.cfg, chunks);
+		if (!result.chunks) {
+			reason = result.ramFailure ? "insufficient overlap RAM for complete HWGW batches" : result.reason; break;
+		}
+		batches.push({ id, chunks: result.chunks }); chunks.push(...result.chunks);
+	}
+	if (reason) {
+		api.rollbackReservations(pool.reservations, mark);
+		s.reason = reason; s.retryAt = now + Math.min(30_000, 1000 * 2 ** Math.min(5, s.attempts++));
+		return false;
+	}
+	// No yields between successful preflight and commit. The reservations being
+	// committed are the reservations just proven, not a second allocation attempt.
+	const generation = { number: ++p.generationSerial, state: "CUTOVER", runtime: s.runtime,
+		cfg: s.cfg, level: s.inputs.level, confirmed: false, failed: false, hackLanded: false };
+	old.state = "DRAINING"; p.generations.set(generation.number, generation);
+	p.swap = { state: "CUTOVER", old: old.number, next: generation.number, trigger: s.trigger,
+		oldLevel: old.level ?? p.tunedLevel, newLevel: s.inputs.level,
+		oldCapacity: p.tunedCapacity,
+		oldIncome: old.runtime.plan.expected, newIncome: plan.expected,
+		oldRate: old.runtime.plan.batchRate, newRate: plan.batchRate,
+		finalOldW2, firstH, boundary: firstH, overlapRam: transitionPeakRam(pool, now), reason: "" };
+	p.generation = generation.number; p.runtime = generation.runtime; p.cfg = generation.cfg;
+	p.tunedLevel = s.inputs.level; p.tunedCapacity = s.inputs.capacity; p.lastCapacityRetune = now;
+	p.shadow = null; p.serial += batches.length;
+	for (const b of batches) commitGenerationBatch(pool, p, b.id, b.chunks, generation);
+	p.nextLanding = firstH + batches.length * plan.period;
+	p.stats.nextHackLanding = firstH;
+	api.publishHackPause(p.control, 0, "plan cutover");
+	return true;
+}
+
+function modelAssumptions(model) {
+	// Ignore insignificant floating-point noise from security normalization.
+	const rounded = n => Number.isFinite(n) ? Number(n.toPrecision(6)) : null;
+	return { times: [model.times.H, model.times.G, model.times.W].map(rounded),
+		hackPercent: rounded(model.hackPercent), chance: rounded(model.chance),
+		maxMoney: model.maxMoney, minSecurity: model.minSecurity, formulas: Boolean(model.formulas) };
+}
+
+function transitionPeakRam(pool, now) {
+	const events = [];
+	for (const r of pool.reservations) {
+		if (r.end < now || pool.api.isTerminalChunk(r.chunk)) continue;
+		events.push([Math.max(now, r.start), r.ram], [r.end, -r.ram]);
+	}
+	events.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+	let held = backgroundPrepRam(pool.cfg.prepStates) + [...pool.foreign.values()].reduce((n, r) => n + r, 0), peak = held;
+	for (const [, delta] of events) { held += delta; peak = Math.max(peak, held); }
+	return peak;
+}
+
+function generationTerminal(pool, p, number) {
+	return !p.queue.some(c => c.generation === number) &&
+		![...p.running.values()].some(c => c.generation === number) &&
+		![...p.batches.values()].some(b => b.generation === number) &&
+		!pool.reservations.some(r => r.chunk?.owner === p && r.generation === number) && pool.port.empty();
+}
+
+export function serviceHotSwapHealth(ns, pool, p) {
+	const swap = p.swap;
+	if (!swap || p.drain) return false;
+	const next = p.generations.get(swap.next), old = p.generations.get(swap.old), api = pool.api;
+	if (next.failed && !swap.aborted && !swap.restoring) {
+		const batches = [...p.batches.values()].filter(b => b.generation === next.number);
+		// A missing terminal event is not proof that a Hack did not affect money.
+		const safeToAbort = !next.hackLanded && Date.now() < swap.firstH && pool.port.empty();
+		if (safeToAbort) {
+			let cancelled = true;
+			for (const b of batches) for (const c of b.chunks.values()) {
+				if (!api.cancelChunk(ns, b, c, pool.running, pool.runningByChunk, p.stats)) cancelled = false;
+			}
+			if (!cancelled) return true; // reconcile pending completions before resuming
+			next.state = "ABORTED"; old.state = "ACTIVE"; swap.aborted = true; swap.state = "ABORTED";
+			p.hotSwaps.aborted++; p.generation = old.number; p.runtime = old.runtime; p.cfg = old.cfg;
+			p.tunedLevel = swap.oldLevel;
+			p.tunedCapacity = swap.oldCapacity;
+			p.nextLanding = Math.max(swap.finalOldW2 + Math.max(old.cfg.gap, old.runtime.plan.period - 3 * old.cfg.gap),
+				Date.now() + old.runtime.plan.times.W + old.cfg.lead + 250);
+			api.finishReadyBatches(p.batches, p.stats, p.cfg);
+			p.queue = p.queue.filter(c => !api.isTerminalChunk(c));
+			api.publishHackPause(p.control, 0, "candidate aborted; previous plan resumed");
+		} else {
+			swap.restoring = true; swap.state = "RESTORING";
+			swap.failed = true; p.hotSwaps.aborted++;
+			swap.reason = "new generation failed; waiting for committed restoration tails";
+			api.publishHackPause(p.control, Number.MAX_SAFE_INTEGER, swap.reason);
+			for (const b of batches) for (const c of b.chunks.values()) if (c.phase === "H")
+				api.cancelChunk(ns, b, c, pool.running, pool.runningByChunk, p.stats);
+		}
+	}
+	if (swap.restoring && !swap.recovering && ![...p.batches.values()].some(b => b.generation === next.number)) {
+		swap.recovering = true; swap.state = "RECOVERING";
+		p.recovery = api.beginSoftRecovery(p.recovery, { reason: swap.reason }, p.control, p.runtime, p.stats);
+		return true;
+	}
+	if (swap.recovering && !p.recovery && !p.drain && api.targetHealth(ns, p.name).clean) {
+		// Recovery can reopen admission, but only a subsequently completed W2
+		// may certify this plan. A clean health poll is not a generation commit.
+		next.failed = false; next.confirmed = false; next.state = "CUTOVER";
+		swap.restoring = false; swap.recovering = false; swap.state = "CUTOVER";
+	}
+	if (next.confirmed && !next.failed) { next.state = "ACTIVE"; swap.state = "ACTIVE"; }
+	const retired = swap.aborted ? next : old;
+	if ((swap.aborted || next.confirmed) && generationTerminal(pool, p, retired.number)) {
+		retired.state = "RETIRED"; p.generations.delete(retired.number);
+		if (!swap.aborted && !swap.failed) p.hotSwaps.completed++;
+		p.lastSwap = { ...swap }; p.swap = null; p.shadowRetryAt = Date.now() + 30_000;
+		api.publishHackPause(p.control, p.recovery ? Number.MAX_SAFE_INTEGER : 0, "generation reconciled");
+	}
+	return Boolean(next.failed);
+}
+
 function servicePipelineMaintenance(ns, pool) {
 	const { api } = pool;
 	for (const p of pool.pipelines.values()) {
@@ -560,36 +796,7 @@ function servicePipelineMaintenance(ns, pool) {
 			return;
 		}
 		if (servicePipelineTuning(ns, pool, p)) return;
-		// A long-running daemon changes model only after its owned work drains,
-		// preserving every already-scheduled landing while adopting the newly
-		// unlocked formulas without requiring a restart.
-		const peers = [...pool.pipelines.values()].filter(other => other !== p && other.mode !== "RETIRED");
-		const hasProductiveCoverage = peers.some(other => productive(other, Date.now()));
-		const formulaMode = pool.api.hackingFormulasAvailable
-			? pool.api.hackingFormulasAvailable(ns) : Boolean(p.runtime?.formulas);
-		if (p.mode === "RUNNING" && hasProductiveCoverage && Boolean(p.runtime?.formulas) !== formulaMode) {
-			beginPipelineDrain(pool, p, { kind: "drain", afterKind: "retune",
-				reason: `${formulaMode ? "Formulas.exe unlocked" : "Formulas API unavailable"}; retune ${p.name}` });
-			return;
-		}
-		// Elective work must never take down the other earner during a peer's
-		// initial trial, recovery or warmup. Only the affected target is drained.
-		const peerBusy = peers.some(other =>
-			(other.mode !== "RUNNING" || other.recovery || other.trial || !productive(other, Date.now())));
-		if (p.mode === "RUNNING" && !p.recovery && !p.trial && hasProductiveCoverage && !peerBusy) {
-			const earnedMs = p.stats.pipeline.completed * p.runtime.plan.period;
-			const levelRetune = earnedMs >= 15 * 60_000 &&
-				ns.getHackingLevel() >= Math.max(p.tunedLevel + 10, Math.ceil(p.tunedLevel * 1.10));
-			const capacity = api.workerFleetCapacity(pool.network.hosts, p.cfg);
-			const ramLimited = p.runtime.plan.ramTime / p.runtime.plan.period >= p.runtime.capacity * 0.5;
-			const capacityRetune = earnedMs >= PRODUCTIVE_MS && ramLimited &&
-				Date.now() - p.lastCapacityRetune >= 10 * 60_000 && capacity >= p.tunedCapacity * 1.25;
-			if (levelRetune || capacityRetune) {
-				beginPipelineDrain(pool, p, { kind: "drain", afterKind: "retune",
-					reason: `${levelRetune ? "skill" : "capacity"} retune for ${p.name}` });
-				return;
-			}
-		}
+		serviceShadowTune(ns, pool, p);
 	}
 }
 
@@ -661,6 +868,13 @@ export function serviceAdmissionOpportunity(ns, pool) {
 		const trial = [...pool.pipelines.values()].find(p =>
 			p.trial && p.mode === "TUNING" && !p.recovery && !p.drain);
 		if (trial) servicePipelineTuning(ns, pool, trial);
+		else {
+			// A dense launch lattice may never offer the maintenance lane's 50ms
+			// window. Give one yielding shadow step the same bounded opportunity.
+			const lanes = [...pool.pipelines.values()];
+			pool.shadowCursor = (pool.shadowCursor || 0) % lanes.length;
+			if (lanes.length) serviceShadowTune(ns, pool, lanes[pool.shadowCursor++]);
+		}
 	}
 	return true;
 }

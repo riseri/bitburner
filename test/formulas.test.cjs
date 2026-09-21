@@ -1,8 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const { Clock, loadScript, root } = require('./helpers.cjs');
+const { Clock, loadScript } = require('./helpers.cjs');
 
 const api = loadScript('lib/formulas.js', new Clock());
 
@@ -68,9 +66,15 @@ test('darknet formulas expose thread-aware authentication, heartbleed, and RAM r
     assert.equal(metrics.formulas, true);
 });
 
-test('pipeline maintenance contains a clean live capability transition instead of a startup-only check', () => {
-    const source = fs.readFileSync(path.join(root, 'src/lib/target-pipelines.js'), 'utf8');
-    assert.match(source, /hackingFormulasAvailable/);
-    assert.match(source, /Formulas\.exe unlocked/);
-    assert.match(source, /beginPipelineDrain/);
+test('live formula availability starts shadow tuning without draining an earning lane', () => {
+    const f=fixture(),clock=new Clock(),daemon=loadScript('daemon.js',clock),multi=loadScript('lib/target-pipelines.js',clock);
+    const cfg={gap:100,lead:600,homeReserve:0,maxBatchRate:4};
+    const p=multi.createTargetPipeline('alpha',cfg,daemon,1,0,{formulas:false,plan:{batchRate:2,expected:1000}});
+    p.tunedLevel=500;p.tunedCapacity=1024;p.stats.lastHackAt=clock.now;
+    const pool={api:{...daemon,hackingFormulasAvailable:api.hackingFormulasAvailable},cfg,
+        network:{hosts:[{name:'cloud',maxRam:1024,cores:1}]},pipelines:new Map([['alpha',p]]),reservations:[]};
+    f.state.unlocked=true;
+    multi.serviceShadowTune({...f.ns,getHackingLevel:()=>500},pool,p);
+    assert.equal(p.shadow.trigger,'formulas');assert.equal(p.shadow.state,'SHADOW');
+    assert.equal(p.mode,'RUNNING');assert.equal(p.drain,null);assert.equal(p.generationSerial,1);
 });
