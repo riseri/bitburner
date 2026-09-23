@@ -11,7 +11,7 @@ test('target discovery advances inside a tight JIT launch lattice', () => {
         recovery: null,
         drain: null,
         runtime: { plan: { period: 500, batchRate: 2.3, expected: 100 } },
-        stats: { pipeline: { completed: 300 }, lastHackAt: clock.now },
+        stats: { pipeline: { completed: 300, productiveMs: 150000 }, lastHackAt: clock.now },
         queue: [{ launchAt: clock.now + 20 }],
     };
     const names = Array.from({ length: 95 }, (_, i) => `host-${i}`);
@@ -58,7 +58,7 @@ test('target discovery refuses to run inside the final 5ms before a launch', () 
         recovery: null,
         drain: null,
         runtime: { plan: { period: 500, batchRate: 2.3, expected: 100 } },
-        stats: { pipeline: { completed: 300 }, lastHackAt: clock.now },
+        stats: { pipeline: { completed: 300, productiveMs: 150000 }, lastHackAt: clock.now },
         queue: [{ launchAt: clock.now + 5 }],
     };
     const pool = {
@@ -104,7 +104,7 @@ test('background prep can select work in a tight window without exec', () => {
     const stats = {
         restarts: 0, recoveries: 0, softRecoveries: 0, allocationFails: 0, expiredSlots: 0,
         misses: { H: 0, W1: 0, G: 0, W2: 0 },
-        pipeline: { completed: 300 },
+        pipeline: { completed: 300, productiveMs: 150000 },
         lastHackAt: clock.now,
     };
     api.tickBackgroundPrep(ns, {

@@ -46,6 +46,16 @@ hacking dashboard.
   you progress; the supervisor switches to the full hacking stack when it fits.
 - **Full hacking stack:** a target may need preparation, followed by an initial
   warmup before the first Hack lands. A startup income gap is normal.
+- **Spare RAM:** JIT and preparation workers run only on rooted remote servers.
+  The supervisor uses otherwise-idle home RAM for `share`, and the JIT controller
+  fills currently idle remote RAM with reclaimable share workers. The home
+  reserve remains available for utilities and service starts. Use `--share false`
+  to disable sharing. The regular supervisor dashboard reports the live faction
+  reputation multiplier and total sharing threads, RAM, and host count.
+- **After an augmentation reset:** the scheduler leaves RAM headroom for batch
+  peaks and plan changes. As hacking skill recovers, it can choose a smaller
+  replacement that fits beside running work. Keep the supervisor running; an
+  overlap wait does not call for `killall` or higher launch limits.
 - **Locked features:** `BLOCKED` or `LOCKED` usually means an API or program is
   missing. It does not mean all automation has stopped.
 
@@ -89,10 +99,11 @@ can launch more work.
 | `Potential` | An estimate for a candidate after preparation; it is not income being earned now. |
 | `Target slots 1/2` | One target is admitted, with room for **up to two**. The second needs to be worthwhile, prepared, and able to fit shared limits. Two slots are not guaranteed to stay occupied. |
 | `LIVE` / `WARMUP` / `TRIAL` | Recent Hacks are completing / waiting for initial landings / evaluating a newly admitted second target. |
-| `waiting for two productive minutes` | A gate based on completed batches × modeled batch period, plus a recent Hack. Deferrals can make this take longer than two wall-clock minutes. |
+| `waiting for two productive minutes` | Adds each safely completed batch's own plan period until it reaches 120 seconds, and requires a recent Hack. Generation swaps preserve earned progress; deferrals can make this take longer than two wall-clock minutes. |
 | `shared launch budget / fragmented batch` | A complete batch still exceeds the process-launch budget after retrying placement on fewer hosts. Free RAM does not remove this limit. |
 | `WAITING_RAM` | A service or helper cannot fit its required RAM yet. |
 | `gen 1 ACTIVE` and `gen 2 SHADOW` | The current plan keeps earning while a replacement is being built. |
+| `PREFLIGHT` / `insufficient overlap RAM` | The replacement cannot yet fit beside committed batches. The scheduler searches smaller improving plans while existing work continues. |
 | `DRAINING -> CUTOVER` in the Plan row | Old committed batches are finishing while the new generation takes over at a safe landing boundary. |
 | Rebuild or deferral counts | Cumulative history. Check the current reason and whether the counts are still increasing. |
 
@@ -113,7 +124,8 @@ reject nearly every batch. The scheduler now retries with fewer worker processes
 before deferring a batch; no launch-limit flag change is needed for this fix.
 
 For more information, see [dashboard details](docs/dashboard.md),
-[multi-target scheduling](docs/multi-target.md), and [recovery](docs/jit-recovery.md).
+[multi-target scheduling](docs/multi-target.md), [reset startup](docs/post-augmentation-liveness.md),
+and [recovery](docs/jit-recovery.md).
 
 ## Update without killing everything
 

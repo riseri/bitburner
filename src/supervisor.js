@@ -10,6 +10,7 @@ import { pathFromHome } from "lib/progression-protocol.js";
 const HOME = "home";
 const SUPERVISOR = "supervisor.js";
 const STARTER_WORKER = "starter-worker.js";
+const SHARE_WORKER = "share-worker.js";
 const DAEMON = "daemon.js";
 const FLEET = "fleet-manager.js";
 const CONTRACTS = "contract-manager.js";
@@ -77,6 +78,7 @@ export async function main(ns) {
 		["cloud-roi", true],
 		["cloud-payback", 1800],
 		["home-reserve", 8],
+		["share", true],
 	]);
 	applySupervisorProfile(flags, ns.args);
 
@@ -107,6 +109,7 @@ export async function main(ns) {
 		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
 		cloudRoi: asBoolean(flags["cloud-roi"]),
 		cloudPayback: Number(flags["cloud-payback"]),
+		share: asBoolean(flags.share),
 		contracts: asBoolean(flags.contracts),
 		progression: asBoolean(flags.progression),
 		progressionActions: asBoolean(flags["progression-actions"]),
@@ -137,6 +140,7 @@ export async function main(ns) {
 	validateSupervisorOptions(flags, cfg);
 	await saveSupervisorBootstrap(ns);
 	const required = [DAEMON, FLEET, STARTER_WORKER];
+	if (cfg.share) required.push(SHARE_WORKER);
 	if (cfg.contracts) required.push(CONTRACTS);
 	if (cfg.progression) required.push(PROGRESSION);
 	if (cfg.stocks) required.push(STOCK_TRADER);
@@ -165,6 +169,7 @@ export async function main(ns) {
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
 	if (Number(flags["max-targets"]) !== 2) daemonArgs.push("--max-targets", Number(flags["max-targets"]));
 	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
+	if (cfg.share) daemonArgs.push("--fleet-share", true);
 	const utilityReserve = Math.max(0,
 		cfg.diagnostics ? ns.getScriptRam("doctor.js", HOME) : 0,
 		cfg.augmentations && augmentationAccess(ns) ? ns.getScriptRam("augmentation-planner.js", HOME) : 0,
@@ -173,6 +178,7 @@ export async function main(ns) {
 	const optionalServiceReserve = (cfg.augmentationActions ? ns.getScriptRam(AUGMENTATION_MANAGER, HOME) : 0) +
 		(cfg.darknet ? ns.getScriptRam(DARKNET_MANAGER, HOME) + ns.getScriptRam("darknet-agent.js", HOME) : 0);
 	daemonArgs.push("--home-reserve", Math.max(Number(flags["home-reserve"]), optionalServiceReserve + utilityReserve + 8));
+	cfg.shareReserve = Math.max(Number(flags["home-reserve"]), utilityReserve);
 	const services = createManagedServices(ns, cfg, daemonArgs);
 	const actions = createActionState();
 	const jobs = createSupervisorUtilities(cfg);
@@ -235,6 +241,8 @@ export async function main(ns) {
 			goStatus = ownedServiceStatus(ns, services.find(service => service.name === GO_BOT), snapshot(GO_BOT)),
 			augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
+		reconcileHomeShare(ns, cfg.share, cfg.shareReserve);
+		cfg.shareStatus = collectSharingStatus(ns, cfg.share, fleetStatus, cfg.shareReserve);
 		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
 		cfg.telemetryError = telemetry?.error || "";
 		if (telemetry) cfg.telemetrySummary = summarizeTelemetry(telemetry.samples, Date.now() - 3600000);
@@ -268,6 +276,10 @@ function tickServicePriority(ns, services, blockedBy = "") {
 		const needed = ns.getScriptRam(service.name, HOME) * Math.max(1, service.threads || 1);
 		let free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
 		if (needed > free) {
+			yieldHomeShare(ns);
+			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+		}
+		if (needed > free) {
 			preemptLowerPriorityServices(ns, service, services.slice(index + 1), needed - free);
 			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
 		}
@@ -281,6 +293,64 @@ function tickServicePriority(ns, services, blockedBy = "") {
 		tickService(ns, service);
 	}
 	return blocker;
+}
+
+function yieldHomeShare(ns) {
+	for (const process of ns.ps(HOME).filter(item => item.filename === SHARE_WORKER)) ns.kill(process.pid);
+}
+
+function reconcileHomeShare(ns, enabled, reserve = 0) {
+	const processes = ns.ps(HOME).filter(process => process.filename === SHARE_WORKER);
+	const ramPerThread = ns.getScriptRam(SHARE_WORKER, HOME);
+	if (!enabled || !(ramPerThread > 0)) {
+		for (const process of processes) ns.kill(process.pid);
+		return enabled ? "WAITING (missing worker or invalid RAM cost)" : "Disabled";
+	}
+	const currentRam = processes.reduce((sum, process) =>
+		sum + ramPerThread * Math.max(1, process.threads || 1), 0);
+	const usedWithoutShare = Math.max(0, ns.getServerUsedRam(HOME) - currentRam);
+	const desiredThreads = Math.max(0, Math.floor((ns.getServerMaxRam(HOME) - usedWithoutShare - reserve) / ramPerThread));
+	if (processes.length === 1 && processes[0].threads === desiredThreads) {
+		return `${desiredThreads} threads | ${formatRam(currentRam)} | ${formatRam(reserve)} reserved`;
+	}
+	for (const process of processes) ns.kill(process.pid);
+	const pid = desiredThreads > 0 ? ns.run(SHARE_WORKER, desiredThreads) : 0;
+	return pid
+		? `${desiredThreads} threads | ${formatRam(desiredThreads * ramPerThread)} | ${formatRam(reserve)} reserved`
+		: `WAITING | ${formatRam(reserve)} reserved`;
+}
+
+function collectSharingStatus(ns, enabled, fleetStatus, reserve = 0) {
+	let power = 1;
+	try { power = Math.max(1, Number(ns.getSharePower()) || 1); } catch {}
+	if (!enabled) return { enabled: false, power, threads: 0, ram: 0, hosts: 0, reserve };
+	const names = new Set([HOME]);
+	for (const host of fleetStatus?.network?.hosts || []) {
+		const name = String(host?.name || "");
+		if (name) names.add(name);
+	}
+	let threads = 0, ram = 0, hosts = 0;
+	for (const host of names) {
+		let hostThreads = 0;
+		try {
+			for (const process of ns.ps(host)) {
+				if (process.filename === SHARE_WORKER) hostThreads += Math.max(1, process.threads || 1);
+			}
+			if (hostThreads > 0) {
+				hosts++;
+				threads += hostThreads;
+				ram += hostThreads * Math.max(0, Number(ns.getScriptRam(SHARE_WORKER, host)) || 0);
+			}
+		} catch {}
+	}
+	return { enabled: true, power, threads, ram, hosts, reserve };
+}
+
+function sharingLabel(status) {
+	if (!status?.enabled) return "OFF";
+	const power = `${Math.max(1, Number(status.power) || 1).toFixed(3)}x faction rep`;
+	if (!(status.threads > 0)) return `${power} | waiting for spare RAM`;
+	return `${power} | ${status.threads} threads | ${formatRam(status.ram)} on ${status.hosts} host${status.hosts === 1 ? "" : "s"}`;
 }
 
 function preemptLowerPriorityServices(ns, owner, lowerServices, shortfall) {
@@ -549,7 +619,7 @@ function render(ns, state) {
 	if (!cfg.dashboardDetails) {
 		renderAttention(ns, { cfg, goal, daemon, fleet, contracts, progression, go, augmentation,
 			services: state.services, stockAccess: state.stockAccess });
-		renderOverview(ns, daemon, fleet);
+		renderOverview(ns, daemon, fleet, cfg.shareStatus);
 		renderNextSteps(ns, { cfg, goal, progression, augmentation, actions: state.actions });
 		renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet,
 			actions: state.actions, services: state.services, stockAccess: state.stockAccess });
@@ -570,6 +640,7 @@ function render(ns, state) {
 		dashboardRow(ns, "History 1h", `${cash(report.earnings)} hacked | ${cash(report.spending)} RAM spending | ${report.recoveries} recoveries | ${report.count} samples`);
 	}
 	if (cfg.savingsStatus) dashboardRow(ns, "Savings policy", cfg.savingsStatus);
+	if (cfg.shareStatus) dashboardRow(ns, "Sharing", sharingLabel(cfg.shareStatus));
 	for (const job of cfg.utilityJobs || []) {
 		const stale = job.type === "augmentation-plan" && job.report && Date.now() - job.report.generatedAt > 120000;
 		dashboardRow(ns, job.type === "diagnostics" ? "Diagnostics" : "Augmentations", `${stale ? "STALE / " : ""}${job.state}: ${job.message}`);
@@ -662,7 +733,7 @@ function withWorldDaemonRoute(progression, fleet) {
 	};
 }
 
-function renderOverview(ns, daemon, fleet) {
+function renderOverview(ns, daemon, fleet, shareStatus = null) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Overview");
 
@@ -705,6 +776,7 @@ function renderOverview(ns, daemon, fleet) {
 		const cloud = fleet.cloud ?? {};
 		row("Fleet", `${Number(network.rooted) || 0}/${network.servers?.length || 0} rooted | ${network.hosts?.length || 0} workers | cloud ${Number(cloud.count) || 0}/${Number(cloud.limit) || 0}`);
 	}
+	if (shareStatus) row("Sharing", sharingLabel(shareStatus));
 }
 
 function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) {

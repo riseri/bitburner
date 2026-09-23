@@ -27,7 +27,7 @@ function fixture() {
             landAt: landing + ({ H: 0, W1: 100, G: 200, W2: 300 }[phase]),
             launchAt: clock.now - 10, threads: 1, ram: 2, script: `jit-${phase}.js`, duration: 1000,
         }));
-        const state = api.makeBatchState(id, chunks); batches.set(id, state); return state;
+        const state = api.makeBatchState(id, chunks); state.plan = runtime.plan; batches.set(id, state); return state;
     }
     function track(state) {
         for (const chunk of state.chunks.values()) {
@@ -60,6 +60,26 @@ test('recovery deadline cannot slide under continuous misses', () => {
     assert.equal(escalated.elapsed, 15_000);
     assert.equal(escalated.problem.hard, true);
     assert.equal(f.control.peek().paused, true, 'timeout must not reopen the hack gate');
+});
+
+for(const fault of ['poisoned','skipped','missing plan','invalid period']) test(`productive time excludes ${fault} batches`,()=>{
+    const f=fixture(),b=f.batch();f.track(b);
+    if(fault==='poisoned')b.poisoned=true;
+    if(fault==='skipped')b.phases.W1.skipped=true;
+    if(fault==='missing plan')delete b.plan;
+    if(fault==='invalid period')b.plan={period:Infinity};
+    for(const phase of ['H','W1','G','W2'])f.done(b,phase,phase==='H'?250:0);
+    f.consume();assert.equal(f.stats.pipeline.productiveMs,0);
+});
+
+test('hard pipeline-stat reset clears productive time without erasing session totals',()=>{
+    const f=fixture(),b=f.batch();f.track(b);
+    for(const phase of ['H','W1','G','W2'])f.done(b,phase,phase==='H'?250:0);
+    f.consume();assert.equal(f.stats.pipeline.productiveMs,420);
+    assert.equal(f.stats.money,250);assert.equal(f.stats.completed,1);
+    f.api.resetPipelineStats(f.stats);
+    assert.equal(f.stats.pipeline.productiveMs,0);assert.equal(f.stats.pipeline.completed,0);
+    assert.equal(f.stats.money,250);assert.equal(f.stats.completed,1);
 });
 
 test('security 100 trips the circuit breaker without waiting for a deadline', () => {

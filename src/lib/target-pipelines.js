@@ -53,6 +53,7 @@ export function createPipelinePool(ns, setup, api) {
 		launchBuckets: new Map(), nextOrdinal: 1, planCursor: 0, foreignCursor: 0,
 		lastUi: 0, lastNetwork: Date.now(), lastReconcile: 0, lastCleanup: 0, lastMonitor: 0,
 		lastLoop: Date.now(), lagMax: 0, slowTicks: [], lastFleetAt: 0,
+		shareCursor: 0, lastShare: 0,
 		anchor: setup.target, trialGuard: null, note: "Waiting for productive runtime before admission",
 		lastAdmission: 0, nextAdmission: 0, readyScan: null, nextReadyScan: 0,
 		nextAdmissionService: 0, pendingAdmission: "", pendingAdmissionFloor: 0,
@@ -106,6 +107,7 @@ export async function runTargetPipelines(ns, setup, api) {
 			api.publishHackPause(pipeline.control, Number.MAX_SAFE_INTEGER, "owner stopped");
 		}
 		for (const pid of pool.running.keys()) ns.kill(pid);
+		api.clearFleetShare(ns, pool.network.hosts);
 		for (const prep of pool.cfg.prepStates) cancelBackgroundPrep(ns, prep, "owner stopped");
 	}, "target-pipelines");
 	while (true) {
@@ -154,6 +156,11 @@ export async function runTargetPipelines(ns, setup, api) {
 		if (now - pool.lastMonitor >= 1000) {
 			pool.lastMonitor = now;
 			monitorPipelineLoad(ns, pool, now);
+		}
+		if (now - pool.lastShare >= 1000 && pool.port.empty() && nextPipelineLaunch(pool) - now > 20) {
+			pool.lastShare = now;
+			pool.shareCursor = api.reconcileFleetShare(ns, pool.network.hosts, pool.cfg, pool.running,
+				pool.reservations, pool.foreign, pool.shareCursor);
 		}
 		if (now - pool.lastUi >= UI_MS && pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 20) {
 			pool.lastUi = now;
@@ -593,13 +600,20 @@ function serviceShadowTuneStep(ns, pool, p) {
 			ramBudget: Math.max(0, pool.api.poolProfile(ns, pool.network.hosts, pool.cfg, pool.running).capacity -
 				[...pool.pipelines.values()].filter(q => q !== p).reduce((n, q) => n +
 					(q.runtime?.plan.ramTime || 0) / (q.runtime?.plan.period || 1) * 1.25, 0)) };
-		s.tuner = pool.api.tuneTargetSteps(ns, p.name, pool.network.hosts, s.cfg, pool.running, model);
+		const accept = s.fitOverlap ? plan => transitionPlanFits(ns, pool, p, plan, s.cfg) : null;
+		s.tuner = pool.api.tuneTargetSteps(ns, p.name, pool.network.hosts, s.cfg, pool.running, model, accept);
 	}
 	if (s.tuner) {
 		const step = s.tuner.next();
 		if (!step.done) return;
 		s.tuner = null; s.runtime = step.value;
 		if (!s.runtime) {
+			if (s.fitOverlap) {
+				s.state = "PREFLIGHT";
+				s.reason = "insufficient overlap RAM for complete HWGW batches; searching smaller plans";
+				s.retryAt = now + Math.min(30_000, 1000 * 2 ** Math.min(5, s.attempts++));
+				return;
+			}
 			s.state = "ABORTED"; p.hotSwaps.aborted++; p.shadowRetryAt = now + 30_000;
 			p.lastSwap = { state: "ABORTED", trigger: s.trigger, reason: "no replacement plan fits" }; p.shadow = null; return;
 		}
@@ -631,21 +645,13 @@ export function preflightHotSwap(ns, pool, p) {
 		s.reason = "cutover would leave an income gap; waiting for a future restoration boundary";
 		s.retryAt = now + 2000; return false;
 	}
-	const mark = pool.reservations.length, batches = [], chunks = [];
-	let reason = "";
-	// Reserve complete HWGW batches against the actual shared ledger, including
-	// old work, peers, foreign usage and prep. This pure path never preempts prep.
-	for (let i = 0; i < 2; i++) {
-		const id = `${p.epoch}:g${s.number}:${p.serial + i + 1}`;
-		const result = reserveBudgetedBatch(ns, pool, p, id, firstH + i * plan.period, plan, s.cfg, chunks);
-		if (!result.chunks) {
-			reason = result.ramFailure ? "insufficient overlap RAM for complete HWGW batches" : result.reason; break;
-		}
-		batches.push({ id, chunks: result.chunks }); chunks.push(...result.chunks);
-	}
+	const { batches, reason } = reserveTransitionBatches(ns, pool, p, plan, s.cfg, firstH);
 	if (reason) {
-		api.rollbackReservations(pool.reservations, mark);
 		s.reason = reason; s.retryAt = now + Math.min(30_000, 1000 * 2 ** Math.min(5, s.attempts++));
+		// A steady-state winner may never fit alongside the old generation.
+		// Search smaller, genuinely admissible candidates instead of repeatedly
+		// trying the same oversized plan. Old admissions remain open throughout.
+		if (reason.includes("overlap RAM")) { s.fitOverlap = true; s.runtime = null; s.tuner = null; }
 		return false;
 	}
 	// No yields between successful preflight and commit. The reservations being
@@ -667,6 +673,33 @@ export function preflightHotSwap(ns, pool, p) {
 	p.stats.nextHackLanding = firstH;
 	api.publishHackPause(p.control, 0, "plan cutover");
 	return true;
+}
+
+function reserveTransitionBatches(ns, pool, p, plan, cfg, firstH) {
+	const mark = pool.reservations.length, batches = [], chunks = [];
+	for (let i = 0; i < 2; i++) {
+		const id = `${p.epoch}:g${cfg.generation}:${p.serial + i + 1}`;
+		const result = reserveBudgetedBatch(ns, pool, p, id, firstH + i * plan.period, plan, cfg, chunks);
+		if (!result.chunks) {
+			pool.api.rollbackReservations(pool.reservations, mark);
+			return { batches: [], reason: result.ramFailure
+				? "insufficient overlap RAM for complete HWGW batches" : result.reason };
+		}
+		batches.push({ id, chunks: result.chunks }); chunks.push(...result.chunks);
+	}
+	return { batches, reason: "" };
+}
+
+function transitionPlanFits(ns, pool, p, plan, cfg) {
+	const mark = pool.reservations.length;
+	try {
+		const finalOldW2 = Math.max(p.stats.lastW2 || 0, ...[...p.batches.values()].map(b => b.landing.W2 || 0));
+		const firstH = Math.max(finalOldW2 + Math.max(p.cfg.gap, cfg.gap),
+			Date.now() + plan.times.W + cfg.lead + 250);
+		return !reserveTransitionBatches(ns, pool, p, plan, cfg, firstH).reason;
+	} finally {
+		pool.api.rollbackReservations(pool.reservations, mark);
+	}
 }
 
 function modelAssumptions(model) {
@@ -787,6 +820,7 @@ function servicePipelineMaintenance(ns, pool) {
 			}
 			tickBackgroundPrep(ns, { state: p.repair, repair: true, target: p.name,
 				network: pool.network, cfg: p.cfg, runtime: p.runtime, stats: p.stats, healthy: true,
+				reclaimShare: host => api.reclaimFleetShare(ns, host),
 				spareRam: host => api.availableRam(ns, host, p.cfg, pool.running, pool.reservations,
 					Date.now(), Infinity, pool.foreign) });
 			p.note = `Target repair: ${p.repair.status} ${p.repair.reason}`;
@@ -802,7 +836,7 @@ function servicePipelineMaintenance(ns, pool) {
 
 function productive(p, now) {
 	return p?.mode === "RUNNING" && !p.recovery && !p.drain &&
-		p.stats.pipeline.completed * p.runtime.plan.period >= PRODUCTIVE_MS &&
+		(p.stats.pipeline.productiveMs || 0) >= PRODUCTIVE_MS &&
 		recentPipelineIncome(p.stats, p.runtime, now);
 }
 
@@ -908,6 +942,7 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			healthy: true, allowLaunch: allowPrepLaunch, promotion: true,
 			replacementRate: support.runtime.plan.expected,
 			replacementBatchRate: support.runtime.plan.batchRate,
+			reclaimShare: host => api.reclaimFleetShare(ns, host),
 			spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
 				now, Infinity, pool.foreign) });
 		const prep = cfg.backgroundPrep;
@@ -939,7 +974,7 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	}
 	if (!anchor || anchor.mode !== "RUNNING") return;
 	if (!productive(anchor, now)) {
-		const seconds = Math.floor(anchor.stats.pipeline.completed * anchor.runtime.plan.period / 1000);
+		const seconds = Math.floor((anchor.stats.pipeline.productiveMs || 0) / 1000);
 		pool.note = anchor.admissionReason ? `${anchor.name}: ${anchor.admissionReason}`
 			: `Waiting for productive runtime: ${seconds}/120 seconds; recent Hack required`;
 	} else if (!full) {
@@ -965,6 +1000,7 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			healthy: productive(anchor, now), allowLaunch: allowPrepLaunch,
 			slotFill: cfg.maxTargets > 1 && !full,
 			availableBatchRate: Math.max(0, cfg.maxBatchRate - anchor.runtime.plan.batchRate),
+			reclaimShare: host => api.reclaimFleetShare(ns, host),
 			spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
 				now, Infinity, pool.foreign) });
 		const prep = cfg.backgroundPrep;

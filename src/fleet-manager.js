@@ -6,7 +6,7 @@ const HOME = "home";
 const HACK = "jit-hack.js";
 const GROW = "jit-grow.js";
 const WEAKEN = "jit-weaken.js";
-const WORKERS = [HACK, GROW, WEAKEN, "lib/jit-worker.js", "background-grow.js", "background-weaken.js"];
+const WORKERS = [HACK, GROW, WEAKEN, "share-worker.js", "lib/jit-worker.js", "background-grow.js", "background-weaken.js"];
 const SURPLUS_COST_MULTIPLE = 4;
 
 /** @param {NS} ns */

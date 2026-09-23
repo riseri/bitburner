@@ -1,8 +1,31 @@
-# Empty-pipeline recovery after a reset
+# Startup and recovery after an augmentation reset
 
 An augmentation restart uses the normal supervisor entry point. The money pipeline
-must not require two productive minutes (secondary-target admission) or fifteen
-productive minutes (elective skill retuning) to recover when it has no work left.
+must not require two productive minutes (secondary-target admission) to recover
+when it has no work left. Skill changes use background plan tuning.
+
+## Small-fleet startup
+
+On a few hundred GB, average RAM usage can hide batch peaks and leave too little
+room to change plans. The tuner now reserves headroom for two estimated complete
+HWGW batches before choosing the RAM-limited period. This allowance is capped at
+half the available capacity so tiny fleets can still run larger minimum batches;
+a single estimated batch must fit available capacity. Home reserves and other
+processes are deducted before this calculation. Large fleets whose cadence is
+already limited by timing or launch budgets generally retain the same cadence.
+
+If a replacement fails the real overlap RAM check, the yielding tuner searches
+for a smaller improving plan whose two transition batches fit beside committed
+work. Probes include peer, foreign and prep RAM and worker/launch limits, roll
+back their temporary reservations, and never cancel a worker. Commitment checks
+the selected plan again. When nothing improving fits, existing work continues
+and searches retry with backoff.
+
+These changes reduce repeated deferrals and stale-plan waits after installation.
+They cannot remove target preparation or the first action warmup after a cold
+restart. An empty second slot can also remain empty until there is a prepared,
+worthwhile target and spare shared capacity. Leave the supervisor running; no
+special reset flags or increased launch limits are required.
 
 A `RUNNING` target with a clean server, no workers and no queued operations is not
 necessarily warming up. Batch reservation and shared workload admission can fail
@@ -43,6 +66,14 @@ No timing, worker semantics, progression flag, Formulas API or extra target coun
 is introduced. Start with `run supervisor.js --profile assist` as before.
 
 ## Evidence and limits
+
+`test/small-fleet-startup-simulation.test.cjs` uses a 356 GB fleet, a level-10 to
+level-66 startup, and both 8 GB and 96 GB home reserves. It verifies first income
+after one initial warmup, one successful plan change, continuing payouts,
+measured cadence, restored money/security and host RAM limits. Successful Hacks
+are deterministic here to separate scheduler gaps from random failed payouts.
+Hot-swap tests also cover choosing a smaller feasible candidate and bounded,
+yielding searches when all replacements remain blocked.
 
 Tests deliberately make a previously earning plan infeasible on a 128 TB,
 six-core-home fixture, before its productive-time gates are satisfied. The old

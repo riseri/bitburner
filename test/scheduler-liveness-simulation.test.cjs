@@ -19,7 +19,7 @@ function boot(options={}) {
 test('post-reset sized fleet resumes an idle infeasible plan before productive-time gates are met',{timeout:60000},async()=>{
     const sim=boot();sim.run();await sim.clock.runUntil(sim.start+30000);
     const p=sim.pool.pipelines.get('foodnstuff');
-    assert.ok(sim.paid.length>0);assert.ok(p.stats.pipeline.completed*p.runtime.plan.period<120000);
+    assert.ok(sim.paid.length>0);assert.ok(p.stats.pipeline.productiveMs<120000);
     const before=p.stats.money;
     // Deliberate stale-plan fault injection, not a claim that an augmentation
     // directly writes this field. It yields the reported clean/empty/no-miss state.

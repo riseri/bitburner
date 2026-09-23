@@ -37,7 +37,8 @@ for (const scenario of [
             assert.match(summary.logs.find(l => l.startsWith('Recovery')), /Recovery\s+0 local/);
         }
         // No worker starts a normal HGW action at inflated security.
-        assert.ok(sim.actions.filter(a => !a.phase.startsWith('PREP')).every(a => a.startSec <= 12.001));
+        assert.ok(sim.actions.filter(a => !a.phase.startsWith('PREP') && !a.phase.startsWith('BG-'))
+            .every(a => a.startSec <= 12.001));
         console.log(`${scenario.name}: ${JSON.stringify({ paid: summary.paid, income60: summary.income60, security: summary.security, steps: summary.steps })}`);
     });
 }

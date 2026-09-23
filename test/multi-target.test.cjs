@@ -29,7 +29,7 @@ function fixture() {
             host: 'cloud', ram: 2, landAt: clock.now + i * 100, launchAt: clock.now - 1000, duration: 1000,
             script: 'jit-hack.js', threads: 1,
         }));
-        const b = api.makeBatchState(id, chunks); p.batches.set(id, b);
+        const b = api.makeBatchState(id, chunks); b.plan = p.runtime.plan; p.batches.set(id, b);
         for (const c of chunks) { const pid = nextPid++; api.trackRunning(pool.running, pid, c); pool.runningByChunk.set(c.chunkId, pid); c.status = 'running'; }
         return b;
     }
@@ -59,6 +59,7 @@ test('interleaved and duplicate events settle only the owning target and RAM onc
     f.multi.dispatchPipelineEvents(f.ns,f.pool);
     assert.equal(f.a.stats.money,200); assert.equal(f.b.stats.money,400);
     assert.equal(f.b.stats.completed,1); assert.equal(f.a.stats.completed,0);
+    assert.equal(f.b.stats.pipeline.productiveMs,500); assert.equal(f.a.stats.pipeline.productiveMs,0);
     assert.equal(f.a.running.size,3); assert.equal(f.b.running.size,0);
     assert.equal(f.api.totalRunningRam(f.pool.running),6); assert.equal(f.a.runningRam,6);
 });
@@ -238,7 +239,7 @@ test('two target reservations share the same constrained host rather than double
 
 test('one target cannot electively retune while its peer is warming up',()=>{
     const f=fixture();
-    f.a.stats.pipeline.completed=2000;f.a.tunedLevel=400;f.a.runtime.capacity=10000;
+    f.a.stats.pipeline.completed=2000;f.a.stats.pipeline.productiveMs=1000000;f.a.tunedLevel=400;f.a.runtime.capacity=10000;
     f.a.runtime.plan.ramTime=0;f.a.tunedCapacity=10000;f.a.lastCapacityRetune=f.clock.now;
     f.b.trial=false;f.b.stats.pipeline.completed=0;
     f.pool.network={hosts:[{name:'cloud',maxRam:10000,cores:1}]};
@@ -248,7 +249,7 @@ test('one target cannot electively retune while its peer is warming up',()=>{
 
 test('the sole earning target is never drained for an elective retune',()=>{
     const f=fixture();f.pool.pipelines.delete('beta');
-    f.a.stats.pipeline.completed=2000;f.a.stats.lastHackAt=f.clock.now;
+    f.a.stats.pipeline.completed=2000;f.a.stats.pipeline.productiveMs=1000000;f.a.stats.lastHackAt=f.clock.now;
     f.a.tunedLevel=1;f.a.runtime.capacity=100;f.a.runtime.plan.ramTime=100000;
     f.a.tunedCapacity=100;f.a.lastCapacityRetune=f.clock.now-20*60*1000;
     f.pool.network={hosts:[{name:'cloud',maxRam:10000,cores:1}]};
@@ -278,7 +279,7 @@ test('steady promotion selects only the weaker stable lane and pauses for trial 
     const f = fixture();
     for (const p of [f.a, f.b]) {
         p.mode = 'RUNNING'; p.trial = false; p.recovery = null; p.drain = null; p.retiring = false;
-        p.stats.pipeline.completed = 300; p.stats.lastHackAt = f.clock.now;
+        p.stats.pipeline.completed = 300; p.stats.pipeline.productiveMs = 150000; p.stats.lastHackAt = f.clock.now;
     }
     f.a.runtime = { ...f.a.runtime, plan: { ...f.a.runtime.plan, expected: 1000 } };
     f.b.runtime = { ...f.b.runtime, plan: { ...f.b.runtime.plan, expected: 500 } };
@@ -290,6 +291,19 @@ test('steady promotion selects only the weaker stable lane and pauses for trial 
     assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), null);
     f.a.recovery = null; f.b.drain = { reason: 'target drain' };
     assert.equal(f.multi.steadyPromotionSupport(f.pool, f.clock.now), null);
+});
+
+test('waiting progress reports accumulated time rather than revaluing completed batches',()=>{
+    const f=fixture();f.pool.pipelines.delete('beta');f.pool.cfg.maxTargets=1;
+    f.pool.readyScan={}; // leave scouting in progress so its note cannot overwrite this one
+    f.a.stats.pipeline.completed=100;f.a.stats.pipeline.productiveMs=60000;
+    f.a.stats.lastHackAt=f.clock.now;
+    for(const period of [2000,250]) {
+        f.a.runtime.plan.period=period;
+        f.multi.serviceBackgroundAndAdmission(f.ns,f.pool);
+        assert.match(f.pool.note,/60\/120 seconds/);
+        assert.equal(f.multi.productive(f.a,f.clock.now),false);
+    }
 });
 
 test('ready scan admits an additive lane below the anchor but above the marginal floor', () => {

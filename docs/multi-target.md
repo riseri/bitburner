@@ -16,6 +16,11 @@ background-prepared candidate. A newly started process does not inherit the old
 process's prepared-candidate state, so the ready scan also supports starting on
 the richer target and adding a useful smaller target later.
 
+Productive time is the sum of each safely completed batch's own plan period.
+Generation changes preserve that progress, including old-generation batches
+finishing during a swap. Failed or skipped batches receive no credit. Background
+prep and admission use this same total; recent-Hack and health checks still apply.
+
 If no useful ready target exists, the protected background G/W preparation path
 continues. An empty second slot accepts a candidate that provides the incremental
 income improvement implied by the switch threshold, even when that candidate earns

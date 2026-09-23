@@ -61,7 +61,7 @@ function fixture(options = {}) {
     };
     const cfg = { backgroundPrep: state, gap: 100, lead: 600, maxSteal: .5, switchThreshold: 1.25,
         homeReserve: 8, ram: { H: 2, G: 2, W: 2 } };
-    const stats = daemon.createStats(); stats.pipeline.completed = 1000; stats.lastHackAt = clock.now;
+    const stats = daemon.createStats(); stats.pipeline.completed = 1000; stats.pipeline.productiveMs = 500000; stats.lastHackAt = clock.now;
     const running = new Map(), reservations = [], foreign = new Map([['home', 16], ['cloud-a', 0]]);
     const ctx = { state, target: 'phantasy', network: { hosts, servers: Object.keys(servers) }, cfg, stats,
         runtime: { plan: { period: 500, expected: 1e6, times: { W: 500, G: 400, H: 125 } } }, healthy: true,
@@ -241,10 +241,22 @@ test('active exec can reclaim a same-host prep worker without poisoning its batc
 
 test('disabled, warmup and active recovery do not start prep', async () => {
     const f = fixture({ enabled: false }); f.select(); await f.step(); assert.equal(f.launches.length, 0);
-    f.state.enabled = true; f.stats.pipeline.completed = 0; await f.step(); assert.equal(f.launches.length, 0);
-    f.stats.pipeline.completed = 1000; f.ctx.healthy = false; await f.step(); assert.equal(f.launches.length, 0);
+    f.state.enabled = true; f.stats.pipeline.completed = 0; f.stats.pipeline.productiveMs = 0; await f.step(); assert.equal(f.launches.length, 0);
+    f.stats.pipeline.completed = 1000; f.stats.pipeline.productiveMs = 500000; f.ctx.healthy = false; await f.step(); assert.equal(f.launches.length, 0);
     f.ctx.healthy = true; await f.step(); assert.equal(f.launches.length, 1);
     f.ctx.healthy = false; await f.step(); assert.equal(f.state.active, null); assert.ok(f.processes.has(99));
+});
+
+test('background prep uses earned batch periods across plan changes',async()=>{
+    const f=fixture();f.select();
+    f.stats.pipeline.completed=20;f.stats.pipeline.productiveMs=119000;
+    f.ctx.runtime.plan.period=10000; // the old calculation falsely grants 200s
+    await f.step();assert.equal(f.state.status,'WAITING');assert.equal(f.launches.length,0);
+    f.stats.pipeline.productiveMs=120000;
+    f.ctx.runtime.plan.period=500; // the old calculation incorrectly falls to 10s
+    await f.step();assert.equal(f.launches.length,1);
+    f.ctx.runtime.plan.period=250;
+    await f.step();assert.equal(f.state.status,'WEAKEN');assert.equal(f.kills.length,0);
 });
 
 test('active-target changes cancel only background ownership and cannot prep that target', async () => {

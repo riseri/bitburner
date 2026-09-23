@@ -9,9 +9,10 @@ const HOME = "home";
 const HACK = "jit-hack.js";
 const GROW = "jit-grow.js";
 const WEAKEN = "jit-weaken.js";
+const SHARE = "share-worker.js";
 
 const WORKERS = [HACK, GROW, WEAKEN];
-const WORKER_FILES = [...WORKERS, "lib/jit-worker.js", ...backgroundPrepFiles()];
+const WORKER_FILES = [...WORKERS, SHARE, "lib/jit-worker.js", ...backgroundPrepFiles()];
 const FLEET_MANAGER = "fleet-manager.js";
 
 const RELEASE_MS = 1_000; // reserve space for callback/reporting jitter
@@ -44,6 +45,7 @@ export async function main(ns) {
 		["gap", 100],
 		["lead", 600],
 		["home-reserve", 8],
+		["fleet-share", false],
 		["min-steal", 0.01],
 		["max-steal", 0.50],
 		["switch-threshold", 1.25],
@@ -71,6 +73,7 @@ export async function main(ns) {
 			0,
 			Number(flags["home-reserve"])
 		),
+		fleetShare: asBoolean(flags["fleet-share"]),
 		minSteal: asFraction(
 			Number(flags["min-steal"])
 		),
@@ -195,6 +198,7 @@ export async function main(ns) {
 
 	// Kill orphan workers left from a previous daemon run.
 	killWorkerScripts(ns, network.hosts);
+	clearFleetShare(ns, network.hosts);
 	cleanupBackgroundOrphans(ns, network.hosts);
 
 	await ns.sleep(50);
@@ -273,6 +277,7 @@ export async function main(ns) {
 		beginSoftRecovery, updateSoftRecovery, cancelHackWindow, cancelPoisonedBatch,
 		beginDrain, serviceHardDrain, cancelChunk, publishHackPause,
 		reconcileRunning, untrackRunningByChunk, isTerminalChunk,
+		reconcileFleetShare, reclaimFleetShare, clearFleetShare,
 		reserveIncomeBatch, reserveBatch, rollbackReservations, cleanupReservations, rebuildReservationIndex,
 		enqueueChunks, makeBatchState, launchDueChunks, availableRam, totalRunningRam,
 		incomeRate, countRate, renderSchedulerDashboard, hackingFormulasAvailable,
@@ -445,6 +450,12 @@ async function refreshNetwork(
 
 		rooted++;
 
+		// Home is reserved for the controller, services, and faction sharing.
+		// Income and preparation workers belong on the rooted remote fleet.
+		if (name === HOME) {
+			continue;
+		}
+
 		const maxRam =
 			ns.getServerMaxRam(
 				name
@@ -457,38 +468,36 @@ async function refreshNetwork(
 			continue;
 		}
 
-		if (name !== HOME) {
-			if (
-				manage &&
-				!deployed.has(
-					name
-				)
-			) {
-				const copied =
-					await ns.scp(
-						WORKER_FILES,
-						name,
-						HOME
-					);
-
-				if (!copied) {
-					continue;
-				}
-
-				deployed.add(
-					name
+		if (
+			manage &&
+			!deployed.has(
+				name
+			)
+		) {
+			const copied =
+				await ns.scp(
+					WORKER_FILES,
+					name,
+					HOME
 				);
-			} else if (
-				!manage &&
-				!ns.fileExists(
-					HACK,
-					name
-				)
-			) {
-				// The background fleet manager has not finished deploying this host.
-				// Skip it for this snapshot instead of risking an exec failure.
+
+			if (!copied) {
 				continue;
 			}
+
+			deployed.add(
+				name
+			);
+		} else if (
+			!manage &&
+			!ns.fileExists(
+				HACK,
+				name
+			)
+		) {
+			// The background fleet manager has not finished deploying this host.
+			// Skip it for this snapshot instead of risking an exec failure.
+			continue;
 		}
 
 		let cores = 1;
@@ -1934,9 +1943,16 @@ function* tuneTargetSteps(
 				RELEASE_MS
 			);
 
-		const ramLimitedPeriod =
-			ramTime /
-			profile.capacity;
+		// Average RAM-time alone overfills small fleets: indivisible batches
+		// have peaks, and a replacement needs room beside committed work.
+		// Leave two complete batches of headroom before choosing the cadence,
+		// matching the overlap preflight. Cap this allowance at half the fleet
+		// so tiny fleets can still run a batch larger than that allowance.
+		const batchRam = H * cfg.ram.H + estimatedG * cfg.ram.G +
+			(estimatedW1 + estimatedW2) * cfg.ram.W;
+		if (batchRam >= profile.capacity) continue;
+		const headroom = Math.min(2 * batchRam, profile.capacity * 0.5);
+		const ramLimitedPeriod = ramTime / (profile.capacity - headroom);
 
 		const minimumPeriod =
 			Math.max(
@@ -3453,7 +3469,10 @@ function refreshOneForeignUsage(
 	const host =
 		hosts[index];
 
-	const own = runningRamForHost(running, host.name) + backgroundPrepRam(backgroundPrep, host.name);
+	const shareRam = ns.ps(host.name)
+		.filter(process => process.filename === SHARE)
+		.reduce((sum, process) => sum + ns.getScriptRam(SHARE, host.name) * Math.max(1, process.threads || 1), 0);
+	const own = runningRamForHost(running, host.name) + backgroundPrepRam(backgroundPrep, host.name) + shareRam;
 
 	const actual =
 		ns.getServerUsedRam(
@@ -3502,6 +3521,42 @@ function workerFleetCapacity(
 			),
 		0
 	);
+}
+
+function clearFleetShare(ns, hosts) {
+	for (const host of hosts) {
+		for (const process of ns.ps(host.name).filter(item => item.filename === SHARE)) ns.kill(process.pid);
+	}
+}
+
+function reclaimFleetShare(ns, host) {
+	let reclaimed = false;
+	for (const process of ns.ps(host).filter(item => item.filename === SHARE)) {
+		reclaimed = ns.kill(process.pid) || reclaimed;
+	}
+	return reclaimed;
+}
+
+function reconcileFleetShare(ns, hosts, cfg, running, reservations, foreignUsedByHost, cursor = 0) {
+	if (!cfg.fleetShare || !hosts.length) return 0;
+	const index = Math.abs(Number(cursor) || 0) % hosts.length;
+	const host = hosts[index];
+	const processes = ns.ps(host.name).filter(process => process.filename === SHARE);
+	const ram = ns.getScriptRam(SHARE, host.name);
+	if (!(ram > 0)) return (index + 1) % hosts.length;
+	const current = processes.reduce((sum, process) => sum + Math.max(1, process.threads || 1), 0);
+	// Share is disposable filler, not a reservation consumer. Size it from RAM
+	// physically idle now; a future JIT/prep launch reclaims the host first.
+	// Using the worst peak across every future reservation would leave most RAM
+	// empty throughout long action timers even though reclamation is guaranteed.
+	const currentRam = current * ram;
+	const freeWithoutShare = Math.max(0,
+		host.maxRam - ns.getServerUsedRam(host.name) + currentRam);
+	const desired = Math.max(0, Math.floor(freeWithoutShare / ram));
+	if (processes.length === 1 && current === desired) return (index + 1) % hosts.length;
+	for (const process of processes) ns.kill(process.pid);
+	if (desired > 0) ns.exec(SHARE, host.name, desired);
+	return (index + 1) % hosts.length;
 }
 
 function poolProfile(
@@ -3654,6 +3709,12 @@ function finishReadyBatches(batches, stats, cfg) {
 		} else {
 			stats.completed++;
 			stats.pipeline.completed++;
+			// Credit the cadence that produced this completed batch, not the
+			// currently admitting generation. Hot swaps must not revalue history.
+			const period = batch.plan?.period;
+			if (Number.isFinite(period) && period > 0 && !Object.values(batch.phases).some(p => p.skipped)) {
+				stats.pipeline.productiveMs += period;
+			}
 			stats.batchTimes.push(batch.phases.W2.max);
 		}
 		if (batch.generationState) {
@@ -3990,6 +4051,7 @@ function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runnin
 			target, chunk.landAt, chunk.batchId, cfg.port, chunk.phase, chunk.chunkId,
 			Math.max(20, (batch.cfg || cfg).gap), cfg.controlPort, chunk.duration, chunk.launchAt,
 			chunk.stealBudget ?? 0, chunk.threads, chunk.epoch || "", chunk.generation ?? 0);
+		reclaimFleetShare(ns, chunk.host);
 		let pid = launch();
 		if (!pid && reclaimPrepRam(ns, cfg, chunk.host)) pid = launch();
 		if (!pid) {
@@ -4039,6 +4101,7 @@ function networkFromFleetStatus(
 			}))
 			.filter(host =>
 				host.name &&
+				host.name !== HOME &&
 				host.maxRam >=
 				minimumWorkerRam
 			)
@@ -4234,6 +4297,7 @@ function createPipelineStats() {
 	return {
 		started: Date.now(),
 		completed: 0,
+		productiveMs: 0,
 		recoveries: 0,
 		softRecoveries: 0,
 		suppressedHackChunks: 0,
@@ -4466,6 +4530,7 @@ function renderSchedulerDashboard(ns, pool) {
 			local: p.stats.pipeline.softRecoveries, fallback: p.stats.pipeline.recoveries,
 			restarts: p.stats.restarts, resyncs: p.stats.resyncs, admissionSkips: p.admissionSkips,
 			allocationFails: p.stats.allocationFails, idleRetunes: p.idleRetunes || 0, admissionReason: p.admissionReason || "",
+			productiveMs: p.stats.pipeline.productiveMs || 0,
 			note: p.recovery?.reason || p.drain?.reason || p.admissionReason || p.note,
 			lastReason: p.stats.lastReason || "",
 			workerRam: p.runningRam, epoch: p.epoch, generation: p.generation,

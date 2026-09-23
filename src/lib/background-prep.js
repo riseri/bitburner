@@ -209,7 +209,7 @@ function stepPrep(ns, ctx, now) {
 		stats.allocationFails, stats.expiredSlots, ...Object.values(stats.misses)].join(":");
 	if (state.trouble && trouble !== state.trouble) state.quietUntil = now + QUIET_MS;
 	state.trouble = trouble;
-	const productive = stats.pipeline.completed * runtime.plan.period >= PRODUCTIVE_MS;
+	const productive = (stats.pipeline.productiveMs || 0) >= PRODUCTIVE_MS;
 	const recentIncome = recentPipelineIncome(stats, runtime, now);
 	const healthy = ctx.healthy && productive && recentIncome && now >= state.quietUntil;
 
@@ -294,8 +294,10 @@ function stepPrep(ns, ctx, now) {
 	const phase = h.sec > h.min + 0.001 ? "W" : "G";
 	const script = phase === "W" ? WEAKEN : GROW;
 	const perThread = ns.getScriptRam(script, "home");
+	const logicalRam = Math.min(prepBudget(ctx), ctx.spareRam(host));
+	if (logicalRam >= perThread) ctx.reclaimShare?.(host.name);
 	const liveFree = Math.max(0, ns.getServerMaxRam(host.name) - ns.getServerUsedRam(host.name));
-	const ram = Math.min(prepBudget(ctx), ctx.spareRam(host), liveFree);
+	const ram = Math.min(logicalRam, liveFree);
 	const slots = Math.floor(ram / perThread);
 	if (!(slots > 0) || !Number.isFinite(slots)) return;
 	const needed = phase === "W"
