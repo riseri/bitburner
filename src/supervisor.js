@@ -388,18 +388,22 @@ async function runStarterMode(ns) {
 			if (process) ns.tprint(`Starter mode complete at ${maxRam.toFixed(2)} GB home RAM; launching the full automation stack`);
 			return;
 		}
+		if (!ns.hasRootAccess(target)) {
+			try { ns.nuke(target); } catch { /* Retry while starter mode runs. */ }
+		}
+		const rooted = ns.hasRootAccess(target);
 
 		const workerRam = ns.getScriptRam(STARTER_WORKER, HOME);
 		const usedWithoutWorker = ns.getServerUsedRam(HOME) - (process ? workerRam * Math.max(1, process.threads || 1) : 0);
 		const desiredThreads = workerRam > 0 ? Math.max(0, Math.floor((maxRam - usedWithoutWorker) / workerRam)) : 0;
-		if (process && process.threads !== desiredThreads) ns.kill(process.pid);
-		if ((!process || process.threads !== desiredThreads) && desiredThreads > 0) ns.run(STARTER_WORKER, desiredThreads, target);
+		if (process && (process.threads !== desiredThreads || !rooted)) ns.kill(process.pid);
+		if (rooted && (!process || process.threads !== desiredThreads) && desiredThreads > 0) ns.run(STARTER_WORKER, desiredThreads, target);
 
 		ns.clearLog();
 		dashboardTitle(ns, "BITBURNER AUTOMATION :: STARTER MODE");
 		dashboardSection(ns, "Income bootstrap");
 		dashboardRow(ns, "Target", target);
-		dashboardRow(ns, "Worker", desiredThreads > 0 ? `${desiredThreads} thread${desiredThreads === 1 ? "" : "s"}` : "WAITING FOR RAM");
+		dashboardRow(ns, "Worker", !rooted ? `WAITING FOR ROOT on ${target}` : desiredThreads > 0 ? `${desiredThreads} thread${desiredThreads === 1 ? "" : "s"}` : "WAITING FOR RAM");
 		dashboardSection(ns, "Upgrade path");
 		dashboardRow(ns, "Home RAM", `${formatRam(maxRam)} / ${formatRam(coreRam)} needed for supervisor + daemon + fleet`);
 		dashboardRow(ns, "Next", "Upgrade home RAM; full automation starts automatically when it fits");

@@ -7,6 +7,7 @@ function boot(options={}) {
     const sim=new NetscriptSimulation({target:'foodnstuff',hostCount:0,weakenTime:8000,levelPerMinute:30,
         mainServer:{max:50e6,money:50e6,sec:3,min:3,required:1},flags:{'max-targets':1},...options});
     sim.hosts.set('home',{ram:131072,cores:6});
+    sim.hosts.set('cloud-worker',{ram:65536,cores:1});
     const run=loadScript('lib/target-pipelines.js',sim.clock).runTargetPipelines;
     sim.daemon=loadScript('daemon.js',sim.clock,{runTargetPipelines:async(ns,setup,api)=>{
         const render=api.renderSchedulerDashboard;

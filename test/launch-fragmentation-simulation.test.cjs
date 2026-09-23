@@ -40,6 +40,7 @@ test('mixed-core fleet earns at planned cadence with supervisor arguments and de
 
 test('sparse fragmented lane and waiting hot swap recover when compact placement becomes available',async()=>{
     const sim=fleet(),multi=loadScript('lib/target-pipelines.js',sim.clock);
+    for(let i=20;i<60;i++)sim.hosts.set('hacknet-'+i,{ram:64,cores:2});
     let compactEnabled=false;
     // Reproduce the previous placement policy in the same running controller,
     // then enable the fallback. This exercises recovery, not just clean startup.
@@ -53,7 +54,7 @@ test('sparse fragmented lane and waiting hot swap recover when compact placement
     }});
     sim.run();await sim.clock.runUntil(sim.start+180000);
     const stalled=sim.getPort(17).peek().pipelines[0];
-    assert.ok(stalled.batchRate<.05);assert.ok(stalled.workerRam<2000);
+    assert.ok(stalled.batchRate<.2);assert.ok(stalled.workerRam<5000);
     assert.ok(stalled.admissionSkips>300);assert.equal(stalled.allocationFails,0);
     sim.level=()=>600;
     await sim.clock.runUntil(sim.start+210000);

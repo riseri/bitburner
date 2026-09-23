@@ -41,7 +41,10 @@ test('18-minute concurrent prep reaches READY while active income matches prep-d
     }
     const count = world => world.actions.filter(a => a.phase === 'H' && a.target === 'phantasy').length;
     assert.ok(Math.abs(count(sim) - count(baseline)) <= 2, 'background work must not consume income landing slots');
-    assert.ok(after.income60 >= before.income60 * .85, 'allow stochastic hack success, not a lost minute of income');
+    const income180 = world => world.paid.filter(p => p.at >= world.clock.now - 180_000)
+        .reduce((sum, payout) => sum + payout.money, 0) / 180;
+    assert.ok(income180(sim) >= income180(baseline) * .85,
+        'prep must preserve income over several payout windows despite stochastic hack success');
     assert.ok(sim.launches.filter(l => l.phase.startsWith('background-')).every(l => l.ram <= 16_384));
     assert.equal(sim.killed.filter(k => k.phase === 'H').length, 0);
     console.log(JSON.stringify({ baselineIncome60: before.income60, withPrepIncome60: after.income60,

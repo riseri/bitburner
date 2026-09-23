@@ -12,8 +12,10 @@ startup rather than silently rewriting either process.
 
 On the initial 8 GB home, `supervisor.js` remains the resident controller and uses
 the rest of home RAM for `starter-worker.js`, a small multithreaded weaken/grow/hack
-loop against rooted `n00dles`. It rescales the worker as home grows. Every cycle
-rechecks the static RAM cost of supervisor, daemon, and fleet manager; once those
+loop against rooted `n00dles`. It roots the server before launching a worker, and
+the worker waits if root access is unavailable. Starter mode shows `WAITING FOR
+ROOT` until access is available. It rescales the worker as home grows and rechecks
+the static RAM cost of supervisor, daemon, and fleet manager; once those
 three fit, it stops the starter PID and begins the ordinary managed-service
 lifecycle without another command.
 

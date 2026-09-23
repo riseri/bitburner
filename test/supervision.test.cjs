@@ -347,18 +347,41 @@ test('stale Go terminal status from a dead reset process is not displayed as cur
 
 test('8 GB starter mode scales its worker and graduates automatically at core capacity', async () => {
     const api=loadScript('supervisor.js',new Clock()), processes=new Map(),launched=[],killed=[],logs=[];
-    let homeRam=8, nextPid=10;
+    let homeRam=8, nextPid=10, rooted=false;
     const costs={'supervisor.js':5.05,'daemon.js':15.75,'fleet-manager.js':10.25,'starter-worker.js':2.4};
     const ns={getServerMaxRam:()=>homeRam,getScriptRam:file=>costs[file]||0,
+        hasRootAccess:()=>rooted,nuke:()=>{rooted=true;},
         getServerUsedRam:()=>5.05+[...processes.values()].reduce((sum,p)=>sum+2.4*p.threads,0),
-        ps:()=>[...processes.values()],run:(filename,threads,...args)=>{const p={pid:nextPid++,filename,threads,args};processes.set(p.pid,p);launched.push(p);return p.pid;},
+        ps:()=>[...processes.values()],run:(filename,threads,...args)=>{assert.equal(rooted,true);const p={pid:nextPid++,filename,threads,args};processes.set(p.pid,p);launched.push(p);return p.pid;},
         kill:pid=>{killed.push(pid);return processes.delete(pid);},clearLog(){},print:text=>logs.push(text),tprint:text=>logs.push(text),
         sleep:async()=>{homeRam=processes.values().next().value?.threads===1?16:32;}};
     await api.runStarterMode(ns);
     assert.deepEqual(launched.map(p=>[p.filename,p.threads,p.args[0]]),[
         ['starter-worker.js',1,'n00dles'],['starter-worker.js',4,'n00dles']]);
     assert.equal(killed.length,2);
+    assert.equal(rooted,true);
     assert.ok(logs.some(line=>String(line).includes('STARTER MODE')));
+});
+
+test('starter mode waits for root before launching a worker', async () => {
+    const api=loadScript('supervisor.js',new Clock()), launches=[],logs=[];
+    let rooted=false, cycles=0;
+    const ns={getServerMaxRam:()=>8,getScriptRam:file=>({'supervisor.js':5,'daemon.js':16,'fleet-manager.js':10,'starter-worker.js':2.4})[file]||0,
+        getServerUsedRam:()=>5,ps:()=>[],hasRootAccess:()=>rooted,nuke:()=>{if(cycles===0)throw Error('not yet');rooted=true;},
+        run:(...args)=>{launches.push(args);return 11;},clearLog(){},print:line=>logs.push(line),
+        sleep:async()=>{cycles++;if(cycles===2)throw Error('end fixture');}};
+    await assert.rejects(api.runStarterMode(ns),/end fixture/);
+    assert.deepEqual(launches,[['starter-worker.js',1,'n00dles']]);
+    assert.ok(logs.some(line=>String(line).includes('WAITING FOR ROOT')));
+});
+
+test('starter worker never grows without root access', async () => {
+    const api=loadScript('starter-worker.js',new Clock()), actions=[];
+    const ns={args:['n00dles'],disableLog(){},hasRootAccess:()=>false,nuke:()=>{throw Error('not yet');},
+        sleep:async()=>{throw Error('end fixture');},grow:()=>actions.push('grow'),
+        getServerMoneyAvailable:()=>0,getServerMaxMoney:()=>1,getServerSecurityLevel:()=>1,getServerMinSecurityLevel:()=>1};
+    await assert.rejects(api.main(ns),/end fixture/);
+    assert.deepEqual(actions,[]);
 });
 
 test('starter worker chooses weaken, grow, then hack from target health', () => {
