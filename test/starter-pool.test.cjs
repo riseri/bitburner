@@ -37,7 +37,7 @@ function fixture() {
         kill: pid => { killed.push(pid); return processes.delete(pid); },
         print() {}, tprint() {}, clearLog() {},
     };
-    return { clock, api, ns, hosts, files, processes, launches, copies, killed };
+    return { clock, api, ns, hosts, files, processes, launches, copies, killed, costs };
 }
 
 test('8 GB starter uses free remote RAM without Formulas, Singularity or home worker space', async () => {
@@ -103,6 +103,7 @@ test('graduation frees owned remote workers and waits for genuinely available ho
         else if (cycle === 2) f.hosts.home.foreign = 7.7;
         else throw Error('failed to graduate');
     };
+    f.ns.getResetInfo = () => ({ currentNode: 1 });
     await supervisor.runStarterMode(f.ns);
     assert.equal(cycle, 2);
     assert.ok(f.launches.some(p => p.host === 'foodnstuff'));
@@ -150,4 +151,42 @@ test('distributed starter workers increase early income in a shared-target simul
     const before = await simulate([1]);
     const after = await simulate(f.launches.map(p => p.threads));
     assert.ok(after > before * 2, `model income: single worker ${before}, remote pool ${after}`);
+});
+
+
+test('BN4 starter buys its own home RAM remotely and graduates without user upgrades', async () => {
+    const f = fixture(), supervisor = loadScript('supervisor.js', f.clock), upgrade = loadScript('home-upgrade.js', f.clock);
+    const reset = { currentNode: 4, lastNodeReset: 1, lastAugReset: 2 };
+    Object.assign(f.costs, { 'home-upgrade.js': 7.25, 'augmentation-manager.js': 110, 'progression-manager.js': 5,
+        'node-complete.js': 42, 'intelligence-handoff.js': 35, 'progression-backdoor.js': 11, 'augmentation-planner.js': 35 });
+    f.ns.getResetInfo = () => reset; f.ns.read = () => ''; f.ns.getServerMoneyAvailable = () => 1e12;
+    f.ns.singularity = { getUpgradeHomeRamCost: () => 1e6, upgradeHomeRam: () => { f.hosts.home.ram *= 2; return true; } };
+    let cycles = 0;
+    f.ns.sleep = async () => {
+        assert.ok(++cycles < 10, 'must graduate with automatic upgrades');
+        const helper = [...f.processes.values()].find(p => p.filename === 'home-upgrade.js');
+        assert.ok(helper, 'a rooted remote host must run the helper');
+        await upgrade.main({ ...f.ns, args: helper.args });
+        f.processes.delete(helper.pid);
+    };
+    await supervisor.runStarterMode(f.ns, { augmentationActions: true, progression: true, progressionActions: true });
+    assert.equal(f.hosts.home.ram, 256);
+    assert.equal(cycles, 5);
+    assert.ok(f.launches.filter(p => p.filename === 'home-upgrade.js').every(p => p.host !== 'home'));
+    assert.equal(f.hosts.foodnstuff.foreign, 3);
+    assert.equal(f.processes.size, 0);
+});
+
+test('home upgrade helper rechecks its reset, cost, goal floor, and RAM target', async () => {
+    const api = loadScript('home-upgrade.js', new Clock());
+    for (const reason of ['ok', 'node', 'epoch', 'cash', 'floor', 'target']) {
+        let upgrades = 0;
+        const ns = { args: [reason === 'epoch' ? 'old' : '4:1:2', 256, reason === 'floor' ? 101 : 0],
+            getResetInfo: () => ({ currentNode: reason === 'node' ? 5 : 4, lastNodeReset: 1, lastAugReset: 2 }),
+            getServerMaxRam: () => reason === 'target' ? 256 : 32,
+            getServerMoneyAvailable: () => reason === 'cash' ? 99 : 200,
+            singularity: { getUpgradeHomeRamCost: () => 100, upgradeHomeRam: () => upgrades++ } };
+        await api.main(ns);
+        assert.equal(upgrades, reason === 'ok' ? 1 : 0, reason);
+    }
 });

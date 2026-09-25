@@ -56,22 +56,37 @@ export function currentAugmentationPlan(ns, job, now = Date.now()) {
     return report.plan;
 }
 
-export async function updateSupervisorSavings(ns, cfg, plan) {
+export async function updateSupervisorSavings(ns, cfg, plan, progression = null, augmentation = null) {
     if (cfg.savingsMode === "keep" || cfg.savingsMode === "none" || cfg.savingsMode === "fixed") return;
     const current = readSavings(ns);
     if (current.error) { cfg.savingsStatus = current.error; return; }
     if (current.floor > 0 && current.owner !== "supervisor") { cfg.savingsStatus = "Preserving your existing savings goal"; return; }
     let desired = null;
+    const reset = ns.getResetInfo(), singularity = singularityAvailable(reset);
+    const controller = cfg.augmentationActions && augmentation?.type === "augmentation-status" &&
+        augmentation.resetEpoch === resetEpoch(reset) && augmentation.generatedAt <= Date.now() &&
+        Date.now() - augmentation.generatedAt <= 15000 && ns.isRunning(augmentation.producerPid) ? augmentation : null;
+    if (controller?.plan) plan = controller.plan;
+    const milestone = cfg.progression && progression?.type === "progression-status" &&
+        progression.resetEpoch === resetEpoch(reset) && progression.generatedAt <= Date.now() &&
+        Date.now() - progression.generatedAt <= 15000 ? progression.milestone : null;
     if (cfg.savingsMode === "auto" || cfg.savingsMode === "programs") {
-        const reset = ns.getResetInfo();
-        if (!singularityAvailable(reset)) { cfg.savingsStatus = "Manual unlock: run savings.js --next-program to protect cash"; return; }
         const program = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms({ darknet: cfg.darknet !== false }).find(p => !ns.fileExists(p.name, "home"));
-        if (program && (!cfg.progression || !cfg.progressionActions)) { cfg.savingsStatus = "Program savings waits for progression actions"; return; }
+        if (program && (!cfg.progression || (singularity && !cfg.progressionActions))) { cfg.savingsStatus = "Program savings waits for progression actions"; return; }
         if (program) {
-            desired = { amount: program.cost / (1 - cfg.progressionCashReserve), label: `Buy ${program.name}`, target: program.name };
-            cfg.savingsStatus = `Saving for ${program.name}`;
+            desired = { amount: program.cost / (1 - (singularity ? cfg.progressionCashReserve : 0)), label: `Buy ${program.name}`, target: program.name };
+            cfg.savingsStatus = `Saving for ${program.name}${singularity ? "" : "; purchase manually"}`;
         }
-        else if (cfg.savingsMode === "auto" && cfg.augmentationActions) {
+        else if (cfg.savingsMode === "auto" && controller?.savings) {
+            desired = controller.savings;
+            cfg.savingsStatus = controller.recommendation;
+        }
+        else if (cfg.savingsMode === "auto" && milestone?.savings) {
+            const goal = milestone.savings;
+            desired = { ...goal, amount: goal.amount / (1 - (singularity && goal.target.startsWith("augmentation:") ? cfg.augmentationCashReserve : 0)) };
+            cfg.savingsStatus = milestone.label;
+        }
+        else if (cfg.savingsMode === "auto" && singularity && cfg.augmentationActions) {
             if (!plan || plan.errors?.length) { cfg.savingsStatus = "Programs complete; waiting for a fresh augmentation plan"; return; }
             if (plan.next) desired = { amount: plan.next.price / (1 - cfg.augmentationCashReserve),
                 label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };

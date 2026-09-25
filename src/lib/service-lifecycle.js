@@ -1,3 +1,5 @@
+import { withoutAutoInstall } from "lib/supervisor-migration.js";
+
 const STARTUP_GRACE_MS = 60_000;
 const STALE_CONFIRM_MS = 15_000;
 const STABLE_MS = 120_000;
@@ -30,9 +32,9 @@ export function tickService(ns, service, now = Date.now()) {
 
 	const process = matches[0];
 	if (process && service.pid !== process.pid) {
-		// Adopt the real command line. Defaults are not a personality transplant.
+		// Adopt the command line; only the removed augmentation install switch is discarded.
 		service.pid = process.pid;
-		service.args = [...process.args];
+		service.args = service.name === "augmentation-manager.js" ? withoutAutoInstall(process.args) : [...process.args];
 		if (service.port) service.port = Number(readArgument(service.args, "--port", service.port));
 		service.threads = process.threads || 1;
 		service.adopted = true;

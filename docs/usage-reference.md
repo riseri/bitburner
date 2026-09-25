@@ -1,6 +1,6 @@
 # Usage reference
 
-Start with the [README](../README.md) for setup, profiles, dashboard help, and restart instructions. This page keeps the full feature requirements and advanced options in one place.
+Start with the [README](../README.md) for setup, automation settings, dashboard help, and restart instructions. This page keeps the full feature requirements and advanced options in one place.
 
 ## BitNode, Source-File, and API requirements
 
@@ -14,10 +14,10 @@ their own requirements. BN means your **current BitNode**; SF means an owned
 | Progression status and recommendations | No Singularity requirement | Reports missing programs/backdoors; does not execute actions |
 | `--progression-actions true`: TOR/program purchases, DarkscapeNavigator, and faction backdoors | **BN4 or SF4 level 1+** (Singularity) | Actions are blocked; other services continue |
 | Darknet exploration | `DarkscapeNavigator.exe`, or BN15/SF15 access that grants it | Coordinator reports `LOCKED`; other services continue |
-| Automatic program savings (`--savings auto` or `programs`) | **BN4 or SF4 level 1+**, plus enabled progression and `--progression-actions true` | Waits instead of creating a new automatic program goal |
+| Automatic program savings (`--savings auto` or `programs`) | Enabled progression; no Singularity requirement for cash protection | Protects cash for manual purchases while Singularity is locked; with Singularity, requires enabled progression actions |
 | Augmentation planning (`--augmentations true`, `--augmentation-focus`, `--augmentation-target`, or standalone planner) | **BN4 or SF4 level 1+** | Planner shows `BLOCKED: Singularity is locked` |
 | Augmentation loop (`--augmentation-actions true`) | **BN4 or SF4 level 1+** | Reports how to unlock Singularity and performs no actions |
-| Automatic installation (`--auto-install true`) | **BN4 or SF4 level 1+**, augmentation actions, and the configured queued-augmentation threshold | Remains advisory; no reset occurs |
+| Automatic installation (always enabled in the augmentation service) | **BN4 or SF4 level 1+**, augmentation actions, and either the configured queued-augmentation threshold or a queued The Red Pill | Remains advisory; no reset occurs |
 | `--savings augmentations` | **BN4 or SF4 level 1+**, enabled augmentation planning, and a fresh complete plan | Automatic savings waits for a plan; an existing goal is preserved |
 | Fixed savings (`--save-amount`, `--save-label`, or standalone `savings.js`) | **No Singularity, BN, or SF requirement** | Cash protection works independently of planning; automatic spending on a program still requires Singularity |
 | 4S stock trading, including long positions | **WSE Account + TIX API + 4S Market Data TIX API access**; no specific BN/SF gate for longs | Stock service is blocked until all three are available; it does not buy access automatically |
@@ -37,9 +37,9 @@ SF4 level 1 is enough to unlock Singularity, but outside BN4 its APIs have highe
 RAM costs at lower SF4 levels. An unlocked planner or progression actor can still
 show `WAITING_RAM`; the supervisor never kills workers to force a helper to fit.
 
-The `assist` and `hands-off` profiles need Singularity for their progression
-actions; augmentation savings also needs it for planning. Fixed savings does not.
-**Selecting a profile does not unlock the required API.**
+Progression actions and augmentation planning require Singularity. They are
+enabled by default and activate only when unlocked. Fixed savings needs no unlock.
+Automatic installation is always enabled in the running augmentation service.
 
 ## Supervisor controls
 
@@ -47,15 +47,15 @@ No separate utility commands are required. Examples below are alternative startu
 commands, not additional supervisors to run concurrently:
 
 ```text
-run supervisor.js --profile assist
-run supervisor.js --profile assist --cloud-payback 3600
+run supervisor.js
+run supervisor.js --cloud-payback 3600
 run supervisor.js --savings augmentations --augmentation-focus hacking
 run supervisor.js --save-amount 1000000000 --save-label "My fund"
 ```
 
 | Flag | Default | Behavior |
 | --- | --- | --- |
-| `--profile` | `observe` | `observe`, `assist`, or `hands-off`; explicit flags override profile settings |
+| `--progression-actions` | `true` | Buy programs and install faction backdoors when Singularity is unlocked |
 | `--max-targets` | `2` | Maximum simultaneous earning targets: 1 or 2; does not guarantee both slots are occupied |
 | `--background-prep` | `true` | Prepare promising targets while the current target earns, subject to health and resource gates |
 | `--dashboard-details` | `false` | Show detailed diagnostics; forwarded to a newly started daemon |
@@ -65,14 +65,13 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--augmentation-focus` | `hacking` | `hacking` or `all` |
 | `--augmentation-target` | empty | Plan for one named augmentation and its prerequisites |
 | `--augmentation-price-multiplier` | `1` | Assumed price growth per purchase; 1 gives a lower bound |
-| `--augmentation-actions` | `false` | Join safe invitations, work for reputation, and purchase the planned augmentations |
+| `--augmentation-actions` | `true` | Supervise faction work, purchases, and automatic augmentation installation |
 | `--augmentation-cash-reserve` | `0.10` | Cash fraction retained after an automatic augmentation purchase |
 | `--augmentation-city-faction` | empty | The only city faction the loop may auto-join; city invitations are skipped when empty |
 | `--augmentation-join-factions` / `--augmentation-work` / `--augmentation-donate` / `--augmentation-purchase` | `true` | Individual action gates within an enabled loop; donations also require favor and `Formulas.exe` |
 | `--augmentation-focus-work` | `false` | Whether automatic faction work takes focus |
-| `--auto-install` | `false` | Install queued augmentations and restart through `bootstrap.js`; requires augmentation actions |
-| `--min-install` | `5` | Install at this queued count before another purchase/join; remaining catalog items do not delay it. Requires auto-install. |
-| `--savings` | `auto` | Automatic program/augmentation modes require Singularity; see [requirements above](#bitnode-source-file-and-api-requirements) |
+| `--min-install` | `5` | Install at this queued count before another purchase/join; remaining catalog items do not delay it. Installation is always enabled in the augmentation service. |
+| `--savings` | `auto` | Protect program cash even before Singularity; then milestone or augmentation cash. Augmentation quotes require Singularity or manual input |
 | `--save-amount` | unset | Set a fixed manual goal instead of automatic savings; no Singularity required |
 | `--save-label` / `--save-target` | `Savings` / empty | Label and optional allowed program purchase for a fixed goal |
 | `--cloud-roi` / `--cloud-payback` | `true` / `1800` | Fleet investment policy for newly started fleet managers |
@@ -86,7 +85,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--darknet-migrate` / `--darknet-migrate-depth` | `false` / `8` | Opt in to induced migration of deep movable neighbors |
 | `--darknet-promote-stock` / `--darknet-stock-symbols` | `false` / `auto` | Opt in to volatility promotion for held or explicitly listed symbols |
 | `--darknet-freeze-unknown` / `--darknet-freeze-depth` | `false` / `0` | Destructively freeze unsolved servers; they lose all RAM and experience |
-| `--darknet-storm-seed` | `false` | Execute a discovered `STORM_SEED.exe`; catastrophic and deliberately never profile-enabled |
+| `--darknet-storm-seed` | `false` | Execute a discovered `STORM_SEED.exe`; catastrophic and disabled by default |
 
 Savings modes: `auto` advances through TOR, missing port openers, and `DarkscapeNavigator.exe`, then follows
 the augmentation loop when it is enabled; `programs` stops after the Darknet unlock;
@@ -98,15 +97,16 @@ or set a new fixed amount explicitly. Augmentation savings does not buy or reset
 
 Diagnostics and planning run as short-lived children, one at a time, with bounded
 retry delays. Their Singularity calls stay out of the supervisor's imports. A newly
-launched daemon leaves extra home RAM for helpers; an adopted daemon keeps its old
-reserve, so restart it if the dashboard reports `WAITING_RAM`. Reports are in
+launched daemon leaves extra home RAM for unlocked helpers; an adopted daemon keeps its old
+reserve. Home sharing reservations refresh as capabilities change, and newly
+unlocked services can reclaim share RAM through normal admission. Reports are in
 `data/diagnostics.json` and `data/augmentation-plan.json`. PID, timestamp, and reset
 checks reject old reports. Augmentation advice expires after two minutes without
 refreshing. Enable `--dashboard-details true` for the shopping list and more warnings.
 
 ## Save for a goal
 
-The `assist` and `hands-off` profiles manage this automatically.
+The supervisor manages this automatically when the required APIs are unlocked.
 These standalone commands remain available for changing goals while it runs:
 
 ```text
@@ -157,14 +157,14 @@ Use `run darknet-status.js` for a one-shot activity report, or
 `run darknet-status.js --watch` for a live tail window showing coverage, agents,
 deployments, caches, blockers, and the most recent event.
 After syncing dashboard changes, use `run supervisor-restart.js` to reload the
-supervisor while preserving its saved profile and command-line flags.
+supervisor while preserving its saved command-line flags.
 
 When `Formulas.exe` becomes available, active agents immediately use Darknet
 formulas to estimate authentication and Heartbleed timing, retry cooldowns, and
 the number of memory-reallocation calls. The coordinator and dashboard expose the
 active mode; no Darknet service restart is needed.
 
-The ordinary `observe`, `assist`, and `hands-off` profiles enable exploration,
+The default supervisor settings enable exploration,
 loot, and phishing but do not enable consequential topology mutations. Stasis,
 migration, stock promotion, freezing, and Storm Seed each require their explicit
 flag. Freezing destroys the target's RAM and experience; Storm Seed can catastrophically
@@ -189,7 +189,7 @@ Savings, stock, percentage and per-action cash limits still apply.
 Configure it directly at supervisor startup:
 
 ```text
-run supervisor.js --profile assist --cloud-payback 3600
+run supervisor.js --cloud-payback 3600
 ```
 
 `--cloud-roi false` restores unconditional affordability-based purchases. The
@@ -210,9 +210,10 @@ run augmentation-planner.js --target "BitWire" --save-goal
 
 **Requires BN4 or SF4 level 1+ (Singularity).** Looks at joined factions, removes owned/purchased items,
 expands prerequisite chains, selects the faction with the smallest reputation gap,
-and prefers reputation-ready purchases. Within that group it prioritizes The Red
-Pill, faction reputation upgrades and Neuroreceptor Management Implant, then
-expensive eligible purchases. Those progression/support upgrades are included in
+and prefers reputation-ready purchases. Once The Red Pill is available, the plan
+focuses on it and its prerequisites; once purchased, the automatic basket is empty.
+Earlier, it prioritizes faction reputation upgrades and Neuroreceptor Management
+Implant, then expensive eligible purchases. Those progression/support upgrades are included in
 the default hacking focus; `--target` remains an explicit override. NeuroFlux is
 excluded from automatic purchasing. Missing prerequisites
 from unjoined factions are reported. This is a useful ordering heuristic, not a
@@ -226,15 +227,21 @@ The standalone planner never buys, works for a faction, donates, installs
 augmentations or resets. The separately gated augmentation loop can join invited
 non-city factions, perform faction work, donate when favor and `Formulas.exe` make
 the exact reputation cost available, and buy its next planned item. It never
-interrupts unrelated player activity. City factions require
-`--augmentation-city-faction`, and installation additionally requires
-`--auto-install true` plus the queued-augmentation threshold. Donations retain
+interrupts unrelated player activity. Outside the BN4 route, city factions require
+`--augmentation-city-faction`. The BN4 controller selects compatible city factions
+automatically unless explicitly configured. Installation is always automatic at the
+queued-augmentation threshold, or immediately with The Red Pill queued, subject
+to manual-work and restart checks. An installed Red Pill stops further purchases
+and installations to preserve progress toward the final server. Donations retain
 enough cash for the planned purchase, the percentage reserve, and unrelated goals.
 
-Automatic installation checks `--min-install` before another purchase or faction
-join, even if the plan still contains items. Queued NeuroFlux levels purchased
-manually count toward the threshold. Small exhausted catalogs remain manual until
-you lower the threshold or unlock additional factions. Faction-work ETAs include
+Outside the BN4 route, automatic installation checks `--min-install` before
+another purchase or faction join, even if the plan still contains items. Queued NeuroFlux levels purchased
+manually count toward the threshold. Outside the planned BN4 route, small exhausted catalogs remain manual until
+you lower the threshold or unlock additional factions. In BN4.1–BN4.3, completed
+smaller batches install automatically, as do batches reaching 30 distinct
+augmentations. A nonempty batch waiting on reputation or cash installs after
+30 minutes since the last reset. Faction-work ETAs include
 the game's existing sharing bonus once, plus the actual/configured focus penalty;
 only an installed Neuroreceptor Management Implant removes that penalty.
 
@@ -265,9 +272,21 @@ analysis. Writes are bounded; errors appear on the supervisor dashboard.
 
 `doctor.js` inspects controller imports, script RAM, home headroom, duplicate
 services, port collisions, snapshot ownership, savings and API access. It changes
-nothing. It reads the live supervisor's profile and explicit flags (observe
-defaults if no supervisor is running). RAM advice separates the core, enabled
+nothing. It reads the live supervisor's explicit flags (automatic defaults
+if no supervisor is running). RAM advice separates the core, enabled
 unlocked services, and the largest enabled helper; locked/disabled actors are not
 budgeted. The separate worker checker compares worker RAM on home and a chosen
 remote host. No Node test substitutes for the game's static RAM analyzer or a
 live soak after deployment.
+
+## BN5/BN4 milestone advisor and INT farming
+
+See [BN5/BN4 progression](bn5-bn4-progression.md) for `progression-state.js` inputs,
+automatic milestone savings, and the separate bounded `intelligence-farm.js` command.
+
+The BN4 controller also acquires factions, trains hacking, upgrades starter home
+RAM, and completes the first two BN4 runs automatically. The only automatic next
+node is BN4; the BN4.3 exit waits for your next-node choice. An early SoA invitation
+can trigger one bounded INT session. See the guide for its manual infiltration
+prerequisite and reset effects. Other BitNodes and optional subsystems are not
+covered by this route strategy.

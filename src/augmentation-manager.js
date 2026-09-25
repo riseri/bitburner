@@ -1,3 +1,5 @@
+import { bn4Route, routeCities, routeInstallation } from "lib/bitnode-route.js";
+import { routeOwnsWork, routeIntelligence, routeBackdoorYield, routeUnlock, routeEndgame, routeDaedalus, trainHacking } from "lib/route-actions.js";
 import { buildAugmentationPlan } from "lib/augmentation-plan.js";
 import { chooseInvitation, chooseFactionWorkType, matchingFactionWork, queuedAugmentations,
     singularityRecommendation, spendableForAugmentation } from "lib/augmentation-loop.js";
@@ -5,15 +7,16 @@ import { readSavings } from "lib/savings.js";
 import { PORTS } from "lib/ports.js";
 import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
 import { factionWorkAnalysis, formulaDonationForRep, formulaFavorProjection } from "lib/formulas.js";
+import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
 
 const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP = "bootstrap.js";
 
-/** Opt-in Singularity augmentation loop. @param {NS} ns */
+/** Singularity augmentation loop with automatic installation. @param {NS} ns */
 export async function main(ns) {
     const flags = ns.flags([
         ["port", PORTS.AUGMENTATION_STATUS], ["interval", 5_000], ["focus", "hacking"], ["target", ""],
         ["cash-reserve", 0.10], ["join-factions", true], ["city-faction", ""], ["work", true],
-        ["donate", true], ["purchase", true], ["focus-work", false], ["auto-install", false], ["min-install", 5],
+        ["route", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5],
     ]);
     ns.disableLog("ALL");
     if (ns.getHostname() !== HOME) throw new Error("Run augmentation-manager.js on home");
@@ -40,16 +43,28 @@ export async function main(ns) {
 
 export async function tickAugmentationLoop(ns, cfg, state) {
     const reset = ns.getResetInfo();
+    const route = cfg.route && bn4Route(reset);
     if (!singularityAvailable(reset)) return { state: "BLOCKED", phase: "UNLOCK", recommendation: singularityRecommendation(), queued: 0 };
 
     // A threshold is a reset decision, independent of the remaining shopping list.
-    // Hands-off installs before joining another faction or buying another upgrade.
-    const queued = queuedCount(ns);
-    if (cfg.autoInstall && queued >= cfg.minInstall) return handleInstallation(ns, cfg, state, null, queued);
+    // Install before joining another faction or buying another upgrade.
+    const installed = ns.singularity.getOwnedAugmentations(false);
+    const pending = queuedAugmentations(installed, ns.singularity.getOwnedAugmentations(true));
+    const queued = pending.length;
+    if (pending.includes("The Red Pill")) return handleInstallation(ns, cfg, state, null, queued, true);
+    if (installed.includes("The Red Pill")) return route ? { ...routeEndgame(ns, cfg, state), queued } : { state: "READY", phase: "COMPLETE_NODE", queued,
+        recommendation: "The Red Pill is installed; raise hacking and backdoor w0r1d_d43m0n to finish this BitNode" };
+    if (!route && queued >= cfg.minInstall) return handleInstallation(ns, cfg, state, null, queued);
 
     const player = ns.getPlayer(), invitations = ns.singularity.checkFactionInvitations();
+    if (route && cfg.joinFactions) {
+        const intelligence = routeIntelligence(ns, state, installed, pending, invitations);
+        if (intelligence) return { ...intelligence, queued };
+    }
     if (cfg.joinFactions) {
-        const faction = chooseInvitation(invitations, player.factions, cfg.cityFaction);
+        const cities = route ? routeCities(player.factions, cfg.cityFaction) : [cfg.cityFaction];
+        const ordered = [...invitations].sort((a, b) => Number(b === "Daedalus") - Number(a === "Daedalus"));
+        const faction = ordered.find(f => chooseInvitation([f], player.factions, cities.includes(f) ? f : ""));
         if (faction) {
             const joined = ns.singularity.joinFaction(faction);
             return { state: joined ? "ACTIVE" : "BLOCKED", phase: "JOIN", action: joined ? `Joined ${faction}` : "",
@@ -57,29 +72,51 @@ export async function tickAugmentationLoop(ns, cfg, state) {
         }
     }
 
-    const plan = buildAugmentationPlan(ns, { focus: cfg.focus, target: cfg.target, multiplier: 1 });
+    if (route) {
+        const backdoor = routeBackdoorYield(ns, state);
+        if (backdoor) return { ...backdoor, queued };
+    }
+    const plan = buildAugmentationPlan(ns, { focus: cfg.focus, target: cfg.target, multiplier: 1, route });
+    if (route) {
+        const reason = routeInstallation({ installed, pending, plan, money: ns.getServerMoneyAvailable(HOME),
+            minInstall: cfg.minInstall, lastAugReset: reset.lastAugReset });
+        if (reason) return handleInstallation(ns, cfg, state, plan, queued, true);
+        if (cfg.joinFactions && new Set(installed).size >= 30 && player.skills.hacking >= 2500) {
+            const daedalus = routeDaedalus(ns, cfg, state, installed);
+            if (daedalus) return { ...daedalus, queued, plan };
+        }
+        if (cfg.joinFactions && !player.factions.includes("Daedalus")) {
+            const unlock = routeUnlock(ns, cfg, state, [...installed, ...pending], Boolean(plan.next));
+            if (unlock) return { ...unlock, queued, plan };
+        }
+    }
     if (plan.errors.length) return { state: "BLOCKED", phase: "PLAN", plan,
         recommendation: plan.errors.join("; "), queued: queuedCount(ns) };
     const next = plan.next;
     if (next) return handleNextAugmentation(ns, cfg, state, plan, next);
 
+    if (route) {
+        const daedalus = cfg.joinFactions ? routeDaedalus(ns, cfg, state, installed) : null;
+        return { ...(daedalus || trainHacking(ns, cfg, state, Math.max(2500, player.skills.hacking + 1))), plan, queued };
+    }
     return handleInstallation(ns, cfg, state, plan, queued);
 }
 
-async function handleInstallation(ns, cfg, state, plan, queued) {
-    if (queued < cfg.minInstall) return { state: "WAITING", phase: "INSTALL", plan, queued,
+async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold = false) {
+    if (!bypassThreshold && queued < cfg.minInstall) return { state: "WAITING", phase: "INSTALL", plan, queued,
         recommendation: queued ? `${queued}/${cfg.minInstall} augmentations queued; unlock another faction, install manually, or lower --min-install to ${queued}`
             : "No matching unowned augmentations from joined factions; unlock or join another faction" };
-    if (!cfg.autoInstall) return { state: "READY", phase: "INSTALL", plan, queued,
-        recommendation: `${queued} augmentations queued; install manually or enable --auto-install true` };
     if (!ns.fileExists(BOOTSTRAP, HOME)) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: `Missing ${BOOTSTRAP}; automatic reset is unsafe` };
+    try { restoreSupervisorArgs(ns.read("data/supervisor-bootstrap.json")); }
+    catch { return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+        recommendation: "Start supervisor.js to save valid restart settings before automatic installation" }; }
     let busy = ns.singularity.isBusy();
     let current = ns.singularity.getCurrentWork();
     if (current && ownedCurrentWork(current, state)) {
         if (!ns.singularity.stopAction()) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
             recommendation: "Could not stop owned faction work; retrying before installation" };
-        state.ownedWork = null;
+        state.ownedWork = null; state.ownedClass = null;
         current = ns.singularity.getCurrentWork();
         busy = ns.singularity.isBusy();
     }
@@ -123,7 +160,7 @@ function handleNextAugmentation(ns, cfg, state, plan, next) {
         if (current && !ownedCurrentWork(current, state)) return { state: "BLOCKED", phase: "REPUTATION", plan, queued,
             recommendation: `Finish or stop current ${current.type || "player"} activity, then work for ${next.faction}` };
         const started = ns.singularity.workForFaction(next.faction, workType, cfg.focusWork);
-        if (started) state.ownedWork = { faction: next.faction, workType };
+        if (started) { state.ownedClass = null; state.ownedWork = { faction: next.faction, workType }; }
 		return { state: started ? "ACTIVE" : "BLOCKED", phase: "REPUTATION", plan, queued, ...formulaStatus,
 			action: started ? `Started ${workType} work for ${next.faction}` : "",
 			recommendation: started ? `Earn ${Math.ceil(next.repGap)} reputation for ${next.name}${eta}` : `Start ${workType} work for ${next.faction} manually` };
@@ -143,7 +180,7 @@ function handleNextAugmentation(ns, cfg, state, plan, next) {
 }
 
 function ownedCurrentWork(current, state) {
-    return Boolean(state.ownedWork && matchingFactionWork(current, state.ownedWork.faction, state.ownedWork.workType));
+    return routeOwnsWork(current, state);
 }
 
 function queuedCount(ns) {
@@ -185,9 +222,9 @@ function formatDuration(ms) {
 function normalizeConfig(flags) {
     const cfg = {
         port: Number(flags.port), interval: Math.max(1_000, Number(flags.interval) || 5_000),
-        focus: String(flags.focus), target: String(flags.target), cashReserve: fraction(flags["cash-reserve"]),
+        route: bool(flags.route), focus: String(flags.focus), target: String(flags.target), cashReserve: fraction(flags["cash-reserve"]),
         joinFactions: bool(flags["join-factions"]), cityFaction: String(flags["city-faction"]), work: bool(flags.work), donate: bool(flags.donate),
-        purchase: bool(flags.purchase), focusWork: bool(flags["focus-work"]), autoInstall: bool(flags["auto-install"]),
+        purchase: bool(flags.purchase), focusWork: bool(flags["focus-work"]),
         minInstall: Number(flags["min-install"]),
     };
     if (!Number.isSafeInteger(cfg.port) || cfg.port <= 0 || Object.values(PORTS).filter(p => p !== PORTS.AUGMENTATION_STATUS).includes(cfg.port)) throw new Error("Invalid or reserved augmentation status port");
@@ -199,13 +236,13 @@ function normalizeConfig(flags) {
 function publish(port, ns, cfg, status) {
     port.clear();
     port.write({ type: "augmentation-status", version: 1, producerPid: ns.pid, generatedAt: Date.now(),
-        heartbeatIntervalMs: cfg.interval, ...status });
+        heartbeatIntervalMs: cfg.interval, resetEpoch: resetEpoch(ns.getResetInfo()), ...status });
 }
 
 function loadState(ns) {
     try {
         const value = JSON.parse(ns.read(STATE_FILE) || "null");
-        if (value?.version === 1 && typeof value.resetEpoch === "string") return { resetEpoch: value.resetEpoch, ownedWork: value.ownedWork || null };
+        if (value?.version === 1 && typeof value.resetEpoch === "string") return { ...value, ownedWork: value.ownedWork || null, ownedClass: value.ownedClass || null };
     } catch {}
     return { resetEpoch: "", ownedWork: null };
 }

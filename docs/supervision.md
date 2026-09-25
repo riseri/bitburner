@@ -7,7 +7,7 @@ Duplicate services are shown as `CONFLICT`; they are not broadly killed.
 Only one supervisor may run on `home`. Newly launched dependents inherit the
 adopted fleet status port. Conflicting existing daemon/fleet port settings fail
 startup rather than silently rewriting either process. Service status channels,
-heartbeat policies, profiles and file requirements are shared with diagnostics
+heartbeat policies, defaults and file requirements are shared with diagnostics
 through `lib/service-catalog.js`.
 
 ## Service lifecycle
@@ -113,7 +113,7 @@ Darknet RAM is not admitted to the JIT allocator. Per-PID sessions, topology
 mutation and abrupt server deletion are incompatible with precise HWGW landing
 reservations. Risky policies—stasis, induced migration, stock promotion, freezing,
 and Storm Seed—are independently flagged and default off. Freezing and Storm Seed
-remain off in every supervisor profile.
+remain off by default.
 
 ## IPvGO service
 
@@ -131,7 +131,7 @@ instead of starting another bot against an uncertain board. Restarting the super
 or explicitly starting a new Go bot is therefore a conscious retry boundary.
 Terminal status is accepted only from the PID owned by the current supervisor
 session, so a killed pre-reset process cannot leave a false `BLOCKED` dashboard row.
-Every profile defaults to `--go-takeover true`: an ordinary unfinished board found at
+The supervisor defaults to `--go-takeover true`: an ordinary unfinished board found at
 bot startup is adopted and completed without resetting it. The supervisor retries
 that specific ownership stop automatically; corrupt state, unsupported opponents,
 API failures, and later external board changes remain blocked. Set it false when
@@ -198,30 +198,16 @@ progression managers so they load the updated code. Let any old backdoor actor f
 The active hacking daemon does not need to be stopped for this migration; its small
 bootstrap change takes effect the next time it starts.
 
-Planner-only startup remains:
+The normal startup enables all available services and progression actions:
 
 ```text
 run supervisor.js
 ```
 
-To opt into only the original program/backdoor actions explicitly:
-
-```text
-run supervisor.js --progression-actions true --progression-cash-reserve 0.10
-```
-
-The common action combinations use profiles:
-
-```text
-run supervisor.js --profile observe
-run supervisor.js --profile assist
-run supervisor.js --profile hands-off
-```
-
-`observe` is read-only for Singularity actions, `assist` enables progression and
-augmentation actions without installing, and `hands-off` also enables automatic
-installation. Explicit flags override profile values, so exceptional runs can
-still adjust one setting without restating the whole configuration.
+There are no profiles. Individual flags still control service selection,
+reserves, faction choice, and install thresholds. Locked services are excluded
+from required files and launch/helper RAM budgets, and become eligible when their
+capability is unlocked. Home sharing headroom is recalculated each loop.
 
 It joins invited non-city factions, selects available faction work, donates for an
 exact reputation gap when favor and `Formulas.exe` permit it, purchases the next
@@ -232,11 +218,22 @@ are ignored unless one is selected with `--augmentation-city-faction`. When
 Singularity is locked, status recommends BN4/SF4 and makes no calls through the
 locked API.
 
-Installation remains disarmed unless `--auto-install true` is supplied. It also
-requires `--min-install N` queued augmentations, no remaining matching plan item,
-no unrelated player activity, and a present `bootstrap.js`. Before resetting, the
-supervisor arguments are persisted; `bootstrap.js` restores that exact command
-after installation. The default threshold is five.
+Installation is always enabled while the augmentation service runs. It requires
+`--min-install N` queued augmentations (or a queued The Red Pill), no unrelated player activity, a present
+`bootstrap.js`, and valid saved supervisor settings. Outside the BN4 route, the threshold is evaluated
+before another purchase or invitation; remaining plan items do not delay it.
+The BN4 route also handles faction admission/backdoors and completed smaller
+batches; see the route section below.
+The default threshold is five. The standalone augmentation manager requires a
+previous supervisor startup to establish its reset callback settings.
+
+New bootstrap records use version 2. Version-1 records migrate old profiles into
+explicit service flags; `--auto-install` is removed. An old assist configuration
+now installs automatically. An old observe configuration keeps its action services
+disabled; run `supervisor.js` without arguments to adopt the new defaults. An
+invalid bootstrap record fails with a message rather than enabling fresh settings.
+Adopted augmentation processes also have obsolete installation arguments removed
+from their future restart arguments; already-running code still needs a restart.
 
 To change an existing daemon's launch settings deliberately, stop the supervisor and
 that daemon first. The supervisor will not silently replace live processes to force
@@ -252,8 +249,7 @@ RAM shortage, partial routing failures, manual control, long actions, supervisor
 replacement and late results. Existing JIT and background-prep simulations remain.
 
 These are deterministic mocked Netscript tests, not an in-game execution test or a
-replacement for the Netscript RAM analyzer. Smoke-test planner-only mode first, then
-opt in and watch `Action`, `Last result`, `Connection` and the service recovery rows.
+replacement for the Netscript RAM analyzer. After deployment, watch `Action`, `Last result`, `Connection` and the service recovery rows.
 The heartbeat cinematic universe has been replaced by regression tests.
 
 ## Savings and telemetry
@@ -265,14 +261,17 @@ augmentation planner, telemetry report, and read-only `doctor.js` commands.
 
 ## One-command utility management
 
-`run supervisor.js --profile assist` includes automatic program and augmentation
+`run supervisor.js` includes automatic program and augmentation
 savings, one startup diagnostic pass, periodic read-only augmentation advice,
 telemetry recording, and a rolling one-hour history summary. Standalone utility
 commands are optional. Use `--savings augmentations` to reserve for the next
 augmentation recommendation, `--save-amount N` for a fixed manual goal, or
 `--savings keep` to disable automatic goal updates. Automatic policies preserve
 active manually configured goals. Program savings uses the configured progression
-reserve and waits for Singularity and enabled progression actions.
+reserve when Singularity and progression actions are enabled. Without Singularity,
+it protects the manual purchase price instead. Completed program goals advance
+to a ready Daedalus cash milestone or Red Pill quote before other augmentations;
+manual goals remain authoritative. See [BN5/BN4 progression](bn5-bn4-progression.md).
 
 With augmentation actions enabled, `--savings auto` advances from completed port
 programs to the next augmentation. Fleet and stock entries protect that goal; only
@@ -288,3 +287,25 @@ the child PID, publication time and current reset. Stale advice is not used for
 savings. Diagnostics runs once per supervisor session; planning repeats about once
 per minute. New daemons reserve helper RAM automatically; adopted daemons retain
 their old arguments. Use the root README for all flags and deployment instructions.
+
+An active bounded INT farming session prevents supervisor startup. The farmer
+uses its own reset callback and marks the session inactive before returning to
+`bootstrap.js`. The BN4 controller can request one early bounded session through
+`intelligence-handoff.js` when its persistent invitation is available and no
+augmentations have been bought. The handoff validates prerequisites before
+stopping its owning services. The infiltration itself remains manual.
+
+## Planned BN4 route
+
+With progression and augmentation actions enabled, BN4.1 through BN4.3 use the
+controller described in [the BN5/BN4 guide](bn5-bn4-progression.md). It adds automatic
+starter RAM upgrades, compatible faction acquisition, count fillers, completed
+batch/30-minute installation decisions, and hacking training. Singularity calls
+stay in the augmentation service and isolated helpers; none are added to the
+supervisor's RAM bill. Only BN4 reserves the additional route helper RAM.
+
+`node-complete.js` accepts only fresh requests from the live augmentation manager
+for the next BN4 run while SF4 is below level 2. At BN4.3 it leaves the subsequent
+node unspecified and does not reset. `bootstrap.js` uses spawn to release its RAM
+before launching the next supervisor. Existing manual activity and savings remain
+constraints on automatic actions.

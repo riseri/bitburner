@@ -86,12 +86,13 @@ test('automatic savings advances through programs, respects the configured reser
     assert.equal(JSON.parse(f.files.get('data/savings.json')).label, 'My fund');
 });
 
-test('automatic savings never reserves for inaccessible or disabled progression; augmentation goals follow complete plans', async () => {
+test('automatic savings protects manual BN5 purchases and respects disabled BN4 actions', async () => {
     const f = fixture(), cfg = { savingsMode: 'auto', progression: true, progressionActions: false, progressionCashReserve: 0.1 };
     await f.api.updateSupervisorSavings(f.ns, cfg, null); assert.equal(f.files.size, 0);
     cfg.progressionActions = true; f.reset.currentNode = 1;
-    await f.api.updateSupervisorSavings(f.ns, cfg, null); assert.equal(f.files.size, 0);
-    f.reset.currentNode = 4; cfg.savingsMode = 'augmentations';
+    await f.api.updateSupervisorSavings(f.ns, cfg, null); assert.equal(JSON.parse(f.files.get('data/savings.json')).amount, 200000);
+    assert.match(cfg.savingsStatus, /purchase manually/);
+    f.files.clear(); f.reset.currentNode = 4; cfg.savingsMode = 'augmentations';
     await f.api.updateSupervisorSavings(f.ns, cfg, null); assert.equal(f.files.size, 0);
     await f.api.updateSupervisorSavings(f.ns, cfg, { errors: [], next: { name: 'BitWire', price: 10 } });
     assert.equal(JSON.parse(f.files.get('data/savings.json')).amount, 10);
@@ -166,4 +167,24 @@ test('supervised planner publishes advice but cannot execute a purchase or silen
     const report = JSON.parse(f.files.get('data/augmentation-plan.json'));
     assert.equal(report.plan.next.name, 'BitWire'); assert.equal(report.producerPid, 1);
     assert.equal(f.files.has('data/savings.json'), false);
+});
+
+
+test('fresh controller savings outrank ordinary augmentation quotes and honor manual overrides', async () => {
+    const f = fixture(); f.ns.hasTorRouter = () => true; f.ns.fileExists = () => true;
+    f.processes.set(12, { pid: 12, filename: 'augmentation-manager.js' });
+    const cfg = { savingsMode: 'auto', progression: true, progressionActions: true, augmentationActions: true,
+        progressionCashReserve: .1, augmentationCashReserve: .1 };
+    const plan = { errors: [], next: { name: 'BitWire', price: 900 } };
+    const controller = { type: 'augmentation-status', producerPid: 12, resetEpoch: '4:1:2', generatedAt: f.clock.now,
+        recommendation: 'Unlock faction', savings: { amount: 1.2e6, label: 'Tian Di Hui', target: 'faction:Tian Di Hui' } };
+    await f.api.updateSupervisorSavings(f.ns, cfg, plan, null, controller);
+    assert.equal(JSON.parse(f.files.get('data/savings.json')).amount, 1.2e6);
+    controller.generatedAt -= 15001;
+    await f.api.updateSupervisorSavings(f.ns, cfg, plan, null, controller);
+    assert.equal(JSON.parse(f.files.get('data/savings.json')).amount, 1000);
+    await loadScript('lib/savings.js', f.clock).writeSavings(f.ns, 77, 'Manual');
+    controller.generatedAt = f.clock.now;
+    await f.api.updateSupervisorSavings(f.ns, cfg, plan, null, controller);
+    assert.equal(JSON.parse(f.files.get('data/savings.json')).amount, 77);
 });

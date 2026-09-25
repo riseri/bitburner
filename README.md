@@ -2,13 +2,14 @@
 
 Start one supervisor to manage hacking, server purchases, contracts, stocks,
 IPvGO, and Darknet exploration. It also shows progression and augmentation advice,
-with optional automatic purchases and resets.
+with automatic purchases and augmentation installation whenever the required APIs
+are available.
 
 **Start with `run supervisor.js` on `home`.** You do not need Singularity or
 `Formulas.exe` for the hacking system. Features you have not unlocked wait while
 available services keep running.
 
-[Quick start](#quick-start) · [Profiles](#choose-a-profile) ·
+[Quick start](#quick-start) · [Automation settings](#automation-settings) ·
 [Dashboard help](#understand-the-dashboard) · [Updating](#update-without-killing-everything) ·
 [Useful commands](#useful-commands) · [Full reference](docs/usage-reference.md)
 
@@ -45,7 +46,8 @@ hacking dashboard.
 - **New 8 GB home:** starter mode roots accessible servers and fills their free
   RAM with n00dles workers. It also uses spare home RAM and expands when you obtain
   port-opening programs. You can earn even when home cannot fit a worker beside
-  the supervisor. Upgrade home RAM manually; the supervisor clears its starter
+  the supervisor. In the planned BN4 runs, home RAM upgrades are automatic; elsewhere upgrade it
+  manually. The supervisor clears its starter
   pool and switches to the full hacking stack when enough home RAM is free.
 - **Full hacking stack:** a target may need preparation, followed by an initial
   warmup before the first Hack lands. A startup income gap is normal.
@@ -62,39 +64,63 @@ hacking dashboard.
 - **Locked features:** `BLOCKED` or `LOCKED` usually means an API or program is
   missing. It does not mean all automation has stopped.
 
-## Choose a profile
+## Automation settings
 
-Use **one** of these startup commands:
+**`run supervisor.js` enables available automation. There are no profiles.**
+Programs, faction backdoors, faction work, donations, and augmentation purchases
+activate when Singularity is available (current BN4 or SF4 level 1+). Locked
+services wait without reserving their launch/helper RAM. Moving into BN4 does not
+require choosing a different mode.
 
-| Profile | In-game command | Behavior |
-| --- | --- | --- |
-| **Observe — default** | `run supervisor.js` | Runs the money engine and available side services; gives progression and augmentation advice. No Singularity actions or automatic resets. |
-| **Assist** | `run supervisor.js --profile assist` | Also buys programs, installs faction backdoors, joins eligible factions, works for reputation, donates, and buys augmentations when allowed. Installation stays manual. |
-| **Hands-off** | `run supervisor.js --profile hands-off` | Adds automatic augmentation installation at the configured threshold and restarts the saved profile afterward. |
+**Augmentation installation is always automatic while the augmentation service
+runs.** At five queued augmentations by default, it installs and restarts the
+supervisor using saved settings. A queued **The Red Pill** bypasses the threshold.
+Once installed, the loop stops buying/installing to preserve progress toward the
+final server. It still waits for unrelated manual activity
+and requires a valid restart script and saved configuration. There is no
+`--auto-install` switch.
 
-`assist` and `hands-off` require **BitNode 4 or Source-File 4 level 1+** for their
-Singularity actions. Selecting a profile does not unlock an API. `observe` is
-**not a dry run**: enabled fleet and stock services can still spend money.
-
-Explicit flags override profile defaults. For example, on a new startup:
+Optional flags express specific preferences. For example:
 
 ```text
-run supervisor.js --profile hands-off --min-install 8 --augmentation-city-faction Aevum
+run supervisor.js --min-install 8 --augmentation-city-faction Aevum
 ```
 
-This allows installation after eight queued augmentations and permits the loop
-to join Aevum when eligible. The default installation threshold is five; city
-factions are skipped unless explicitly selected.
+This sets the installation threshold to eight and permits joining Aevum when
+eligible. The BN4 route automatically chooses compatible city factions when none
+is explicitly selected; outside that route, city factions are skipped by default. The default
+hacking plan includes The Red Pill, faction reputation upgrades, and
+Neuroreceptor Management Implant.
 
-Hands-off checks that threshold before its next purchase or faction join, even
-when expensive upgrades remain in the plan. It still waits for unrelated manual
-activity to finish. If an early faction offers fewer upgrades than the threshold,
-install manually or lower `--min-install`; the loop does not lower it for you.
-The default hacking plan also includes The Red Pill, faction reputation upgrades,
-and Neuroreceptor Management Implant.
+Outside the planned BN4 route, the loop checks the install threshold before its next purchase or faction join,
+even when expensive upgrades remain. If an early faction offers fewer upgrades
+than the threshold, unlock another faction, install manually, or lower
+`--min-install`. In BN4, the route controller also installs completed smaller
+batches and batches that reach Daedalus's 30-augmentation requirement. It limits
+waiting on the next blocked purchase to 30 minutes since the last reset.
 
-Already running? Follow [Changing settings](#changing-settings) instead of
-starting a second supervisor.
+Service toggles remain available, such as `--stocks false` or
+`--augmentation-actions false` (disables supervision of the augmentation service). The latter
+is not a purchase-only mode: a running augmentation service always installs.
+Fleet and stock services may spend money whenever enabled.
+
+### Upgrading from profiles
+
+Sync all files, including `lib`. To adopt the new defaults, stop the old supervisor
+first, then the old `augmentation-manager.js` if running, and start:
+
+```text
+run supervisor.js
+```
+
+Other managers can remain running and be adopted. A running process keeps its old
+code until restarted. `supervisor-restart.js` restores saved settings instead:
+old profiles are converted to explicit service toggles, preserving disabled
+services. Saved `--auto-install` arguments are removed. An old `assist` setup
+therefore installs automatically once the new augmentation manager is running.
+New command lines must omit `--profile` and `--auto-install`.
+
+Already running? See [Changing settings](#changing-settings).
 
 ## Understand the dashboard
 
@@ -185,17 +211,17 @@ their original arguments.
 
 1. Use `ps` to find the relevant PIDs.
 2. Stop the supervisor first, then the manager(s) whose settings you are changing.
-3. Start one supervisor with your desired profile and flags.
+3. Start one supervisor with your desired flags.
 
 For example, detailed hacking diagnostics require a newly started daemon. After
 stopping the supervisor and daemon, restart with your usual flags plus
 `--dashboard-details true`:
 
 ```text
-run supervisor.js --profile observe --dashboard-details true
+run supervisor.js --dashboard-details true
 ```
 
-Use your own profile in place of `observe`. See the
+See the
 [full option reference](docs/usage-reference.md#supervisor-controls) for defaults
 and the services each option affects.
 
@@ -224,10 +250,38 @@ one. Participating fleet, stock, and progression services respect its cash floor
 manual purchases and unrelated scripts do not. Saving does not itself buy an
 augmentation or trigger a reset.
 
-Before Singularity, `run savings.js --next-program` can protect cash for a manual
-program purchase. Add `--darknet false` to that command to skip the navigator.
+Before Singularity, the supervisor automatically protects cash for the next
+manual program purchase. `run savings.js --next-program` can also set a manual goal. Add `--darknet false` to that command to skip the navigator.
 The supervisor's `--darknet false` also skips automatic navigator purchases and
 savings, while preserving any goal you set manually.
+
+## BN5 to BN4 progression and Intelligence
+
+The progression dashboard tracks installed augmentations, Daedalus eligibility,
+The Red Pill, and the final server. Before Singularity, record your installed
+augmentation count with `run progression-state.js --installed-count N` (replace
+`N` with your count; count NeuroFlux once). Update it after each reset. BN4 reads
+this information automatically through the augmentation planner.
+
+The advisor reserves the $100b Daedalus invitation balance only once the
+augmentation and skill requirements are met. After joining, it switches to The
+Red Pill when a price is known. The augmentation plan prioritizes The Red Pill
+once available; explicit augmentation targets still override the plan.
+
+In early BN4, `intelligence-farm.js` provides a separate, bounded join/reset
+session with measured XP/hour. The controller starts one early session when
+INT is below 50 and no augmentations are installed/queued, stopping at 50 or ten
+minutes. It requires SF5, a Shadows of Anarchy invitation
+from an infiltration, and saved supervisor settings. Every cycle resets cash,
+normal skills, faction reputation, purchased servers, and running scripts. Use it
+before rebuilding your economy. The first infiltration remains manual; progression
+continues if its invitation is unavailable.
+
+The controller automatically completes BN4.1 into BN4.2, then BN4.2 into BN4.3.
+It stops at BN4.3's exit requirements for you to choose the subsequent node.
+
+See [the BN5/BN4 guide](docs/bn5-bn4-progression.md) for setup, commands, stopping,
+and the automatic return to normal supervision.
 
 ## Feature requirements and advanced options
 
@@ -248,7 +302,7 @@ unlocks are reported per feature, and unlocked services still need enough RAM.
 Use the [usage reference](docs/usage-reference.md) for complete requirements,
 all supervisor flags, savings behavior, fleet investment settings, augmentation
 rules, and advanced Darknet options. Destructive Darknet operations are explicitly
-opt-in and are not enabled by any standard profile.
+opt-in and are disabled by default.
 
 ## Development and further reading
 

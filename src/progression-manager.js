@@ -1,3 +1,4 @@
+import { readProgressionObservation, planMilestone } from "lib/progression-milestones.js";
 import { PORTS } from "lib/ports.js";
 import { progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
 import { progressionPrograms } from "lib/programs.js";
@@ -85,6 +86,8 @@ function buildStatus(ns, fleetStatus, options = {}) {
 	const worldDaemon = analyzeNetworkRoute(ns, WORLD_DAEMON, discovered, parents);
 
 	const objectives = planObjectives({ torOwned, programs, backdoors, money });
+	const milestone = planMilestone({ currentNode, player: ns.getPlayer(), money, worldDaemon,
+		observation: readProgressionObservation(ns) });
 	return {
 		type: "progression-status",
 		generatedAt: Date.now(),
@@ -92,6 +95,7 @@ function buildStatus(ns, fleetStatus, options = {}) {
 		planRevision: `${ns.pid}:${Date.now()}`,
 		resetEpoch: resetEpoch(reset),
 		objectives,
+		milestone,
 		automationMode: "planner",
 		currentNode,
 		sourceFiles,
@@ -104,7 +108,7 @@ function buildStatus(ns, fleetStatus, options = {}) {
 					? `Source-File 4.${sf4Level}`
 					: "locked",
 		},
-		recommendations: singularityAvailable ? [] : [singularityRecommendation(),
+		recommendations: singularityAvailable ? [milestone.label] : [milestone.label, singularityRecommendation(),
 			"Keep the money engine, fleet, contracts, stocks, and IPvGO running; perform faction work and augmentation purchases manually"],
 		torOwned,
 		programs,
@@ -117,7 +121,7 @@ function buildStatus(ns, fleetStatus, options = {}) {
 		backdoorsTotal: backdoors.length,
 		worldDaemon,
 		nextObjective: objectives.find(objective => objective.ready && objective.affordable !== false) ||
-			objectives[0] || { kind: "faction-progress", label: "Faction backdoors complete; continue faction and augmentation progression" },
+			objectives[0] || { kind: "faction-progress", label: milestone.label },
 		error: "",
 	};
 }
@@ -128,6 +132,8 @@ function analyzeNetworkRoute(ns, host, discovered, parents) {
 		host,
 		discovered: exists,
 		path: exists ? pathFromHome(parents, host) : [],
+		requiredHacking: exists ? ns.getServerRequiredHackingLevel(host) : 0,
+		rooted: exists && ns.hasRootAccess(host),
 	};
 }
 

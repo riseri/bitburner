@@ -3,6 +3,9 @@
 Original assessment of commit `5eec74c` on 2026-09-24. Findings below describe that
 baseline; the follow-up implementation addresses them as summarized here.
 
+Profile/default recommendations below describe the historical baseline. Current
+startup uses automatic capability-aware defaults; see the README for migration.
+
 ## Implementation status
 
 The six findings below have been addressed: reset thresholds, augmentation

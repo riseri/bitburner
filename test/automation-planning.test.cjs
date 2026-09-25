@@ -140,11 +140,16 @@ test('hacking plans include progression and reputation upgrades without buying u
         getAugmentationPrice: () => 100, getAugmentationPrereq: () => [], getAugmentationStats: name => stats[name] } };
     const plan = api.buildAugmentationPlan(ns);
     assert.equal(plan.next.name, 'The Red Pill');
-    assert.equal(plan.order.length, 4);
-    assert.equal(plan.order.at(-1).name, 'Hacking');
+    assert.equal(plan.order.length, 1); // End the node instead of shopping for unrelated upgrades.
     assert.equal(api.buildAugmentationPlan(ns, { target: 'Combat' }).order.length, 1);
     assert.equal(api.buildAugmentationPlan(ns, { target: 'Combat' }).next.name, 'Combat');
-    assert.equal(api.buildAugmentationPlan(ns, { focus: 'all' }).order.length, 5);
+    assert.equal(api.buildAugmentationPlan(ns, { focus: 'all' }).order.length, 1);
+    ns.singularity.getAugmentationsFromFaction = () => Object.keys(stats).filter(name => name !== 'The Red Pill');
+    const early = api.buildAugmentationPlan(ns);
+    assert.equal(early.order.length, 3);
+    assert.equal(early.order.at(-1).name, 'Hacking');
+    assert.equal(api.buildAugmentationPlan(ns, { focus: 'all' }).order.length, 4);
+    ns.singularity.getAugmentationsFromFaction = () => Object.keys(stats);
     ns.singularity.getAugmentationPrereq = name => name === 'The Red Pill' ? ['Hacking'] : [];
     const prerequisites = api.buildAugmentationPlan(ns).order.map(item => item.name);
     assert.ok(prerequisites.indexOf('Hacking') < prerequisites.indexOf('The Red Pill'));
@@ -161,14 +166,14 @@ test('doctor excludes locked and disabled services from fresh-player RAM require
     let report = api.diagnoseAutomation(ns);
     assert.equal(report.state, 'READY');
     assert.ok(report.lines.some(line => line.includes('actor allowance: 0.00')));
-    processes[0].args = ['--profile', 'assist', '--augmentation-actions=false', '--progression-actions', false, '--stocks', false, '--darknet', false];
+    processes[0].args = ['--augmentation-actions=false', '--progression-actions', false, '--stocks', false, '--darknet', false];
     ns.getResetInfo = () => ({ currentNode: 4, ownedSF: new Map() });
     // Disable the expensive advisory helper explicitly too.
     processes[0].args.push('--augmentations', false);
     report = api.diagnoseAutomation(ns);
     assert.equal(report.state, 'READY');
     assert.ok(report.lines.some(line => line.includes('stock-trader.js: DISABLED')));
-    processes[0].args = ['--profile', 'assist'];
+    processes[0].args = [];
     report = api.diagnoseAutomation(ns);
     assert.ok(report.issues.some(line => line.includes('Enabled services/helpers')));
     assert.ok(report.lines.some(line => line.includes('actor allowance: 1000.00')));
@@ -219,4 +224,15 @@ test('doctor reports missing imports, duplicate services and port conflicts with
     assert.ok(logs.some(s => s.includes('Missing lib/missing.js')));
     assert.ok(logs.some(s => s.includes('Duplicate fleet-manager')));
     assert.ok(logs.some(s => s.includes('Port 20 collision')));
+});
+
+
+test('purchased Red Pill ends the default shopping plan without hiding an explicit target', () => {
+    const api = loadScript('lib/augmentation-plan.js', new Clock());
+    const ns = { getPlayer: () => ({ factions: ['Daedalus'] }), singularity: {
+        getOwnedAugmentations: () => ['The Red Pill'], getFactionRep: () => 1e9,
+        getAugmentationsFromFaction: () => ['The Red Pill', 'BitWire'], getAugmentationRepReq: () => 100,
+        getAugmentationPrice: () => 100, getAugmentationPrereq: () => [], getAugmentationStats: () => ({ hacking: 1.1 }) } };
+    assert.equal(api.buildAugmentationPlan(ns).next, null);
+    assert.equal(api.buildAugmentationPlan(ns, { target: 'BitWire' }).next.name, 'BitWire');
 });

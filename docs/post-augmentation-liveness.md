@@ -63,7 +63,7 @@ in the detailed diagnostics and do not keep an attention banner visible after th
 scheduler is accepting again. Secondary admission reports actual progress
 instead of retaining its initial 'waiting for productive runtime' message forever.
 No timing, worker semantics, progression flag, Formulas API or extra target count
-is introduced. Start with `run supervisor.js --profile assist` as before.
+is introduced. Start with `run supervisor.js` as before.
 
 ## Evidence and limits
 

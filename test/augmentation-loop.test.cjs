@@ -31,7 +31,7 @@ function fixture(overrides = {}) {
         getResetInfo: () => reset,
         getPlayer: () => ({ factions: world.factions, skills: { hacking: 500, strength: 10, defense: 10, dexterity: 10, agility: 10, charisma: 1 } }),
         getServerMoneyAvailable: () => world.cash,
-        read: () => '', write: async () => {}, hasTorRouter: () => true,
+        read: file => file === 'data/supervisor-bootstrap.json' ? JSON.stringify({ version: 2, args: [] }) : '', write: async () => {}, hasTorRouter: () => true,
         getFavorToDonate: () => 150,
         fileExists: name => name === 'bootstrap.js',
         singularity: {
@@ -58,7 +58,7 @@ function fixture(overrides = {}) {
         ...overrides,
     };
     const cfg = { focus: 'hacking', target: '', cashReserve: .1, joinFactions: true, cityFaction: '', work: true, donate: true,
-        purchase: true, focusWork: false, autoInstall: false, minInstall: 5 };
+        purchase: true, focusWork: false, minInstall: 5 };
     return { ns, cfg, state, world, reset, api: loadScript('augmentation-manager.js', clock) };
 }
 
@@ -109,28 +109,28 @@ test('automatic installation requires the threshold and restarts through bootstr
     const f = fixture();
     f.ns.singularity.getAugmentationsFromFaction = () => [];
     f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
-    f.cfg.autoInstall = true;
+
     const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
     assert.equal(status.state, 'RESETTING'); assert.deepEqual(f.world.installs, ['bootstrap.js']);
 });
 
-test('hands-off installs at the threshold with expensive upgrades and invitations still pending', async () => {
+test('the loop installs at the threshold with expensive upgrades and invitations still pending', async () => {
     const f = fixture();
     f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
     f.world.invitations = ['NiteSec'];
-    f.cfg.autoInstall = true;
+
     const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
     assert.equal(status.state, 'RESETTING');
     assert.deepEqual(f.world.installs, ['bootstrap.js']);
     assert.equal(f.world.works.length + f.world.joins.length + f.world.buys.length, 0);
 });
 
-test('assist continues purchasing past the threshold without installing', async () => {
-    const f = fixture(); f.world.rep = 100;
+test('an obsolete autoInstall field cannot disable threshold installation', async () => {
+    const f = fixture(); f.world.rep = 100; f.cfg.autoInstall = false;
     f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
     const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
-    assert.equal(status.phase, 'PURCHASE');
-    assert.equal(f.world.installs.length, 0);
+    assert.equal(status.state, 'RESETTING');
+    assert.deepEqual(f.world.installs, ['bootstrap.js']);
 });
 
 test('queued counts include additional NeuroFlux levels when one is already installed', () => {
@@ -140,12 +140,13 @@ test('queued counts include additional NeuroFlux levels when one is already inst
 });
 
 test('automatic reset still respects manual work, busy actions, bootstrap and failed stop/install', async () => {
-    for (const reason of ['manual', 'busy', 'bootstrap', 'stop', 'install']) {
-        const f = fixture(); f.cfg.autoInstall = true;
+    for (const reason of ['manual', 'busy', 'bootstrap', 'settings', 'stop', 'install']) {
+        const f = fixture();
         f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
         if (reason === 'manual') f.world.current = { type: 'CRIME' };
         if (reason === 'busy') f.ns.singularity.isBusy = () => true;
         if (reason === 'bootstrap') f.ns.fileExists = () => false;
+        if (reason === 'settings') f.ns.read = () => '{broken';
         if (reason === 'stop') {
             f.world.current = { type: 'FACTION', factionName: 'CyberSec', factionWorkType: 'hacking' };
             f.state.ownedWork = { faction: 'CyberSec', workType: 'hacking' };
@@ -159,13 +160,13 @@ test('automatic reset still respects manual work, busy actions, bootstrap and fa
 });
 
 test('threshold reset can stop owned work, while a small exhausted catalog stays manual', async () => {
-    const f = fixture(); f.cfg.autoInstall = true;
+    const f = fixture();
     f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
     f.world.current = { type: 'FACTION', factionName: 'CyberSec', factionWorkType: 'hacking' };
     f.state.ownedWork = { faction: 'CyberSec', workType: 'hacking' };
     assert.equal((await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state)).state, 'RESETTING');
     assert.equal(f.world.current, null);
-    const small = fixture(); small.cfg.autoInstall = true; small.world.purchased = ['BitWire'];
+    const small = fixture(); small.world.purchased = ['BitWire'];
     const status = await small.api.tickAugmentationLoop(small.ns, small.cfg, small.state);
     assert.equal(status.state, 'WAITING');
     assert.match(status.recommendation, /lower --min-install to 1/);
@@ -189,4 +190,33 @@ test('faction ETA applies unfocused penalty and reads focus of already-running w
         assert.equal(status.reputationPerSecond, rate, mode);
         assert.equal(status.etaMs, 100 / rate * 1000, mode);
     }
+});
+
+
+test('a single queued Red Pill installs before invitations or shopping', async () => {
+    const f = fixture(); f.world.purchased = ['The Red Pill']; f.world.invitations = ['NiteSec'];
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.state, 'RESETTING');
+    assert.deepEqual(f.world.installs, ['bootstrap.js']);
+    assert.equal(f.world.joins.length + f.world.buys.length + f.world.works.length, 0);
+});
+
+test('Red Pill threshold bypass preserves installation checks', async () => {
+    for (const reason of ['manual', 'bootstrap', 'settings', 'busy']) {
+        const f = fixture(); f.world.purchased = ['The Red Pill'];
+        if (reason === 'manual') f.world.current = { type: 'CLASS' };
+        if (reason === 'bootstrap') f.ns.fileExists = () => false;
+        if (reason === 'settings') f.ns.read = () => '{}';
+        if (reason === 'busy') f.ns.singularity.isBusy = () => true;
+        assert.equal((await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state)).state, 'BLOCKED', reason);
+        assert.equal(f.world.installs.length, 0);
+    }
+});
+
+test('installed Red Pill prevents another augmentation reset while completing the node', async () => {
+    const f = fixture(); f.world.installed = ['The Red Pill'];
+    f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'COMPLETE_NODE');
+    assert.equal(f.world.installs.length + f.world.buys.length + f.world.works.length, 0);
 });

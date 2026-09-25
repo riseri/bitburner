@@ -1,8 +1,9 @@
+import { bn4Route } from "lib/bitnode-route.js";
 import { writeUtilityReport } from "lib/utility-report.js";
 import { PORTS } from "lib/ports.js";
 import { readSavings } from "lib/savings.js";
 import { singularityAvailable } from "lib/progression-protocol.js";
-import { SERVICES, selectedServices, supervisorServiceConfig, supervisorFiles } from "lib/service-catalog.js";
+import { SERVICES, selectedServices, supervisorServiceConfig, supervisorFiles, supervisorRamBudget } from "lib/service-catalog.js";
 import { readArgument } from "lib/service-lifecycle.js";
 
 /** Read-only startup diagnostics; --report publishes for the supervisor. @param {NS} ns */
@@ -25,12 +26,12 @@ export function diagnoseAutomation(ns) {
     const supervisor = processes.find(process => process.filename === "supervisor.js");
     const cfg = supervisorServiceConfig(supervisor?.args || []);
     const reset = ns.getResetInfo();
-    const capabilities = { singularity: singularityAvailable(reset),
+    const capabilities = { route: bn4Route(reset), singularity: singularityAvailable(reset),
         darknet: ns.fileExists("DarkscapeNavigator.exe", "home") || reset.currentNode === 15, stocks: false };
     try { capabilities.stocks = ns.stock.hasWseAccount() && ns.stock.hasTixApiAccess() && ns.stock.has4SDataTixApi(); } catch {}
     const enabled = selectedServices(cfg);
-    const available = enabled.filter(service => !service.capability || capabilities[service.capability]);
-    const entries = [...new Set(["supervisor.js", ...supervisorFiles(cfg),
+    const available = selectedServices(cfg, capabilities);
+    const entries = [...new Set(["supervisor.js", ...supervisorFiles(cfg, capabilities),
         ...SERVICES.filter(service => processes.some(process => process.filename === service.name)).map(service => service.name)])];
     const inspect = file => {
         if (visited.has(file)) return;
@@ -53,10 +54,7 @@ export function diagnoseAutomation(ns) {
         .reduce((sum, service) => sum + ns.getScriptRam(service.name, "home"), 0);
     const coreRam = missingRam(available.filter(service => service.core)) + (supervisor ? 0 : ns.getScriptRam("supervisor.js", "home"));
     const optionalRam = missingRam(available.filter(service => !service.core));
-    const actorRam = capabilities.singularity && cfg.progression && cfg.progressionActions
-        ? Math.max(ns.getScriptRam("progression-purchase.js", "home"), ns.getScriptRam("progression-backdoor.js", "home")) : 0;
-    const helperRam = Math.max(actorRam, capabilities.singularity && cfg.augmentations ? ns.getScriptRam("augmentation-planner.js", "home") : 0,
-        cfg.diagnostics ? ns.getScriptRam("doctor.js", "home") : 0);
+    const { actorRam, utilityRam: helperRam } = supervisorRamBudget(ns, cfg, capabilities);
     const doctor = processes.find(process => process.pid === ns.pid && process.filename === "doctor.js");
     const afterReport = free + (doctor ? ns.getScriptRam("doctor.js", "home") * doctor.threads : 0);
     lines.push(`Home free ${free.toFixed(2)} GB | missing core ${coreRam.toFixed(2)} GB | enabled optional services ${optionalRam.toFixed(2)} GB | largest enabled helper ${helperRam.toFixed(2)} GB`);

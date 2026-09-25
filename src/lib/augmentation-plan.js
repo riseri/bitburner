@@ -17,7 +17,7 @@ export function planAugmentations(catalog, owned, targets, multiplier = 1) {
         const eligible = [...remaining].map(name => byName.get(name)).filter(a => a.prerequisites.every(p => have.has(p)));
         // Prefer purchases we can make now; otherwise show the reputation work needed next.
         eligible.sort((a, b) => Number(b.repGap === 0) - Number(a.repGap === 0) ||
-            augmentationPriority(b) - augmentationPriority(a) || b.price - a.price || a.name.localeCompare(b.name));
+            (b.routePriority ?? augmentationPriority(b)) - (a.routePriority ?? augmentationPriority(a)) || (a.routePriority === 0 && b.routePriority === 0 ? a.repRequired - b.repRequired || a.price - b.price : b.price - a.price) || a.name.localeCompare(b.name));
         const item = eligible[0];
         if (!item) { errors.push(`Unresolved prerequisites: ${[...remaining].join(", ")}`); break; }
         const estimatedPrice = item.price * multiplier ** order.length;
@@ -53,7 +53,21 @@ export function buildAugmentationPlan(ns, options = {}) {
     if (!Number.isFinite(multiplier) || multiplier < 1) throw new Error("price-multiplier must be finite and at least 1");
     if (!["hacking", "all"].includes(focus)) throw new Error("focus must be hacking or all");
     const { catalog, owned } = readAugmentationCatalog(ns);
-    const targets = target ? [target] : catalog.filter(a => focus === "all" || augmentationPriority(a) > 0 ||
+    if (options.route && !target) {
+        for (const a of catalog) a.routePriority = augmentationPriority(a) > 0 ? 100 + augmentationPriority(a)
+            : Object.entries(a.stats).reduce((score, [key, value]) => score + (key.startsWith("hacking") && value > 1 ? Math.log(value) * 10 : 0), 0);
+    }
+    const available = new Map(catalog.map(a => [a.name, a]));
+    const reachable = (name, seen = new Set()) => {
+        if (owned.includes(name)) return true;
+        if (seen.has(name) || !available.has(name)) return false;
+        const next = new Set(seen); next.add(name);
+        return available.get(name).prerequisites.every(p => reachable(p, next));
+    };
+    const candidates = options.route ? catalog.filter(a => reachable(a.name)) : catalog;
+    const countFillers = options.route && new Set(owned).size < 30;
+    const endgameTarget = !target && catalog.some(a => a.name === "The Red Pill") ? "The Red Pill" : target;
+    const targets = !target && owned.includes("The Red Pill") ? [] : endgameTarget ? [endgameTarget] : candidates.filter(a => countFillers || focus === "all" || augmentationPriority(a) > 0 ||
         Object.entries(a.stats).some(([key, value]) => key.startsWith("hacking") && value > 1)).map(a => a.name);
     return planAugmentations(catalog, owned, targets, multiplier);
 }

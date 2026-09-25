@@ -11,7 +11,7 @@ function fixture() {
     const parents = {home:null,a:'home',b:'a',CSEC:'b',manual:'a'};
     const launched = [], connections = [], purchases = [];
     const ns = {pid:1, args:[], getHostname:()=> 'home', disableLog(){}, print(){},
-        getResetInfo:()=>reset, ps:()=>[...processes.values()], getPortHandle:n=>ports.get(n),
+        getPlayer:()=>({ factions: [], skills: { hacking: world.skill } }), getResetInfo:()=>reset, ps:()=>[...processes.values()], getPortHandle:n=>ports.get(n),
         isRunning:pid=>processes.has(pid), getScriptRam:()=>8, getServerMaxRam:()=>world.ram, getServerUsedRam:()=>0,
         getServerMoneyAvailable:()=>world.cash, getHackingLevel:()=>world.skill, hasTorRouter:()=>world.tor,
         fileExists:name=>world.owned.has(name), serverExists:host=>Object.hasOwn(parents,host), hasRootAccess:()=>world.roots,
