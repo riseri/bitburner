@@ -1,14 +1,15 @@
 import { readSavings, writeSavings } from "lib/savings.js";
-import { progressionPrograms } from "lib/progression-protocol.js";
+import { progressionPrograms } from "lib/programs.js";
 import { PORTS } from "lib/ports.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
     if (ns.getHostname() !== "home") throw new Error("Run savings.js on home");
-    const f = ns.flags([["amount", -1], ["label", "Savings"], ["target", ""], ["next-program", false], ["clear", false]]);
+    const f = ns.flags([["amount", -1], ["label", "Savings"], ["target", ""], ["next-program", false], ["darknet", true], ["clear", false]]);
     if (f.clear) await writeSavings(ns, 0, "No savings goal");
     else if (f["next-program"]) {
-        const p = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms().find(p => !ns.fileExists(p.name, "home"));
+        const darknet = ![false, "false", "0", "off", "no"].includes(f.darknet);
+        const p = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms({ darknet }).find(p => !ns.fileExists(p.name, "home"));
         if (!p) { ns.tprint("All automatic program unlocks owned; existing savings goal unchanged."); return; }
         // Include the default progression reserve; the purchase actor rechecks the live price.
         await writeSavings(ns, p.cost / 0.9, `Buy ${p.name}`, p.name);

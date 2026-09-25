@@ -23,7 +23,9 @@ function fixture() {
         formulas: {
             hacking,
             work: { factionGains: (_player, type) => ({ reputation: type === 'hacking' ? 3 : 5 }), donationForRep: () => 999 },
-            reputation: { donationForRep: rep => rep * 10, calculateRepToFavor: rep => rep / 100 },
+            reputation: { donationForRep: rep => rep * 10,
+                calculateFavorToRep: favor => 25000 * Math.expm1(Math.log(1.02) * favor),
+                calculateRepToFavor: rep => Math.log1p(rep / 25000) / Math.log(1.02) },
             dnet: {
                 getAuthenticateTime: (_details, threads, _player, correct) => (1000 + correct * 100) / threads,
                 getHeartbleedTime: (_details, threads) => 2000 / threads,
@@ -46,19 +48,22 @@ test('hacking models switch from unavailable to exact formulas without recreatin
     assert.equal(api.formulaWeakenEffect(f.ns, 2, 1), 0.1);
 });
 
-test('work formulas rank live faction work, include hacking share power, donation, ETA inputs, and favor', () => {
+test('work formulas use the API sharing bonus once and preserve nonlinear favor conversion', () => {
     const f = fixture(); f.state.unlocked = true;
     const work = api.factionWorkAnalysis(f.ns, 'CyberSec', ['security', 'hacking']);
-    assert.equal(work.workType, 'hacking');
-    assert.equal(work.reputationPerSecond, 30);
+    assert.equal(work.workType, 'security');
+    assert.equal(work.reputationPerSecond, 25);
+    assert.equal(work.options.find(option => option.workType === 'hacking').reputationPerSecond, 15);
     assert.equal(work.sharePower, 2);
     assert.equal(api.formulaDonationForRep(f.ns, 123), 1230);
-    assert.equal(api.formulaFavorProjection(f.ns, 'CyberSec'), 104);
+    assert.ok(Math.abs(api.formulaFavorProjection(f.ns, 'CyberSec') - 100.11140401877958) < 1e-9);
+    f.ns.singularity.getFactionRep = () => 0;
+    assert.ok(Math.abs(api.formulaFavorProjection(f.ns, 'CyberSec') - 100) < 1e-9);
 });
 
 test('darknet formulas expose thread-aware authentication, heartbleed, and RAM recovery estimates', () => {
     const f = fixture(); f.state.unlocked = true;
-    const metrics = api.darknetFormulaMetrics(f.ns, { passwordLength: 6 }, 2);
+    const metrics = loadScript('lib/darknet-formulas.js', new Clock()).darknetFormulaMetrics(f.ns, { passwordLength: 6 }, 2);
     assert.equal(metrics.authenticateMin, 500);
     assert.equal(metrics.authenticateMax, 800);
     assert.equal(metrics.heartbleed, 1000);

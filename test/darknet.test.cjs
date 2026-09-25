@@ -42,8 +42,8 @@ test('darknet numeric oracle solver authenticates a GuessNumber server', async (
 
 test('darknet XOR and Darkscape progression are included in the complete model/unlock surface', () => {
     const protocol = loadScript('lib/progression-protocol.js', new Clock());
-    assert.equal(protocol.progressionPrograms().at(-1).name,'DarkscapeNavigator.exe');
-    assert.equal(protocol.progressionPrograms().at(-1).cost,50_000_000);
+    assert.equal(loadScript('lib/programs.js', new Clock()).progressionPrograms().at(-1).name,'DarkscapeNavigator.exe');
+    assert.equal(loadScript('lib/programs.js', new Clock()).progressionPrograms().at(-1).cost,50_000_000);
     const source = require('node:fs').readFileSync(require('node:path').join(__dirname,'../src/lib/darknet-solvers.js'),'utf8');
     for (const model of ['PHP 5.4','DeepGreen','AccountsManager_4.2','BellaCuore','NIL','RateMyPix.Auth','2G_cellular','Factori-Os','BigMo%od','KingOfTheHill','OpenWebAccessPoint','(The Labyrinth)']) assert.match(source,new RegExp(model.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
 });

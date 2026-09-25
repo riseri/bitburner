@@ -38,7 +38,7 @@ function fixture(overrides = {}) {
             checkFactionInvitations: () => world.invitations,
             isBusy: () => world.current !== null,
             joinFaction: faction => { world.joins.push(faction); world.factions.push(faction); return true; },
-            getOwnedAugmentations: purchased => purchased ? world.purchased : world.installed,
+            getOwnedAugmentations: purchased => purchased ? [...world.installed, ...world.purchased] : world.installed,
             getFactionRep: () => world.rep,
             getFactionFavor: () => world.favor,
             getAugmentationsFromFaction: () => world.purchased.includes('BitWire') ? [] : ['BitWire'],
@@ -47,12 +47,13 @@ function fixture(overrides = {}) {
             getAugmentationPrereq: () => [],
             getAugmentationStats: () => ({ hacking: 1.1 }),
             getCurrentWork: () => world.current,
+            isFocused: () => false,
             getFactionWorkTypes: () => ['hacking'],
             workForFaction: (faction, type, focus) => { world.works.push({ faction, type, focus }); world.current = { type: 'FACTION', factionName: faction, factionWorkType: type }; return true; },
             donateToFaction: (faction, amount) => { world.donations.push({ faction, amount }); world.rep = 100; world.cash -= amount; return true; },
             purchaseAugmentation: (faction, name) => { world.buys.push({ faction, name }); world.purchased.push(name); return true; },
             stopAction: () => { world.current = null; return true; },
-            installAugmentations: script => world.installs.push(script),
+            installAugmentations: script => { world.installs.push(script); },
         },
         ...overrides,
     };
@@ -111,4 +112,81 @@ test('automatic installation requires the threshold and restarts through bootstr
     f.cfg.autoInstall = true;
     const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
     assert.equal(status.state, 'RESETTING'); assert.deepEqual(f.world.installs, ['bootstrap.js']);
+});
+
+test('hands-off installs at the threshold with expensive upgrades and invitations still pending', async () => {
+    const f = fixture();
+    f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
+    f.world.invitations = ['NiteSec'];
+    f.cfg.autoInstall = true;
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.state, 'RESETTING');
+    assert.deepEqual(f.world.installs, ['bootstrap.js']);
+    assert.equal(f.world.works.length + f.world.joins.length + f.world.buys.length, 0);
+});
+
+test('assist continues purchasing past the threshold without installing', async () => {
+    const f = fixture(); f.world.rep = 100;
+    f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'PURCHASE');
+    assert.equal(f.world.installs.length, 0);
+});
+
+test('queued counts include additional NeuroFlux levels when one is already installed', () => {
+    assert.deepEqual(Array.from(policy.queuedAugmentations(['BitWire', 'NeuroFlux Governor'],
+        ['BitWire', 'NeuroFlux Governor', 'NeuroFlux Governor', 'NeuroFlux Governor'])),
+        ['NeuroFlux Governor', 'NeuroFlux Governor']);
+});
+
+test('automatic reset still respects manual work, busy actions, bootstrap and failed stop/install', async () => {
+    for (const reason of ['manual', 'busy', 'bootstrap', 'stop', 'install']) {
+        const f = fixture(); f.cfg.autoInstall = true;
+        f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
+        if (reason === 'manual') f.world.current = { type: 'CRIME' };
+        if (reason === 'busy') f.ns.singularity.isBusy = () => true;
+        if (reason === 'bootstrap') f.ns.fileExists = () => false;
+        if (reason === 'stop') {
+            f.world.current = { type: 'FACTION', factionName: 'CyberSec', factionWorkType: 'hacking' };
+            f.state.ownedWork = { faction: 'CyberSec', workType: 'hacking' };
+            f.ns.singularity.stopAction = () => false;
+        }
+        if (reason === 'install') f.ns.singularity.installAugmentations = () => false;
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.equal(status.state, 'BLOCKED', reason);
+        assert.equal(f.world.installs.length, 0, reason);
+    }
+});
+
+test('threshold reset can stop owned work, while a small exhausted catalog stays manual', async () => {
+    const f = fixture(); f.cfg.autoInstall = true;
+    f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
+    f.world.current = { type: 'FACTION', factionName: 'CyberSec', factionWorkType: 'hacking' };
+    f.state.ownedWork = { faction: 'CyberSec', workType: 'hacking' };
+    assert.equal((await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state)).state, 'RESETTING');
+    assert.equal(f.world.current, null);
+    const small = fixture(); small.cfg.autoInstall = true; small.world.purchased = ['BitWire'];
+    const status = await small.api.tickAugmentationLoop(small.ns, small.cfg, small.state);
+    assert.equal(status.state, 'WAITING');
+    assert.match(status.recommendation, /lower --min-install to 1/);
+    assert.equal(small.world.installs.length, 0);
+});
+
+test('faction ETA applies unfocused penalty and reads focus of already-running work', async () => {
+    for (const mode of ['unfocused', 'configured-focus', 'manual-focus', 'implant', 'queued-implant']) {
+        const f = fixture(); f.cfg.donate = false;
+        f.ns.fileExists = () => true;
+        f.ns.formulas = { work: { factionGains: () => ({ reputation: 3 }) } };
+        if (mode === 'configured-focus') f.cfg.focusWork = true;
+        if (mode === 'manual-focus') {
+            f.world.current = { type: 'FACTION', factionName: 'CyberSec', factionWorkType: 'hacking' };
+            f.ns.singularity.isFocused = () => true;
+        }
+        if (mode === 'implant') f.world.installed = ['Neuroreceptor Management Implant'];
+        if (mode === 'queued-implant') f.world.purchased = ['Neuroreceptor Management Implant'];
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        const rate = ['unfocused', 'queued-implant'].includes(mode) ? 12 : 15;
+        assert.equal(status.reputationPerSecond, rate, mode);
+        assert.equal(status.etaMs, 100 / rate * 1000, mode);
+    }
 });

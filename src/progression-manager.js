@@ -1,12 +1,12 @@
 import { PORTS } from "lib/ports.js";
-import { progressionPrograms, progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
+import { progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
+import { progressionPrograms } from "lib/programs.js";
 import { singularityRecommendation } from "lib/augmentation-loop.js";
 
 const HOME = "home";
 const WORLD_DAEMON = "w0r1d_d43m0n";
 const DEFAULT_INTERVAL_MS = 5_000;
 
-const PORT_PROGRAMS = progressionPrograms();
 const BACKDOOR_TARGETS = progressionBackdoors();
 
 /** @param {NS} ns */
@@ -15,6 +15,7 @@ export async function main(ns) {
 		["port", PORTS.PROGRESSION_STATUS],
 		["fleet-port", PORTS.FLEET_STATUS],
 		["interval", DEFAULT_INTERVAL_MS],
+		["darknet", true],
 	]);
 
 	ns.disableLog("ALL");
@@ -23,6 +24,7 @@ export async function main(ns) {
 		port: Number(flags.port),
 		fleetPort: Number(flags["fleet-port"]),
 		interval: Math.max(1_000, Number(flags.interval) || DEFAULT_INTERVAL_MS),
+		darknet: ![false, "false", "0", "off", "no"].includes(flags.darknet),
 	};
 
 	const statusPort = ns.getPortHandle(cfg.port);
@@ -31,7 +33,7 @@ export async function main(ns) {
 	while (true) {
 		let status;
 		try {
-			status = buildStatus(ns, fleetPort.peek());
+			status = buildStatus(ns, fleetPort.peek(), cfg);
 		} catch (error) {
 			status = {
 				type: "progression-status",
@@ -52,7 +54,7 @@ export async function main(ns) {
 	}
 }
 
-function buildStatus(ns, fleetStatus) {
+function buildStatus(ns, fleetStatus, options = {}) {
 	const reset = ns.getResetInfo();
 	const currentNode = Number(reset.currentNode) || 0;
 	const sourceFiles = sourceFileEntries(reset.ownedSF);
@@ -62,7 +64,7 @@ function buildStatus(ns, fleetStatus) {
 	const hackingLevel = ns.getHackingLevel();
 	const money = ns.getServerMoneyAvailable(HOME);
 
-	const programs = PORT_PROGRAMS.map(program => ({
+	const programs = progressionPrograms(options).map(program => ({
 		...program,
 		owned: ns.fileExists(program.name, HOME),
 	}));

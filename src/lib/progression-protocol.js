@@ -1,14 +1,7 @@
 import { PORTS } from "lib/ports.js";
+import { isProgressionProgram } from "lib/programs.js";
 
 const REQUEST_TTL_MS = 15_000;
-const PROGRAMS = Object.freeze([
-	{ name: "BruteSSH.exe", cost: 500_000 },
-	{ name: "FTPCrack.exe", cost: 1_500_000 },
-	{ name: "relaySMTP.exe", cost: 5_000_000 },
-	{ name: "HTTPWorm.exe", cost: 30_000_000 },
-	{ name: "SQLInject.exe", cost: 250_000_000 },
-	{ name: "DarkscapeNavigator.exe", cost: 50_000_000, category: "darknet" },
-]);
 const BACKDOORS = Object.freeze([
 	{ host: "CSEC", faction: "CyberSec" },
 	{ host: "avmnite-02h", faction: "NiteSec" },
@@ -16,8 +9,6 @@ const BACKDOORS = Object.freeze([
 	{ host: "run4theh111z", faction: "BitRunners" },
 ]);
 
-// Planning estimates from upstream DarkWebItems; the actor always obtains a live quote.
-export function progressionPrograms() { return PROGRAMS.map(program => ({ ...program })); }
 export function progressionBackdoors() { return BACKDOORS.map(target => ({ ...target })); }
 
 export function resetEpoch(reset) {
@@ -52,7 +43,7 @@ export function validateRequest(request, reset, now = Date.now()) {
 	if (!resetEpoch(reset) || request.resetEpoch !== resetEpoch(reset)) return "reset-changed";
 	if (!singularityAvailable(reset)) return "singularity-locked";
 	if (request.kind === "tor" && request.target === "TOR") return "";
-	if (request.kind === "program" && PROGRAMS.some(program => program.name === request.target)) return "";
+	if (request.kind === "program" && isProgressionProgram(request.target)) return "";
 	if (request.kind === "backdoor" && BACKDOORS.some(target => target.host === request.target)) return "";
 	return "target-not-allowed";
 }

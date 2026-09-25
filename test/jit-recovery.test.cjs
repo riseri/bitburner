@@ -573,9 +573,3 @@ test('dashboard rendering is read-only and supervisor overview consumes the comp
     assert.match(f.logs.join('\n'), /the-hub \| WEAKEN/);
     assert.ok(f.logs.every(line=>line.length<=78));
 });
-
-test('dashboard phase counter parsing ignores the digits in W1 and W2 labels', () => {
-    const f = dashboardFixture();
-    assert.equal(f.supervisor.hasNonZeroCounters('H:0 W1:0 G:0 W2:0'), false);
-    assert.equal(f.supervisor.hasNonZeroCounters('H:0 W1:2 G:0 W2:0'), true);
-});

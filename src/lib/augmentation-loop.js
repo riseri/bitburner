@@ -36,10 +36,17 @@ export function spendableForAugmentation(cash, price, reserve, savings, augmenta
 }
 
 export function queuedAugmentations(installed, purchased) {
-    const have = new Set(installed || []);
-    return (purchased || []).filter(name => !have.has(name));
+    // NeuroFlux Governor may occur in both lists with additional queued levels.
+    const counts = new Map();
+    for (const name of installed || []) counts.set(name, (counts.get(name) || 0) + 1);
+    return (purchased || []).filter(name => {
+        const remaining = counts.get(name) || 0;
+        if (!remaining) return true;
+        counts.set(name, remaining - 1);
+        return false;
+    });
 }
 
 export function singularityRecommendation() {
-    return "Unlock Singularity by completing BitNode 4, or earn Source-File 4 and return to this BitNode";
+    return "Singularity is available inside BitNode 4, or elsewhere with Source-File 4 level 1+";
 }

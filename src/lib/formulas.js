@@ -10,10 +10,6 @@ export function formulaGroup(ns, group, methods = []) {
 	} catch { return null; }
 }
 
-export function formulasAvailable(ns) {
-	try { return Boolean(ns.fileExists(FORMULAS, HOME) && ns.formulas); } catch { return false; }
-}
-
 export function hackingFormulasAvailable(ns) {
 	return Boolean(formulaGroup(ns, "hacking", ["hackPercent", "hackChance", "hackTime", "growTime", "weakenTime", "growThreads"]));
 }
@@ -77,7 +73,8 @@ export function factionWorkAnalysis(ns, faction, types, player = null) {
 		const sharePower = Math.max(1, Number(typeof ns.getSharePower === "function" ? ns.getSharePower() : 1) || 1);
 		const options = types.map(workType => {
 			const gains = api.factionGains(person, workType, favor);
-			const reputationPerSecond = Number(gains?.reputation) * CYCLES_PER_SECOND * (workType === "hacking" ? sharePower : 1);
+			// factionGains already includes the live sharing bonus for every work type.
+			const reputationPerSecond = Number(gains?.reputation) * CYCLES_PER_SECOND;
 			return { workType, reputationPerSecond };
 		}).filter(option => Number.isFinite(option.reputationPerSecond) && option.reputationPerSecond >= 0)
 			.sort((a, b) => b.reputationPerSecond - a.reputationPerSecond);
@@ -99,30 +96,13 @@ export function formulaDonationForRep(ns, reputation, player = null) {
 }
 
 export function formulaFavorProjection(ns, faction) {
-	const api = formulaGroup(ns, "reputation", ["calculateRepToFavor"]);
+	const api = formulaGroup(ns, "reputation", ["calculateRepToFavor", "calculateFavorToRep"]);
 	if (!api) return null;
 	try {
 		const current = Number(ns.singularity.getFactionFavor(faction)) || 0;
-		const earned = Number(api.calculateRepToFavor(ns.singularity.getFactionRep(faction)));
-		return Number.isFinite(earned) ? current + earned : null;
-	} catch { return null; }
-}
-
-/** Timing/capacity estimates for a one-thread roaming Darknet agent. */
-export function darknetFormulaMetrics(ns, details, threads = 1) {
-	const api = formulaGroup(ns, "dnet", ["getAuthenticateTime", "getHeartbleedTime", "getExpectedRamBlockRemoved"]);
-	if (!api) return null;
-	try {
-		const count = Math.max(1, Number(threads) || 1), player = ns.getPlayer();
-		const length = Math.max(0, Number(details.passwordLength) || 0);
-		const authenticateMin = Number(api.getAuthenticateTime(details, count, player, 0));
-		const authenticateMax = Number(api.getAuthenticateTime(details, count, player, length));
-		const heartbleed = Number(api.getHeartbleedTime(details, count, player));
-		const ramPerCall = Number(api.getExpectedRamBlockRemoved(details, count, player));
-		const values = [authenticateMin, authenticateMax, heartbleed, ramPerCall];
-		if (!values.every(Number.isFinite)) return null;
-		return { authenticateMin: Math.max(0, authenticateMin), authenticateMax: Math.max(0, authenticateMax),
-			heartbleed: Math.max(0, heartbleed), ramPerCall: Math.max(0, ramPerCall), formulas: true };
+		const totalRep = Number(api.calculateFavorToRep(current)) + Number(ns.singularity.getFactionRep(faction));
+		const projected = Number(api.calculateRepToFavor(totalRep));
+		return Number.isFinite(projected) ? projected : null;
 	} catch { return null; }
 }
 

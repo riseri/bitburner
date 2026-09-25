@@ -16,7 +16,8 @@ export function planAugmentations(catalog, owned, targets, multiplier = 1) {
     while (remaining.size) {
         const eligible = [...remaining].map(name => byName.get(name)).filter(a => a.prerequisites.every(p => have.has(p)));
         // Prefer purchases we can make now; otherwise show the reputation work needed next.
-        eligible.sort((a, b) => Number(b.repGap === 0) - Number(a.repGap === 0) || b.price - a.price || a.name.localeCompare(b.name));
+        eligible.sort((a, b) => Number(b.repGap === 0) - Number(a.repGap === 0) ||
+            augmentationPriority(b) - augmentationPriority(a) || b.price - a.price || a.name.localeCompare(b.name));
         const item = eligible[0];
         if (!item) { errors.push(`Unresolved prerequisites: ${[...remaining].join(", ")}`); break; }
         const estimatedPrice = item.price * multiplier ** order.length;
@@ -52,7 +53,13 @@ export function buildAugmentationPlan(ns, options = {}) {
     if (!Number.isFinite(multiplier) || multiplier < 1) throw new Error("price-multiplier must be finite and at least 1");
     if (!["hacking", "all"].includes(focus)) throw new Error("focus must be hacking or all");
     const { catalog, owned } = readAugmentationCatalog(ns);
-    const targets = target ? [target] : catalog.filter(a => focus === "all" ||
+    const targets = target ? [target] : catalog.filter(a => focus === "all" || augmentationPriority(a) > 0 ||
         Object.entries(a.stats).some(([key, value]) => key.startsWith("hacking") && value > 1)).map(a => a.name);
     return planAugmentations(catalog, owned, targets, multiplier);
+}
+
+function augmentationPriority(augmentation) {
+    if (augmentation.name === "The Red Pill") return 2;
+    if (augmentation.name === "Neuroreceptor Management Implant" || Number(augmentation.stats?.faction_rep) > 1) return 1;
+    return 0;
 }

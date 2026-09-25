@@ -32,6 +32,17 @@ test('old-reset savings is inactive and corrupt savings blocks spending', async 
     await assert.rejects(f.api.writeSavings(f.ns, NaN, 'bad'));
 });
 
+test('every catalog program can spend its own savings and releases the goal once owned', async () => {
+    for (const program of loadScript('lib/programs.js', new Clock()).progressionPrograms()) {
+        const f = savingsFixture();
+        await f.api.writeSavings(f.ns, program.cost / .9, 'Program', program.name);
+        assert.equal(f.api.readSavings(f.ns, program.name).floor, 0, program.name);
+        assert.equal(f.api.readSavings(f.ns, 'unrelated').floor, program.cost / .9, program.name);
+        f.ns.fileExists = name => name === program.name;
+        assert.equal(f.api.readSavings(f.ns).inactive, 'Goal purchased', program.name);
+    }
+});
+
 function scheduler() {
     return { type: 'jit-status', pid: 7, generatedAt: 1e6, income60: 1000, usedRam: 900, totalRam: 1000,
         maxBatchRate: 4, maxWorkers: 6000,
@@ -117,6 +128,50 @@ test('augmentation catalog selects the faction with the smallest rep gap and exc
     assert.equal(catalog.length, 1);
     assert.equal(catalog[0].faction, 'B');
     assert.equal(catalog[0].repGap, 0);
+});
+
+test('hacking plans include progression and reputation upgrades without buying unrelated stats', () => {
+    const api = loadScript('lib/augmentation-plan.js', new Clock());
+    const stats = { 'The Red Pill': {}, 'Neuroreceptor Management Implant': {},
+        Reputation: { faction_rep: 1.1 }, Hacking: { hacking: 1.1 }, Combat: { strength: 1.5 } };
+    const ns = { getPlayer: () => ({ factions: ['A'] }), singularity: {
+        getOwnedAugmentations: () => [], getFactionRep: () => 1e9,
+        getAugmentationsFromFaction: () => Object.keys(stats), getAugmentationRepReq: () => 100,
+        getAugmentationPrice: () => 100, getAugmentationPrereq: () => [], getAugmentationStats: name => stats[name] } };
+    const plan = api.buildAugmentationPlan(ns);
+    assert.equal(plan.next.name, 'The Red Pill');
+    assert.equal(plan.order.length, 4);
+    assert.equal(plan.order.at(-1).name, 'Hacking');
+    assert.equal(api.buildAugmentationPlan(ns, { target: 'Combat' }).order.length, 1);
+    assert.equal(api.buildAugmentationPlan(ns, { target: 'Combat' }).next.name, 'Combat');
+    assert.equal(api.buildAugmentationPlan(ns, { focus: 'all' }).order.length, 5);
+    ns.singularity.getAugmentationPrereq = name => name === 'The Red Pill' ? ['Hacking'] : [];
+    const prerequisites = api.buildAugmentationPlan(ns).order.map(item => item.name);
+    assert.ok(prerequisites.indexOf('Hacking') < prerequisites.indexOf('The Red Pill'));
+});
+
+test('doctor excludes locked and disabled services from fresh-player RAM requirements', () => {
+    const api = loadScript('doctor.js', new Clock());
+    const processes = ['supervisor.js', 'daemon.js', 'fleet-manager.js', 'contract-manager.js', 'progression-manager.js', 'go-bot.js']
+        .map((filename, index) => ({ filename, pid: index + 1, threads: 1, args: [] }));
+    const ns = { ps: () => processes, getResetInfo: () => ({ currentNode: 1, ownedSF: new Map() }),
+        fileExists: name => name !== 'DarkscapeNavigator.exe' && name !== 'Formulas.exe', read: () => '',
+        getScriptRam: file => /augmentation|progression-(purchase|backdoor)|stock|darknet/.test(file) ? 1000 : 2,
+        getServerMaxRam: () => 32, getServerUsedRam: () => 26, getPortHandle: () => new Port(), stock: {} };
+    let report = api.diagnoseAutomation(ns);
+    assert.equal(report.state, 'READY');
+    assert.ok(report.lines.some(line => line.includes('actor allowance: 0.00')));
+    processes[0].args = ['--profile', 'assist', '--augmentation-actions=false', '--progression-actions', false, '--stocks', false, '--darknet', false];
+    ns.getResetInfo = () => ({ currentNode: 4, ownedSF: new Map() });
+    // Disable the expensive advisory helper explicitly too.
+    processes[0].args.push('--augmentations', false);
+    report = api.diagnoseAutomation(ns);
+    assert.equal(report.state, 'READY');
+    assert.ok(report.lines.some(line => line.includes('stock-trader.js: DISABLED')));
+    processes[0].args = ['--profile', 'assist'];
+    report = api.diagnoseAutomation(ns);
+    assert.ok(report.issues.some(line => line.includes('Enabled services/helpers')));
+    assert.ok(report.lines.some(line => line.includes('actor allowance: 1000.00')));
 });
 
 test('telemetry is bounded, rate limited, ignores stale producers and survives restarts', async () => {

@@ -1,3 +1,5 @@
+import { isProgressionProgram } from "lib/programs.js";
+
 export const SAVINGS_FILE = "data/savings.json";
 
 // A durable goal is shared by all home spenders. No port or heartbeat is needed.
@@ -16,7 +18,7 @@ export function readSavings(ns, spendingTarget = "") {
             throw new Error("Invalid savings goal; clear or replace it with savings.js");
         }
         if (goal.epoch !== savingsEpoch(ns)) return { ...goal, floor: 0, inactive: "Goal belongs to a previous reset" };
-        const program = /^(BruteSSH|FTPCrack|relaySMTP|HTTPWorm|SQLInject)\.exe$/.test(goal.target);
+        const program = isProgressionProgram(goal.target);
         if ((goal.target === "TOR" && ns.hasTorRouter()) || (program && ns.fileExists(goal.target, "home"))) {
             return { ...goal, floor: 0, inactive: "Goal purchased" };
         }

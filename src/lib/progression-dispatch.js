@@ -1,5 +1,6 @@
 import { readSavings } from "lib/savings.js";
 import { PORTS } from "lib/ports.js";
+import { progressionPrograms } from "lib/programs.js";
 import { freshStatus, resetEpoch, singularityAvailable, actionKey, createRequest, terminalAction, validateRequest } from "lib/progression-protocol.js";
 
 const PURCHASE = "progression-purchase.js", BACKDOOR = "progression-backdoor.js";
@@ -75,6 +76,8 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 	const objectives = Array.isArray(plan.objectives) ? plan.objectives : [];
 	let blockedReason = "No runnable progression objectives";
 	for (const objective of objectives) {
+		// An adopted planner can still carry its previous feature flags.
+		if (objective.kind === "program" && !progressionPrograms({ darknet: cfg.darknet !== false }).some(program => program.name === objective.target)) continue;
 		if (!objective.ready) { blockedReason = `${objective.target}: ${objective.blocker}`; continue; }
 		const key = actionKey(objective), cached = state.blocked.get(key);
 		if (cached && now < cached.until && !(cached.reason === "insufficient-cash" && cash >= cached.requiredCash)) {

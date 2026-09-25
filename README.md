@@ -83,6 +83,13 @@ This allows installation after eight queued augmentations and permits the loop
 to join Aevum when eligible. The default installation threshold is five; city
 factions are skipped unless explicitly selected.
 
+Hands-off checks that threshold before its next purchase or faction join, even
+when expensive upgrades remain in the plan. It still waits for unrelated manual
+activity to finish. If an early faction offers fewer upgrades than the threshold,
+install manually or lower `--min-install`; the loop does not lower it for you.
+The default hacking plan also includes The Red Pill, faction reputation upgrades,
+and Neuroreceptor Management Implant.
+
 Already running? Follow [Changing settings](#changing-settings) instead of
 starting a second supervisor.
 
@@ -207,6 +214,11 @@ There is one shared savings goal at a time. Setting a new one replaces the old
 one. Participating fleet, stock, and progression services respect its cash floor;
 manual purchases and unrelated scripts do not. Saving does not itself buy an
 augmentation or trigger a reset.
+
+Before Singularity, `run savings.js --next-program` can protect cash for a manual
+program purchase. Add `--darknet false` to that command to skip the navigator.
+The supervisor's `--darknet false` also skips automatic navigator purchases and
+savings, while preserving any goal you set manually.
 
 ## Feature requirements and advanced options
 

@@ -289,9 +289,9 @@ function validateDaemonPorts(cfg) {
 	if (selected.some(port => !Number.isSafeInteger(port) || port <= 0) || new Set(selected).size !== 3) {
 		throw new Error("Worker events, fleet status and JIT control need distinct positive integer ports");
 	}
-	const reserved = [PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS, PORTS.PROGRESSION_STATUS, PORTS.PROGRESSION_ACTION, PORTS.STOCK_STATUS, PORTS.GO_STATUS];
+	const reserved = Object.values(PORTS).filter(port => ![PORTS.WORKER_EVENTS, PORTS.FLEET_STATUS, PORTS.JIT_CONTROL].includes(port));
 	if (selected.some(port => reserved.includes(port))) {
-		throw new Error("Daemon port conflicts with a reserved supervisor/contract/progression/stock/Go channel");
+		throw new Error("Daemon port conflicts with a reserved automation channel");
 	}
 }
 
@@ -668,16 +668,6 @@ function killWorkerScripts(
 			if (WORKERS.includes(process.filename)) ns.kill(process.pid);
 		}
 	}
-}
-
-function abortWorkers(
-	ns,
-	hosts
-) {
-	killWorkerScripts(
-		ns,
-		hosts
-	);
 }
 
 /* =========================================================
@@ -2043,13 +2033,6 @@ function* tuneTargetSteps(
 	};
 }
 
-function chooseSafePeriod(...args) {
-	const steps = chooseSafePeriodSteps(...args);
-	let step;
-	do { step = steps.next(); } while (!step.done);
-	return step.value;
-}
-
 function* chooseSafePeriodSteps(
 	times,
 	gap,
@@ -3196,13 +3179,6 @@ function untrackRunning(
 	}
 }
 
-function clearRunning(running) {
-	running.clear();
-	runningRamIndex(
-		running
-	).clear();
-}
-
 function runningRamForHost(
 	running,
 	host
@@ -4175,13 +4151,6 @@ function reapRunning(
 	}
 }
 
-function hasHarmfulRunning(running) {
-	for (const chunk of running.values()) {
-		if (chunk.phase === "H" || chunk.phase === "G") return true;
-	}
-	return false;
-}
-
 const reconcileCursors = new WeakMap();
 
 function reconcileRunning(ns, running, runningByChunk, limit) {
@@ -4965,79 +4934,5 @@ function cash(
 				? 0
 				: 2
 		)}`
-	);
-}
-
-function formatTime(
-	ms
-) {
-	const n =
-		Math.max(
-			0,
-			Number(ms) ||
-			0
-		);
-
-	if (
-		n <
-		1000
-	) {
-		return (
-			`${n.toFixed(0)}ms`
-		);
-	}
-
-	if (
-		n <
-		60_000
-	) {
-		return (
-			`${(
-				n /
-				1000
-			).toFixed(1)}s`
-		);
-	}
-
-	return (
-		`${(
-			n /
-			60_000
-		).toFixed(1)}m`
-	);
-}
-
-function bar(
-	value,
-	width = 18
-) {
-	const fraction =
-		Math.max(
-			0,
-			Math.min(
-				1,
-				Number(value) ||
-				0
-			)
-		);
-
-	const filled =
-		Math.round(
-			fraction *
-			width
-		);
-
-	return (
-		`[${"█".repeat(
-			filled
-		)}` +
-		`${"░".repeat(
-			width -
-			filled
-		)}] ` +
-		`${(
-			fraction *
-			100
-		).toFixed(1)}%`
 	);
 }

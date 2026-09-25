@@ -71,7 +71,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--augmentation-join-factions` / `--augmentation-work` / `--augmentation-donate` / `--augmentation-purchase` | `true` | Individual action gates within an enabled loop; donations also require favor and `Formulas.exe` |
 | `--augmentation-focus-work` | `false` | Whether automatic faction work takes focus |
 | `--auto-install` | `false` | Install queued augmentations and restart through `bootstrap.js`; requires augmentation actions |
-| `--min-install` | `5` | Minimum queued augmentations before automatic installation |
+| `--min-install` | `5` | Install at this queued count before another purchase/join; remaining catalog items do not delay it. Requires auto-install. |
 | `--savings` | `auto` | Automatic program/augmentation modes require Singularity; see [requirements above](#bitnode-source-file-and-api-requirements) |
 | `--save-amount` | unset | Set a fixed manual goal instead of automatic savings; no Singularity required |
 | `--save-label` / `--save-target` | `Savings` / empty | Label and optional allowed program purchase for a fixed goal |
@@ -79,7 +79,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--telemetry` | `true` | Record history and show a rolling one-hour summary |
 | `--home-reserve` | `8` | Minimum home RAM kept out of sharing for utilities and service starts |
 | `--share` | `true` | Fill spare home and unreserved remote RAM with elastic faction-share workers |
-| `--darknet` / `--darknet-phish` | `true` / `true` | Supervise resilient exploration, cache collection, RAM reclamation, and idle phishing after Darkscape unlock |
+| `--darknet` / `--darknet-phish` | `true` / `true` | Supervise exploration and idle phishing; disabling Darknet also skips automatic navigator purchases/savings |
 | `--darknet-phish-threads` / `--darknet-max-attempts` | `1024` / `600` | Bound per-server phishing workers and password attempts |
 | `--darknet-concurrency` / `--darknet-agent-threads` | `4` / `4` | Crack several visible neighbors concurrently and scale roaming calls when a server has spare RAM |
 | `--darknet-stasis` / `--darknet-stasis-depth` | `false` / `8` | Opt in to scarce stasis links on sufficiently deep servers |
@@ -210,8 +210,11 @@ run augmentation-planner.js --target "BitWire" --save-goal
 
 **Requires BN4 or SF4 level 1+ (Singularity).** Looks at joined factions, removes owned/purchased items,
 expands prerequisite chains, selects the faction with the smallest reputation gap,
-and suggests expensive eligible purchases first. It prefers reputation-ready
-purchases. Default focus is hacking; NeuroFlux is excluded. Missing prerequisites
+and prefers reputation-ready purchases. Within that group it prioritizes The Red
+Pill, faction reputation upgrades and Neuroreceptor Management Implant, then
+expensive eligible purchases. Those progression/support upgrades are included in
+the default hacking focus; `--target` remains an explicit override. NeuroFlux is
+excluded from automatic purchasing. Missing prerequisites
 from unjoined factions are reported. This is a useful ordering heuristic, not a
 global optimization over every faction, donation, or unlock.
 
@@ -227,6 +230,18 @@ interrupts unrelated player activity. City factions require
 `--augmentation-city-faction`, and installation additionally requires
 `--auto-install true` plus the queued-augmentation threshold. Donations retain
 enough cash for the planned purchase, the percentage reserve, and unrelated goals.
+
+Automatic installation checks `--min-install` before another purchase or faction
+join, even if the plan still contains items. Queued NeuroFlux levels purchased
+manually count toward the threshold. Small exhausted catalogs remain manual until
+you lower the threshold or unlock additional factions. Faction-work ETAs include
+the game's existing sharing bonus once, plus the actual/configured focus penalty;
+only an installed Neuroreceptor Management Implant removes that penalty.
+
+`progression-manager.js --darknet false` omits the navigator from its plan.
+The supervisor passes this flag and also filters adopted older plans before
+dispatch. For manual savings without Singularity, use
+`run savings.js --next-program --darknet false` to reserve for port programs only.
 
 ## Record and diagnose
 
@@ -250,6 +265,9 @@ analysis. Writes are bounded; errors appear on the supervisor dashboard.
 
 `doctor.js` inspects controller imports, script RAM, home headroom, duplicate
 services, port collisions, snapshot ownership, savings and API access. It changes
-nothing. The separate worker checker compares worker RAM on home and a chosen
+nothing. It reads the live supervisor's profile and explicit flags (observe
+defaults if no supervisor is running). RAM advice separates the core, enabled
+unlocked services, and the largest enabled helper; locked/disabled actors are not
+budgeted. The separate worker checker compares worker RAM on home and a chosen
 remote host. No Node test substitutes for the game's static RAM analyzer or a
 live soak after deployment.

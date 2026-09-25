@@ -5,7 +5,8 @@ import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashb
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
-import { pathFromHome } from "lib/progression-protocol.js";
+import { pathFromHome, singularityAvailable } from "lib/progression-protocol.js";
+import { serviceDefinition, supervisorFiles, PROFILE_DEFAULTS } from "lib/service-catalog.js";
 
 const HOME = "home";
 const SUPERVISOR = "supervisor.js";
@@ -139,18 +140,7 @@ export async function main(ns) {
 
 	validateSupervisorOptions(flags, cfg);
 	await saveSupervisorBootstrap(ns);
-	const required = [DAEMON, FLEET, STARTER_WORKER];
-	if (cfg.share) required.push(SHARE_WORKER);
-	if (cfg.contracts) required.push(CONTRACTS);
-	if (cfg.progression) required.push(PROGRESSION);
-	if (cfg.stocks) required.push(STOCK_TRADER);
-	if (cfg.go) required.push(GO_BOT);
-	required.push("lib/formulas.js");
-	if (cfg.darknet) required.push(DARKNET_MANAGER, "darknet-bootstrap.js", "darknet-agent.js", "darknet-phish.js", "darknet-stasis.js", "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js", "lib/darknet-solvers.js", "lib/darknet-formulas.js");
-	if (cfg.augmentationActions) required.push(AUGMENTATION_MANAGER, "bootstrap.js");
-	if (cfg.progression && cfg.progressionActions) {
-		required.push(PROGRESSION_PURCHASE, PROGRESSION_BACKDOOR);
-	}
+	const required = supervisorFiles(cfg);
 
 	for (const script of required) {
 		if (!ns.fileExists(script, HOME)) {
@@ -458,9 +448,7 @@ function createManagedServices(ns, cfg, daemonArgs) {
 		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", 32),
 		"--cloud-prefix", readArgument(managedDaemonArgs, "--cloud-prefix", "cloud")];
 	const fleetPort = Number(readArgument(existingFleet?.args ?? fleetArgs, "--port", PORTS.FLEET_STATUS));
-	const reserved = [PORTS.WORKER_EVENTS, PORTS.CONTRACT_STATUS, PORTS.JIT_STATUS,
-		PORTS.PROGRESSION_STATUS, PORTS.JIT_CONTROL, PORTS.PROGRESSION_ACTION, PORTS.STOCK_STATUS, PORTS.GO_STATUS,
-		PORTS.AUGMENTATION_STATUS, PORTS.DARKNET_STATUS, PORTS.DARKNET_EVENTS];
+	const reserved = Object.values(PORTS).filter(port => port !== PORTS.FLEET_STATUS);
 	if (!Number.isSafeInteger(fleetPort) || fleetPort <= 0 || reserved.includes(fleetPort)) {
 		throw new Error("Fleet status port must not collide with a reserved automation channel");
 	}
@@ -469,25 +457,27 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	}
 	// New dependents follow the adopted fleet; existing dependents retain their own args.
 	const launchDaemonArgs = existingDaemon ? daemonArgs : [...daemonArgs, "--fleet-port", fleetPort];
-	const services = [createService(DAEMON, launchDaemonArgs),
-		createService(FLEET, fleetArgs, "fleet-status", fleetPort)];
-	if (cfg.progression) services.push(createService(PROGRESSION, ["--fleet-port", fleetPort], "progression-status", PORTS.PROGRESSION_STATUS));
-	if (cfg.contracts) services.push(createService(CONTRACTS, ["--fleet-port", fleetPort], "contract-status", PORTS.CONTRACT_STATUS));
-	if (cfg.augmentationActions) services.push(createService(AUGMENTATION_MANAGER,
+	const managed = (name, args, port = null) => {
+		const definition = serviceDefinition(name);
+		return createService(name, args, definition.type, port ?? definition.port, definition.heartbeatRequired ?? true);
+	};
+	const services = [managed(DAEMON, launchDaemonArgs), managed(FLEET, fleetArgs, fleetPort)];
+	if (cfg.progression) services.push(managed(PROGRESSION, ["--fleet-port", fleetPort, "--darknet", cfg.darknet !== false]));
+	if (cfg.contracts) services.push(managed(CONTRACTS, ["--fleet-port", fleetPort]));
+	if (cfg.augmentationActions) services.push(managed(AUGMENTATION_MANAGER,
 		["--port", PORTS.AUGMENTATION_STATUS, "--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget,
 			"--cash-reserve", cfg.augmentationCashReserve, "--join-factions", cfg.augmentationJoinFactions,
 			"--city-faction", cfg.augmentationCityFaction, "--work", cfg.augmentationWork,
 			"--donate", cfg.augmentationDonate ?? true,
 			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
-			"--auto-install", cfg.autoInstall, "--min-install", cfg.minInstall],
-		"augmentation-status", PORTS.AUGMENTATION_STATUS));
-	if (cfg.stocks) services.push(createService(STOCK_TRADER,
-		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve], "stock-status", PORTS.STOCK_STATUS));
+			"--auto-install", cfg.autoInstall, "--min-install", cfg.minInstall]));
+	if (cfg.stocks) services.push(managed(STOCK_TRADER,
+		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve]));
 	// Go publishes status for the dashboard, but slow opponent API calls are allowed to wait indefinitely.
 	// Process liveness owns restart decisions; the generic heartbeat watchdog does not.
-	if (cfg.go) services.push(createService(GO_BOT,
-		["--port", PORTS.GO_STATUS, "--takeover", cfg.goTakeover ?? true], "go-status", PORTS.GO_STATUS, false));
-	if (cfg.darknet) services.push(createService(DARKNET_MANAGER,
+	if (cfg.go) services.push(managed(GO_BOT,
+		["--port", PORTS.GO_STATUS, "--takeover", cfg.goTakeover ?? true]));
+	if (cfg.darknet) services.push(managed(DARKNET_MANAGER,
 		["--port", PORTS.DARKNET_STATUS, "--event-port", PORTS.DARKNET_EVENTS,
 			"--phish", cfg.darknetPhish, "--phish-threads", cfg.darknetPhishThreads, "--max-attempts", cfg.darknetMaxAttempts,
 			"--concurrency", cfg.darknetConcurrency, "--agent-threads", cfg.darknetAgentThreads,
@@ -495,7 +485,7 @@ function createManagedServices(ns, cfg, daemonArgs) {
 			"--migrate", cfg.darknetMigrate, "--migrate-depth", cfg.darknetMigrateDepth,
 			"--promote-stock", cfg.darknetPromoteStock, "--stock-symbols", cfg.darknetStockSymbols,
 			"--freeze-unknown", cfg.darknetFreezeUnknown, "--freeze-depth", cfg.darknetFreezeDepth,
-			"--storm-seed", cfg.darknetStormSeed], "darknet-status", PORTS.DARKNET_STATUS));
+			"--storm-seed", cfg.darknetStormSeed]));
 	return services;
 }
 
@@ -1287,16 +1277,6 @@ function humanState(value) {
 	return value === "RUNNING" ? "Running normally" : value;
 }
 
-function humanSteal(value) {
-	return value.replace("| chance", "per batch | success chance");
-}
-
-function humanBatchRate(value) {
-	return value
-		.replace("/s actual", " batches/sec")
-		.replace("/s model", " batches/sec expected");
-}
-
 function humanHackStatus(value) {
 	return value
 		.replace(/^LIVE/, "Live")
@@ -1311,44 +1291,6 @@ function humanPipeline(value) {
 		.replace("running", "running workers")
 		.replace("queued", "queued jobs")
 		.replace("reservations", "RAM reservations");
-}
-
-function humanBatches(value) {
-	return value.replace("recovered", "safely recovered");
-}
-
-function humanAllocator(value) {
-	return value
-		.replace("skipped slots", "batch slots skipped")
-		.replace("worst streak", "longest streak");
-}
-
-function humanTiming(value) {
-	return value
-		.replace("avg", "average drift")
-		.replace("| max", "| worst drift")
-		.replace("| spacing", "| closest spacing");
-}
-
-function humanLoopLag(value) {
-	return value
-		.replace("max", "worst")
-		.replace("current", "current pipeline")
-		.replace("lifetime", "all-time");
-}
-
-function humanRecovery(value) {
-	return value
-		.replace("drain(s)", "safe pipeline drains")
-		.replace("cancelled H chunks", "cancelled hack jobs");
-}
-
-function humanPhaseCounters(value) {
-	return value
-		.replace(/H:/g, "hack ")
-		.replace(/W1:/g, "weaken-1 ")
-		.replace(/G:/g, "grow ")
-		.replace(/W2:/g, "weaken-2 ");
 }
 
 function humanCloudAction(value) {
@@ -1370,13 +1312,6 @@ function humanContractAction(value) {
 		.replace(/^manual /, "Manual contract: ")
 		.replace(/^quarantined /, "Skipped quarantined solver: ")
 		.replace(/^dry-run solved /, "Dry-run validated ");
-}
-
-function hasNonZeroCounters(value) {
-	if (!value) return false;
-	// Read values after the colon, not the digits in the phase names W1/W2.
-	const counters = [...value.matchAll(/(?:H|W1|G|W2):\s*(\d+)/g)];
-	return counters.some(match => Number(match[1]) > 0);
 }
 
 function formatAge(age) {
@@ -1423,8 +1358,7 @@ function asBoolean(value) {
 
 function augmentationAccess(ns) {
 	try {
-		const reset = ns.getResetInfo();
-		return reset.currentNode === 4 || Number(reset.ownedSF?.get?.(4)) > 0;
+		return singularityAvailable(ns.getResetInfo());
 	} catch { return false; }
 }
 
@@ -1461,11 +1395,7 @@ function applySupervisorProfile(flags, args = []) {
 		const token = String(value);
 		if (token.startsWith("--")) explicit.add(token.slice(2).split("=", 1)[0]);
 	}
-	const presets = {
-		observe: {},
-		assist: { "progression-actions": true, "augmentation-actions": true, "auto-install": false },
-		"hands-off": { "progression-actions": true, "augmentation-actions": true, "auto-install": true },
-	};
+	const presets = PROFILE_DEFAULTS;
 	if (!Object.hasOwn(presets, profile)) return flags;
 	for (const [key, value] of Object.entries(presets[profile])) if (!explicit.has(key)) flags[key] = value;
 	return flags;

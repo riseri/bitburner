@@ -20,7 +20,7 @@ function fixture() {
         run:(filename,threads,...args)=>{const pid=100+launched.length; launched.push({filename,threads,args,pid}); processes.set(pid,{pid,filename,args,threads}); return pid;},
         kill:()=>assert.fail('actions must not kill income workers'),
         singularity:{isBusy:()=>world.busy, getCurrentServer:()=>world.current,
-            getDarkwebProgramCost:name=>protocol.progressionPrograms().find(p=>p.name===name)?.cost,
+            getDarkwebProgramCost:name=>loadScript('lib/programs.js', new Clock()).progressionPrograms().find(p=>p.name===name)?.cost,
             purchaseTor:()=>{purchases.push('TOR');world.tor=true;world.cash-=200000;return true;},
             purchaseProgram:name=>{purchases.push(name);world.owned.add(name);return true;},
             connect:host=>{connections.push(host); if (parents[host]!==world.current && parents[world.current]!==host) return false; world.current=host;return true;},
@@ -67,6 +67,29 @@ test('planner exposes ready backdoor independently of an unaffordable program', 
     f.plan.objectives=objectives;f.world.cash=1e6;
     f.dispatch.tickProgressionActions(f.ns,f.dispatch.createActionState(),f.plan,f.cfg);
     assert.equal(f.launched[0].filename,'progression-backdoor.js');
+});
+
+test('Darknet program purchase succeeds at its savings goal instead of needing a second cash floor', async () => {
+    const f = fixture();
+    f.world.cash = 50e6 / .9;
+    f.ns.read = () => JSON.stringify({ version: 1, amount: f.world.cash, label: 'Navigator', target: 'DarkscapeNavigator.exe', epoch: f.protocol.resetEpoch(f.reset) });
+    f.plan.objectives = [{ kind: 'program', target: 'DarkscapeNavigator.exe', ready: true, costEstimate: 50e6 }];
+    f.dispatch.tickProgressionActions(f.ns, f.dispatch.createActionState(), f.plan, f.cfg);
+    assert.equal(f.launched.length, 1);
+    const launched = f.launched[0];
+    await loadScript(launched.filename, f.clock).main({ ...f.ns, pid: launched.pid, args: launched.args });
+    assert.deepEqual(f.purchases, ['DarkscapeNavigator.exe']);
+    assert.equal(f.ports.get(14).peek().state, 'succeeded');
+});
+
+test('disabled Darknet is omitted from new plans and rejected from an adopted old plan', () => {
+    const f = fixture();
+    const status = f.manager.buildStatus(f.ns, f.ports.get(19).peek(), { darknet: false });
+    assert.ok(status.programs.every(program => program.name !== 'DarkscapeNavigator.exe'));
+    f.cfg.darknet = false;
+    f.plan.objectives = [{ kind: 'program', target: 'DarkscapeNavigator.exe', ready: true, costEstimate: 50e6 }];
+    f.dispatch.tickProgressionActions(f.ns, f.dispatch.createActionState(), f.plan, f.cfg);
+    assert.equal(f.launched.length, 0);
 });
 
 for (const condition of ['stale','future','wrong-reset','locked','disabled','stale-plan-fresh-heartbeat']) {

@@ -42,6 +42,11 @@ export async function tickAugmentationLoop(ns, cfg, state) {
     const reset = ns.getResetInfo();
     if (!singularityAvailable(reset)) return { state: "BLOCKED", phase: "UNLOCK", recommendation: singularityRecommendation(), queued: 0 };
 
+    // A threshold is a reset decision, independent of the remaining shopping list.
+    // Hands-off installs before joining another faction or buying another upgrade.
+    const queued = queuedCount(ns);
+    if (cfg.autoInstall && queued >= cfg.minInstall) return handleInstallation(ns, cfg, state, null, queued);
+
     const player = ns.getPlayer(), invitations = ns.singularity.checkFactionInvitations();
     if (cfg.joinFactions) {
         const faction = chooseInvitation(invitations, player.factions, cfg.cityFaction);
@@ -58,29 +63,35 @@ export async function tickAugmentationLoop(ns, cfg, state) {
     const next = plan.next;
     if (next) return handleNextAugmentation(ns, cfg, state, plan, next);
 
-    const queued = queuedCount(ns);
+    return handleInstallation(ns, cfg, state, plan, queued);
+}
+
+async function handleInstallation(ns, cfg, state, plan, queued) {
+    if (queued < cfg.minInstall) return { state: "WAITING", phase: "INSTALL", plan, queued,
+        recommendation: queued ? `${queued}/${cfg.minInstall} augmentations queued; unlock another faction, install manually, or lower --min-install to ${queued}`
+            : "No matching unowned augmentations from joined factions; unlock or join another faction" };
+    if (!cfg.autoInstall) return { state: "READY", phase: "INSTALL", plan, queued,
+        recommendation: `${queued} augmentations queued; install manually or enable --auto-install true` };
+    if (!ns.fileExists(BOOTSTRAP, HOME)) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+        recommendation: `Missing ${BOOTSTRAP}; automatic reset is unsafe` };
     let busy = ns.singularity.isBusy();
     let current = ns.singularity.getCurrentWork();
     if (current && ownedCurrentWork(current, state)) {
-        ns.singularity.stopAction();
+        if (!ns.singularity.stopAction()) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+            recommendation: "Could not stop owned faction work; retrying before installation" };
         state.ownedWork = null;
-        current = null;
-        busy = false;
+        current = ns.singularity.getCurrentWork();
+        busy = ns.singularity.isBusy();
     }
-    if (queued < cfg.minInstall) return { state: "WAITING", phase: "INSTALL", plan, queued,
-        recommendation: queued ? `${queued}/${cfg.minInstall} augmentations queued; acquire more before installing`
-            : "No matching unowned augmentations from joined factions; unlock or join another faction" };
-    if (!cfg.autoInstall) return { state: "READY", phase: "INSTALL", plan, queued,
-        recommendation: `${queued} augmentations queued; restart with --auto-install true to install automatically` };
-    if (!ns.fileExists(BOOTSTRAP, HOME)) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
-        recommendation: `Missing ${BOOTSTRAP}; automatic reset is unsafe` };
     if (busy && !current) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: "Wait for the current Singularity action to finish before automatic installation" };
     if (current && !ownedCurrentWork(current, state)) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: `Finish or stop current ${current.type || "player"} activity before automatic installation` };
     state.ownedWork = null;
     await saveState(ns, state);
-    ns.singularity.installAugmentations(BOOTSTRAP);
+    const installed = ns.singularity.installAugmentations(BOOTSTRAP);
+    if (installed === false) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+        recommendation: "Augmentation installation failed; inspect the game log before retrying" };
     return { state: "RESETTING", phase: "INSTALL", action: `Installing ${queued} augmentations`, recommendation: "", queued };
 }
 
@@ -97,7 +108,7 @@ function handleNextAugmentation(ns, cfg, state, plan, next) {
 		const types = ns.singularity.getFactionWorkTypes(next.faction);
 		const analysis = factionWorkAnalysis(ns, next.faction, types, ns.getPlayer());
 		const workType = analysis?.workType || chooseFactionWorkType(types, ns.getPlayer(), cfg.focus);
-		const formulaStatus = workFormulaStatus(ns, next, analysis);
+		const formulaStatus = workFormulaStatus(ns, next, analysis, cfg, current);
 		const eta = formulaStatus.etaMs ? `; ETA ${formatDuration(formulaStatus.etaMs)}` : "";
 		if (!cfg.work) return { state: "WAITING", phase: "REPUTATION", plan, queued, ...formulaStatus,
 			recommendation: `Earn ${Math.ceil(next.repGap)} reputation with ${next.faction} for ${next.name}${eta}` };
@@ -150,10 +161,15 @@ function affordableDonation(ns, cfg, next) {
     return cash - amount - next.price >= floor ? amount : 0;
 }
 
-function workFormulaStatus(ns, next, analysis) {
+function workFormulaStatus(ns, next, analysis, cfg, current) {
 	if (!analysis) return { formulas: false };
-	const rate = Number(analysis.reputationPerSecond) || 0;
+	const focused = matchingFactionWork(current, next.faction, analysis.workType)
+		? ns.singularity.isFocused() : cfg.focusWork;
+	const ignoresFocus = ns.singularity.getOwnedAugmentations(false).includes("Neuroreceptor Management Implant");
+	const focusMultiplier = focused || ignoresFocus ? 1 : 0.8;
+	const rate = (Number(analysis.reputationPerSecond) || 0) * focusMultiplier;
 	return { formulas: true, workType: analysis.workType, reputationPerSecond: rate,
+		focusMultiplier,
 		etaMs: rate > 0 ? next.repGap / rate * 1000 : null,
 		sharePower: analysis.sharePower,
 		projectedFavor: formulaFavorProjection(ns, next.faction) };

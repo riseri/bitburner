@@ -317,6 +317,15 @@ test('reserved automation channels are rejected by fleet and daemon configuratio
     for(const config of [{port:14,fleetPort:19,controlPort:15},{port:20,fleetPort:14,controlPort:15},{port:20,fleetPort:19,controlPort:14},{port:13,fleetPort:19,controlPort:15},{port:12,fleetPort:19,controlPort:15}]) {
         assert.throws(()=>daemon.validateDaemonPorts(config),/reserved/);
     }
+    const { PORTS } = loadScript('lib/ports.js', clock);
+    for (const port of Object.values(PORTS)) {
+        if (port !== PORTS.FLEET_STATUS) assert.throws(() => api.createManagedServices({ ps: () => [
+            { filename: 'fleet-manager.js', pid: 9, args: ['--port', port] }] }, {}, []), /reserved/);
+        if ([PORTS.WORKER_EVENTS, PORTS.FLEET_STATUS, PORTS.JIT_CONTROL].includes(port)) continue;
+        for (const key of ['port', 'fleetPort', 'controlPort']) {
+            assert.throws(() => daemon.validateDaemonPorts({ port: 20, fleetPort: 19, controlPort: 15, [key]: port }), /reserved/);
+        }
+    }
 });
 
 test('supervisor yields only the fleet manager when that RAM can restore a missing daemon', () => {

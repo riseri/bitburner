@@ -109,6 +109,23 @@ test('automatic savings moves from completed programs into the enabled augmentat
     assert.equal(goal.target,'augmentation:BitWire'); assert.equal(goal.amount,1000);
 });
 
+test('disabling Darknet advances a supervisor goal to augmentations but preserves manual goals', async () => {
+    const f = fixture();
+    f.ns.hasTorRouter = () => true;
+    f.ns.fileExists = name => name.endsWith('.exe') && name !== 'DarkscapeNavigator.exe';
+    const cfg = { savingsMode: 'auto', progression: true, progressionActions: true, progressionCashReserve: .1,
+        augmentationActions: true, augmentationCashReserve: .1, darknet: true };
+    const plan = { errors: [], next: { name: 'BitWire', price: 900 } };
+    await f.api.updateSupervisorSavings(f.ns, cfg, plan);
+    assert.equal(JSON.parse(f.files.get('data/savings.json')).target, 'DarkscapeNavigator.exe');
+    cfg.darknet = false;
+    await f.api.updateSupervisorSavings(f.ns, cfg, plan);
+    assert.equal(JSON.parse(f.files.get('data/savings.json')).target, 'augmentation:BitWire');
+    await loadScript('lib/savings.js', f.clock).writeSavings(f.ns, 1e9, 'Manual navigator fund', 'DarkscapeNavigator.exe');
+    await f.api.updateSupervisorSavings(f.ns, cfg, plan);
+    assert.equal(JSON.parse(f.files.get('data/savings.json')).label, 'Manual navigator fund');
+});
+
 test('one supervisor command starts diagnostics, services, automatic savings, and then the planner', async () => {
     const f = fixture(), supervisor = loadScript('supervisor.js', f.clock);
     const ports = new Map();

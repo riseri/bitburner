@@ -60,51 +60,38 @@ class Port {
     write(value) { if (!this.tryWrite(value)) { this.items.shift(); this.items.push(value); } }
 }
 
+// Resolve the real named imports so tests cannot silently invent missing exports.
+// Private functions remain exposed for the focused state-machine tests.
 function loadScript(file, clock, extra = {}) {
-	if (['daemon.js', 'augmentation-manager.js', 'lib/background-prep.js'].includes(file)) {
-		extra = { ...loadScript('lib/formulas.js', clock), ...extra };
-	}
-	if (file === 'darknet-agent.js') extra = { ...loadScript('lib/darknet-formulas.js', clock), ...extra };
-    if (['progression-manager.js', 'augmentation-manager.js'].includes(file)) extra = { ...loadScript('lib/augmentation-loop.js', clock), ...extra };
-    if (file === 'darknet-agent.js') extra = { ...loadScript('lib/darknet-solvers.js', clock), ...extra };
-    if (file === 'augmentation-manager.js') extra = { ...loadScript('lib/augmentation-plan.js', clock), ...extra };
-    if (file === 'lib/supervised-utilities.js') extra = { ...loadScript('lib/savings.js', clock), ...loadScript('lib/progression-protocol.js', clock), ...extra };
-    if (file === 'lib/utility-report.js') extra = { ...loadScript('lib/progression-protocol.js', clock), ...extra };
-    if (['doctor.js', 'augmentation-planner.js'].includes(file)) extra = { ...loadScript('lib/utility-report.js', clock), ...extra };
-    if (file === 'supervisor.js') extra = { ...loadScript('lib/supervised-utilities.js', clock), ...extra };
-    if (['supervisor.js', 'fleet-manager.js', 'stock-trader.js', 'progression-purchase.js', 'lib/progression-dispatch.js', 'savings.js', 'doctor.js', 'augmentation-planner.js', 'augmentation-manager.js'].includes(file)) {
-        extra = { ...loadScript('lib/savings.js', clock), ...extra };
+    const modules = new Map();
+    function load(filename) {
+        if (modules.has(filename)) return modules.get(filename);
+        const original = fs.readFileSync(path.join(root, 'src', filename), 'utf8');
+        const imports = {};
+        const source = original.replace(/^import\s*\{([^}]+)\}\s*from\s*["']([^"']+)["'];[ \t]*\r?$/gm,
+            (_statement, bindings, dependency) => {
+                const loaded = load(dependency);
+                for (const binding of bindings.split(',').map(s => s.trim()).filter(Boolean)) {
+                    const [name, local = name] = binding.split(/\s+as\s+/);
+                    if (!Object.hasOwn(loaded.exports, name)) throw new Error(filename + ': missing export ' + name + ' from ' + dependency);
+                    imports[local] = loaded.exports[name];
+                }
+                return '';
+            }).replace(/\bexport (?=(?:async )?function|const )/g, '');
+        const names = [...source.matchAll(/^(?:async )?function\*? (\w+)\s*\(/gm)].map(m => m[1]);
+        const exported = [...original.matchAll(/^export (?:(?:async )?function\*? |const )(\w+)/gm)].map(m => m[1]);
+        const sandbox = {
+            console, Date: class extends Date { static now() { return clock.now; } },
+            setTimeout: (fn, ms) => clock.timer(ms, fn),
+            ...imports, ...extra,
+        };
+        vm.createContext(sandbox);
+        new vm.Script(source + '\n;globalThis.result={api:{' + [...new Set([...names, ...exported])].join(',') +
+            '},exports:{' + exported.join(',') + '}};', { filename }).runInContext(sandbox);
+        modules.set(filename, sandbox.result);
+        return sandbox.result;
     }
-    if (file === 'fleet-manager.js') extra = { ...loadScript('lib/fleet-economics.js', clock), ...extra };
-    if (['supervisor.js', 'telemetry.js'].includes(file)) extra = { ...loadScript('lib/telemetry.js', clock), ...extra };
-    if (file === 'augmentation-planner.js') extra = { ...loadScript('lib/augmentation-plan.js', clock), ...extra };
-    if (['daemon.js', 'supervisor.js', 'contract-manager.js', 'stock-trader.js'].includes(file)) {
-        extra = { ...loadScript('lib/dashboard.js', clock), ...extra };
-    }
-    if (['daemon.js', 'lib/target-pipelines.js'].includes(file) && fs.existsSync(path.join(root, 'src/lib/background-prep.js'))) {
-        extra = { ...loadScript('lib/background-prep.js', clock), ...extra };
-    }
-    if (['supervisor.js', 'progression-manager.js', 'progression-purchase.js', 'augmentation-manager.js', 'darknet-manager.js',
-        'progression-backdoor.js', 'lib/progression-dispatch.js'].includes(file)) {
-        extra = { ...loadScript('lib/progression-protocol.js', clock), ...extra };
-    }
-    if (file === 'supervisor.js') {
-        extra = { ...loadScript('lib/service-lifecycle.js', clock), ...loadScript('lib/progression-dispatch.js', clock), ...extra };
-    }
-    if (file === 'daemon.js') extra = { ...loadScript('lib/target-pipelines.js', clock), ...extra };
-    const source = fs.readFileSync(path.join(root, 'src', file), 'utf8')
-        .replace(/^import\s[\s\S]*?;[ \t]*\r?$/gm, '')
-        .replace(/\bexport (?=(?:async )?function|const )/g, '');
-    const names = [...source.matchAll(/^(?:async )?function\*? (\w+)\s*\(/gm)].map(m => m[1]);
-    const sandbox = {
-        console, Date: class extends Date { static now() { return clock.now; } },
-        setTimeout: (fn, ms) => clock.timer(ms, fn),
-        PORTS: { WORKER_EVENTS: 20, FLEET_STATUS: 19, CONTRACT_STATUS: 18, JIT_STATUS: 17, PROGRESSION_STATUS: 16, JIT_CONTROL: 15, PROGRESSION_ACTION: 14, STOCK_STATUS: 13, GO_STATUS: 12, AUGMENTATION_STATUS: 11, DARKNET_STATUS: 10, DARKNET_EVENTS: 9 },
-        ...extra,
-    };
-    vm.createContext(sandbox);
-    new vm.Script(`${source}\n;globalThis.api={${names.join(',')}};`, { filename: file }).runInContext(sandbox);
-    return sandbox.api;
+    return load(file).api;
 }
 
 module.exports = { Clock, Port, loadScript, root };

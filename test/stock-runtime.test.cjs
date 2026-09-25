@@ -2,22 +2,8 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
-const vm=require('node:vm');
-
-function load(){
-  const files=['lib/savings.js','lib/ports.js','lib/dashboard.js','lib/stock-strategy.js','stock-trader.js'];
-  let all='';
-  for(const item of files){
-    all+=fs.readFileSync(path.join(__dirname,'../src',item),'utf8')
-      .replace(/^import\s[\s\S]*?;[ \t]*\r?$/gm,'')
-      .replace(/\bexport (?=(?:async )?function|const )/g,'')+'\n';
-  }
-  const names=[...all.matchAll(/^(?:async )?function (\w+)\s*\(/gm)].map(m=>m[1]);
-  const sandbox={Date};vm.createContext(sandbox);
-  new vm.Script(all+`\n;globalThis.api={${names.join(',')}}`).runInContext(sandbox);
-  return sandbox.api;
-}
-const api=load();
+const {loadScript}=require('./helpers.cjs');
+const api=loadScript('stock-trader.js',{get now(){return Date.now();}});
 
 test('shared savings protects cash from new stock entries without preventing exits', async () => {
   const f=fixture({cash:1e9,stocks:{AAA:{forecast:0.50,volatility:0.04,ask:100,bid:99,maxShares:5e9,pos:[1e6,80,0,0]}}});

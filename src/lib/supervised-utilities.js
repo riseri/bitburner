@@ -1,5 +1,6 @@
 import { readSavings, writeSavings } from "lib/savings.js";
-import { progressionPrograms, resetEpoch } from "lib/progression-protocol.js";
+import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
+import { progressionPrograms } from "lib/programs.js";
 
 export function createUtilityJob(script, reportFile, type, args = [], interval = 60000) {
     return { script, reportFile, type, args: ["--report", true, ...args], interval,
@@ -63,8 +64,8 @@ export async function updateSupervisorSavings(ns, cfg, plan) {
     let desired = null;
     if (cfg.savingsMode === "auto" || cfg.savingsMode === "programs") {
         const reset = ns.getResetInfo();
-        if (reset.currentNode !== 4 && !(Number(reset.ownedSF?.get?.(4)) > 0)) { cfg.savingsStatus = "Program savings waits for Singularity"; return; }
-        const program = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms().find(p => !ns.fileExists(p.name, "home"));
+        if (!singularityAvailable(reset)) { cfg.savingsStatus = "Manual unlock: run savings.js --next-program to protect cash"; return; }
+        const program = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms({ darknet: cfg.darknet !== false }).find(p => !ns.fileExists(p.name, "home"));
         if (program && (!cfg.progression || !cfg.progressionActions)) { cfg.savingsStatus = "Program savings waits for progression actions"; return; }
         if (program) {
             desired = { amount: program.cost / (1 - cfg.progressionCashReserve), label: `Buy ${program.name}`, target: program.name };

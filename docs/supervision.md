@@ -6,7 +6,9 @@ thread count. An existing daemon is not replaced just to apply new CLI flags.
 Duplicate services are shown as `CONFLICT`; they are not broadly killed.
 Only one supervisor may run on `home`. Newly launched dependents inherit the
 adopted fleet status port. Conflicting existing daemon/fleet port settings fail
-startup rather than silently rewriting either process.
+startup rather than silently rewriting either process. Service status channels,
+heartbeat policies, profiles and file requirements are shared with diagnostics
+through `lib/service-catalog.js`.
 
 ## Service lifecycle
 
@@ -52,7 +54,8 @@ purchase or backdoor no longer hides the following objective.
 
 The daemon is checked for process existence only. Preparation, recovery and slow
 log refreshes are not heartbeat failures. Its bootstrap now leaves an existing
-fleet manager and its budget flags alone. Its startup port validation reserves every supervisor-owned status/action channel, including IPvGO.
+fleet manager and its budget flags alone. Its startup port validation derives
+reserved channels from `PORTS`, including augmentation and Darknet channels.
 Allocation, timing, event consumption and background preparation are unchanged.
 
 Fleet discovery and contract scanning publish lightweight heartbeats while yielding
@@ -87,7 +90,7 @@ launch bounded phishing workers. A lost or moved server therefore affects only
 its local disposable processes; surviving neighbors rediscover it.
 
 `Formulas.exe` is a live capability rather than a startup requirement. The JIT
-scheduler drains and retunes individual lanes when hacking formulas become
+scheduler tunes replacement plans in the background when hacking formulas become
 available, while background admission, Darknet agents, and the augmentation loop
 re-evaluate formulas during their normal ticks. Every formulas call is guarded and
 falls back to the existing approximation if the file or API is unavailable.
