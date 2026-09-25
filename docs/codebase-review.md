@@ -13,8 +13,10 @@ and service metadata now have shared catalogs. The test loader resolves actual
 named imports, with a check covering every source module.
 
 The 8 GB starter, no-Formulas fallback, worker ownership, scheduler recovery and
-active log compatibility remain in place. Remote starter expansion, home-RAM
-purchasing, a larger scheduler/display split, and new sleeve/gang services remain
+active log compatibility remain in place. A subsequent starter improvement adds
+a remote worker pool, safe handoff and a fix for the sharing setting's static RAM
+charge; see `docs/supervision.md`. Home-RAM purchasing, a larger scheduler/display
+split, and new sleeve/gang services remain
 future feature work; they are not required to correct the findings in this pass.
 
 The hacking foundation is worth keeping. It already supports operation without Formulas, live adoption of Formulas, limited RAM, shared scheduling, recovery, and augmentation resets. The highest-value work is correcting progression policy and reducing duplicated orchestration. A scheduler rewrite would introduce more risk than the identified cleanup requires.
@@ -94,11 +96,11 @@ The project contains 60 source JavaScript files and approximately 13.3k lines. `
 ## Fresh-player improvements to preserve and add
 
 - Keep the 8 GB starter, no-Formulas model, capability gating, manual controls, separate small workers, and one-shot Singularity actors. They remain necessary even after your own unlocks improve.
-- Add a middle startup tier that can use zero-port remote hosts before the full resident stack fits on home. Currently `runStarterMode` waits for supervisor + daemon + fleet RAM and runs only a home n00dles worker in the meantime. Gate each tier by measured script RAM and available capacity.
+- Implemented in the subsequent starter pass: use free zero-port remote hosts before the full resident stack fits on home, expand with owned port-opening programs, and reclaim owned workers before handoff. Admission uses measured script RAM and available capacity.
 - Add actionable manual program/home-RAM advice before SF4. Automatic program saving currently deliberately waits for Singularity actions; a fresh player should still have an easy way to protect cash for a manual unlock. Keep that opt-in or explicitly visible, since it competes with fleet growth.
 - Once Singularity is available, consider a small home-RAM purchase actor with a budget and a concrete objective: fit the next useful service. There is currently no home-RAM upgrade automation. Avoid buying home cores solely for hacking while the scheduler excludes home workers.
 - Keep observe as the default and clearly explain that fleet/stock services may spend. Optional features should neither become required dependencies of a minimal install nor consume unlock savings when disabled.
-- Verify actual game RAM at 8/16/32/64 GB, without SF4/SF5 and with Formulas present. The starter test currently supplies fixed costs rather than measuring Netscript's analyzer.
+- The subsequent starter pass ran the upstream Netscript analyzer locally: supervisor 7.70 GB, starter worker 2.50 GB. Live game verification at 8/16/32/64 GB, without SF4/SF5 and with Formulas present, remains useful; simulation fixtures cannot reproduce every game-version difference.
 
 ## Applying this to your progression
 
@@ -116,8 +118,10 @@ SF4.1 already grants Singularity access outside BN4. Levels 2 and 3 reduce its R
 
 ## Validation and limits
 
+- Starter follow-up: the full run passed 476 of 477 tests; the remaining test used an old fixture without `ns.scan`. After correcting that fixture, all 10 tests in its group passed. All 477 tests are therefore covered across those runs. Eight new tests cover remote allocation, program unlocks, ownership, retry/handoff behavior, the sharing RAM regression, and a shared-target income simulation.
+- The official upstream RAM calculator was run locally against the source graph and reports supervisor 7.70 GB and starter worker 2.50 GB. This is source analysis, not a live-game measurement.
 - Follow-up implementation: `npm test` passed all 469 tests, including syntax/import checks and deterministic scheduler simulations. The Node test runner required subprocess access outside the sandbox.
 - Regression coverage includes installation with an unfinished plan, manual-action protection, queued NeuroFlux levels, progression/support augmentation selection, navigator savings, disabled features, sharing/favor/focus calculations, reserved ports, and fresh-player diagnostics.
 - The stock runtime tests now use the shared import-aware loader, replacing a second hardcoded dependency list.
 - Baseline assessment: all 457 existing tests passed across two runs; temporary reproductions exposed the policy and formula gaps that those tests did not cover.
-- No live game execution or Netscript RAM measurement was performed. Mechanical comparisons use official upstream `dev` source; deployment should check the installed game's version and actual script RAM.
+- No live game execution was performed. Mechanical comparisons use official upstream `dev` source; deployment should check the installed game's version and actual script RAM.

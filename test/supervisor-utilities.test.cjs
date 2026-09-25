@@ -128,6 +128,7 @@ test('disabling Darknet advances a supervisor goal to augmentations but preserve
 
 test('one supervisor command starts diagnostics, services, automatic savings, and then the planner', async () => {
     const f = fixture(), supervisor = loadScript('supervisor.js', f.clock);
+    f.ns.scan = () => [];
     const ports = new Map();
     f.ns.getPortHandle = n => { if (!ports.has(n)) ports.set(n, new Port()); return ports.get(n); };
     f.ns.flags = pairs => ({ ...Object.fromEntries(pairs), 'progression-actions': true, 'cloud-payback': 900 });

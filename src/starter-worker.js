@@ -1,4 +1,4 @@
-/** Minimal early-game worker; supervisor.js scales its thread count with home RAM. @param {NS} ns */
+/** Early-game worker; supervisor.js fills free home and rooted network RAM. @param {NS} ns */
 export async function main(ns) {
 	const target = String(ns.args[0] || "n00dles");
 	ns.disableLog("ALL");

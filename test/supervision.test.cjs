@@ -354,19 +354,19 @@ test('stale Go terminal status from a dead reset process is not displayed as cur
     assert.equal(api.ownedServiceStatus({ps:()=>[]},service,{...stale,producerPid:42}).producerPid,42);
 });
 
-test('8 GB starter mode scales its worker and graduates automatically at core capacity', async () => {
+test('starter scales home workers as RAM grows and graduates automatically at core capacity', async () => {
     const api=loadScript('supervisor.js',new Clock()), processes=new Map(),launched=[],killed=[],logs=[];
-    let homeRam=8, nextPid=10, rooted=false;
-    const costs={'supervisor.js':5.05,'daemon.js':15.75,'fleet-manager.js':10.25,'starter-worker.js':2.4};
-    const ns={getServerMaxRam:()=>homeRam,getScriptRam:file=>costs[file]||0,
+    let homeRam=8, nextPid=10, rooted=false, cycle=0;
+    const costs={'supervisor.js':7.7,'daemon.js':15.75,'fleet-manager.js':10.25,'starter-worker.js':2.5};
+    const ns={scan:()=>[],fileExists:()=>false,getServerMaxRam:()=>homeRam,getScriptRam:file=>costs[file]||0,
         hasRootAccess:()=>rooted,nuke:()=>{rooted=true;},
-        getServerUsedRam:()=>5.05+[...processes.values()].reduce((sum,p)=>sum+2.4*p.threads,0),
+        getServerUsedRam:()=>7.7+[...processes.values()].reduce((sum,p)=>sum+2.5*p.threads,0),
         ps:()=>[...processes.values()],run:(filename,threads,...args)=>{assert.equal(rooted,true);const p={pid:nextPid++,filename,threads,args};processes.set(p.pid,p);launched.push(p);return p.pid;},
         kill:pid=>{killed.push(pid);return processes.delete(pid);},clearLog(){},print:text=>logs.push(text),tprint:text=>logs.push(text),
-        sleep:async()=>{homeRam=processes.values().next().value?.threads===1?16:32;}};
+        sleep:async()=>{homeRam=[16,32,64][cycle++];if(!homeRam)throw Error('failed to graduate');}};
     await api.runStarterMode(ns);
     assert.deepEqual(launched.map(p=>[p.filename,p.threads,p.args[0]]),[
-        ['starter-worker.js',1,'n00dles'],['starter-worker.js',4,'n00dles']]);
+        ['starter-worker.js',3,'n00dles'],['starter-worker.js',9,'n00dles']]);
     assert.equal(killed.length,2);
     assert.equal(rooted,true);
     assert.ok(logs.some(line=>String(line).includes('STARTER MODE')));
@@ -375,12 +375,12 @@ test('8 GB starter mode scales its worker and graduates automatically at core ca
 test('starter mode waits for root before launching a worker', async () => {
     const api=loadScript('supervisor.js',new Clock()), launches=[],logs=[];
     let rooted=false, cycles=0;
-    const ns={getServerMaxRam:()=>8,getScriptRam:file=>({'supervisor.js':5,'daemon.js':16,'fleet-manager.js':10,'starter-worker.js':2.4})[file]||0,
+    const ns={scan:()=>[],fileExists:()=>false,getServerMaxRam:()=>8,getScriptRam:file=>({'supervisor.js':5,'daemon.js':16,'fleet-manager.js':10,'starter-worker.js':2.4})[file]||0,
         getServerUsedRam:()=>5,ps:()=>[],hasRootAccess:()=>rooted,nuke:()=>{if(cycles===0)throw Error('not yet');rooted=true;},
         run:(...args)=>{launches.push(args);return 11;},clearLog(){},print:line=>logs.push(line),
         sleep:async()=>{cycles++;if(cycles===2)throw Error('end fixture');}};
     await assert.rejects(api.runStarterMode(ns),/end fixture/);
-    assert.deepEqual(launches,[['starter-worker.js',1,'n00dles']]);
+    assert.deepEqual(launches,[['starter-worker.js',1,'n00dles','supervisor-starter-v1']]);
     assert.ok(logs.some(line=>String(line).includes('WAITING FOR ROOT')));
 });
 

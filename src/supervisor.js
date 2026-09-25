@@ -7,6 +7,7 @@ import { createService, tickService, serviceLabel, readArgument } from "lib/serv
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
 import { pathFromHome, singularityAvailable } from "lib/progression-protocol.js";
 import { serviceDefinition, supervisorFiles, PROFILE_DEFAULTS } from "lib/service-catalog.js";
+import { starterHosts, starterWorkers, stopStarterPool, tickStarterPool } from "lib/starter-pool.js";
 
 const HOME = "home";
 const SUPERVISOR = "supervisor.js";
@@ -110,7 +111,8 @@ export async function main(ns) {
 		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
 		cloudRoi: asBoolean(flags["cloud-roi"]),
 		cloudPayback: Number(flags["cloud-payback"]),
-		share: asBoolean(flags.share),
+		// A property named share is charged as the worker API by the RAM analyzer.
+		shareEnabled: asBoolean(flags["share"]),
 		contracts: asBoolean(flags.contracts),
 		progression: asBoolean(flags.progression),
 		progressionActions: asBoolean(flags["progression-actions"]),
@@ -159,7 +161,7 @@ export async function main(ns) {
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
 	if (Number(flags["max-targets"]) !== 2) daemonArgs.push("--max-targets", Number(flags["max-targets"]));
 	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
-	if (cfg.share) daemonArgs.push("--fleet-share", true);
+	if (cfg.shareEnabled) daemonArgs.push("--fleet-share", true);
 	const utilityReserve = Math.max(0,
 		cfg.diagnostics ? ns.getScriptRam("doctor.js", HOME) : 0,
 		cfg.augmentations && augmentationAccess(ns) ? ns.getScriptRam("augmentation-planner.js", HOME) : 0,
@@ -231,8 +233,8 @@ export async function main(ns) {
 			goStatus = ownedServiceStatus(ns, services.find(service => service.name === GO_BOT), snapshot(GO_BOT)),
 			augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
-		reconcileHomeShare(ns, cfg.share, cfg.shareReserve);
-		cfg.shareStatus = collectSharingStatus(ns, cfg.share, fleetStatus, cfg.shareReserve);
+		reconcileHomeShare(ns, cfg.shareEnabled, cfg.shareReserve);
+		cfg.shareStatus = collectSharingStatus(ns, cfg.shareEnabled, fleetStatus, cfg.shareReserve);
 		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
 		cfg.telemetryError = telemetry?.error || "";
 		if (telemetry) cfg.telemetrySummary = summarizeTelemetry(telemetry.samples, Date.now() - 3600000);
@@ -364,39 +366,36 @@ function preemptLowerPriorityServices(ns, owner, lowerServices, shortfall) {
 	return reclaimed >= shortfall;
 }
 
-// A new player has only 8 GB on home. Keep the canonical entry point resident
-// and spend the remaining RAM on a small, scalable n00dles worker until the full
-// supervisor + daemon + fleet stack fits.
+// Borrow free network RAM while home cannot yet hold the full money engine.
 async function runStarterMode(ns) {
-	const target = "n00dles";
+	const copied = new Set();
 	while (true) {
+		const hosts = starterHosts(ns);
 		const maxRam = ns.getServerMaxRam(HOME);
 		const coreRam = ns.getScriptRam(SUPERVISOR, HOME) + ns.getScriptRam(DAEMON, HOME) + ns.getScriptRam(FLEET, HOME);
-		const process = findProcess(ns, STARTER_WORKER);
-		if (coreRam > 0 && maxRam >= coreRam) {
-			if (process) ns.kill(process.pid);
-			if (process) ns.tprint(`Starter mode complete at ${maxRam.toFixed(2)} GB home RAM; launching the full automation stack`);
+		const workerRam = ns.getScriptRam(STARTER_WORKER, HOME);
+		const homeWorkerRam = starterWorkers(ns, HOME).reduce((sum, process) => sum + workerRam * process.threads, 0);
+		const missingCore = [DAEMON, FLEET].filter(file => !findProcess(ns, file))
+			.reduce((sum, file) => sum + ns.getScriptRam(file, HOME), 0);
+		const ready = coreRam > 0 && maxRam >= coreRam &&
+			maxRam - ns.getServerUsedRam(HOME) + homeWorkerRam >= missingCore;
+		if (ready && stopStarterPool(ns, hosts)) {
+			ns.tprint(`Starter mode complete at ${maxRam.toFixed(2)} GB home RAM; launching the full automation stack`);
 			return;
 		}
-		if (!ns.hasRootAccess(target)) {
-			try { ns.nuke(target); } catch { /* Retry while starter mode runs. */ }
-		}
-		const rooted = ns.hasRootAccess(target);
-
-		const workerRam = ns.getScriptRam(STARTER_WORKER, HOME);
-		const usedWithoutWorker = ns.getServerUsedRam(HOME) - (process ? workerRam * Math.max(1, process.threads || 1) : 0);
-		const desiredThreads = workerRam > 0 ? Math.max(0, Math.floor((maxRam - usedWithoutWorker) / workerRam)) : 0;
-		if (process && (process.threads !== desiredThreads || !rooted)) ns.kill(process.pid);
-		if (rooted && (!process || process.threads !== desiredThreads) && desiredThreads > 0) ns.run(STARTER_WORKER, desiredThreads, target);
+		const pool = ready ? { rooted: true, threads: 0, workers: 0, failures: 1 }
+			: await tickStarterPool(ns, hosts, copied);
 
 		ns.clearLog();
 		dashboardTitle(ns, "BITBURNER AUTOMATION :: STARTER MODE");
 		dashboardSection(ns, "Income bootstrap");
-		dashboardRow(ns, "Target", target);
-		dashboardRow(ns, "Worker", !rooted ? `WAITING FOR ROOT on ${target}` : desiredThreads > 0 ? `${desiredThreads} thread${desiredThreads === 1 ? "" : "s"}` : "WAITING FOR RAM");
+		dashboardRow(ns, "Target", "n00dles");
+		dashboardRow(ns, "Workers", !pool.rooted ? "WAITING FOR ROOT on n00dles" : pool.threads
+			? `${pool.threads} threads across ${pool.workers} servers` : "WAITING FOR RAM on home and rooted servers");
+		if (pool.failures) dashboardRow(ns, "Retry", ready ? "Waiting for starter workers to stop before handoff" : `${pool.failures} deployment(s) will retry`);
 		dashboardSection(ns, "Upgrade path");
 		dashboardRow(ns, "Home RAM", `${formatRam(maxRam)} / ${formatRam(coreRam)} needed for supervisor + daemon + fleet`);
-		dashboardRow(ns, "Next", "Upgrade home RAM; full automation starts automatically when it fits");
+		dashboardRow(ns, "Next", "Upgrade home RAM manually; full automation starts when enough RAM is free");
 		await ns.sleep(5_000);
 	}
 }

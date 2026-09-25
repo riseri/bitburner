@@ -42,8 +42,11 @@ hacking dashboard.
 
 ### 3. Let it get established
 
-- **New 8 GB home:** starter mode runs a small n00dles worker. Upgrade home RAM as
-  you progress; the supervisor switches to the full hacking stack when it fits.
+- **New 8 GB home:** starter mode roots accessible servers and fills their free
+  RAM with n00dles workers. It also uses spare home RAM and expands when you obtain
+  port-opening programs. You can earn even when home cannot fit a worker beside
+  the supervisor. Upgrade home RAM manually; the supervisor clears its starter
+  pool and switches to the full hacking stack when enough home RAM is free.
 - **Full hacking stack:** a target may need preparation, followed by an initial
   warmup before the first Hack lands. A startup income gap is normal.
 - **Spare RAM:** JIT and preparation workers run only on rooted remote servers.
@@ -138,6 +141,12 @@ and [recovery](docs/jit-recovery.md).
 
 **Sync first, then restart the affected process. You do not need `killall`.**
 Running scripts retain their loaded code even after Filesync updates the files.
+
+On an 8 GB starter, a restart helper may not fit alongside the supervisor. After
+syncing, use `ps` and `kill <PID>` to stop the old supervisor, then run
+`supervisor.js` again with your usual flags. If a legacy home starter worker
+leaves too little space, stop that worker's PID too. Remote starter workers are
+adopted when the supervisor returns.
 
 ### Hacking or hot-swap updates
 

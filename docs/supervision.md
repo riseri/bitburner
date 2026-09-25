@@ -12,14 +12,28 @@ through `lib/service-catalog.js`.
 
 ## Service lifecycle
 
-On the initial 8 GB home, `supervisor.js` remains the resident controller and uses
-the rest of home RAM for `starter-worker.js`, a small multithreaded weaken/grow/hack
-loop against rooted `n00dles`. It roots the server before launching a worker, and
-the worker waits if root access is unavailable. Starter mode shows `WAITING FOR
-ROOT` until access is available. It rescales the worker as home grows and rechecks
-the static RAM cost of supervisor, daemon, and fleet manager; once those
-three fit, it stops the starter PID and begins the ordinary managed-service
-lifecycle without another command.
+On the initial 8 GB home, `supervisor.js` remains the resident controller. Its
+starter pool scans the network, roots zero-port servers (and more servers using
+programs already owned), then copies `starter-worker.js` into free remote RAM.
+Workers run a small multithreaded weaken/grow/hack loop against rooted `n00dles`.
+Spare home RAM is used too, but earning no longer depends on fitting a home worker.
+No Formulas, Singularity, purchased servers, or program purchases are required.
+
+The pool rescans every five seconds, adopts its marked workers after supervisor
+restarts, and preserves unrelated processes. Healthy workers keep their current
+actions while their allocation stays unchanged. Failed copies, launches and PID
+cancellations are retried. The dashboard shows active threads and worker hosts.
+Home upgrades remain manual. Once supervisor, daemon and fleet manager fit in
+actually available home RAM, all owned starter workers are stopped before the
+ordinary managed-service lifecycle begins. Failed cleanup delays that handoff.
+
+A local run of the official upstream RAM calculator reports 7.70 GB for the
+supervisor and 2.50 GB per starter thread. This checks source RAM against upstream
+definitions, not the installed game's runtime. The internal sharing setting is
+named `shareEnabled`: a `.share` property is otherwise mistaken for the 2.4 GB
+worker API by the analyzer. The public `--share` flag is unchanged. See the
+[RAM calculator](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Script/RamCalculations.ts)
+and [API costs](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Netscript/RamCostGenerator.ts).
 
 New/adopted managers get 60 seconds of startup grace. After that, an old or missing
 heartbeat must remain suspect for another 15 seconds before recovery. The normal

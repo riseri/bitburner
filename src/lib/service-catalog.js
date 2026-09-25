@@ -37,7 +37,7 @@ export function supervisorServiceConfig(args = []) {
         cfg[service.option] = enabled(readArgument(args, `--${service.flag}`, profile[service.flag] ?? service.defaultEnabled));
     }
     for (const [option, flag, fallback] of [["progressionActions", "progression-actions", false],
-        ["augmentations", "augmentations", true], ["diagnostics", "diagnostics", true], ["share", "share", true]]) {
+        ["augmentations", "augmentations", true], ["diagnostics", "diagnostics", true], ["shareEnabled", "share", true]]) {
         cfg[option] = enabled(readArgument(args, `--${flag}`, profile[flag] ?? fallback));
     }
     return cfg;
@@ -46,7 +46,7 @@ export function supervisorServiceConfig(args = []) {
 export function supervisorFiles(cfg) {
     const files = [...selectedServices(cfg).map(service => service.name), "starter-worker.js",
         "jit-hack.js", "jit-grow.js", "jit-weaken.js", "lib/formulas.js"];
-    if (cfg.share) files.push("share-worker.js");
+    if (cfg.shareEnabled) files.push("share-worker.js");
     if (cfg.diagnostics) files.push("doctor.js");
     if (cfg.augmentations) files.push("augmentation-planner.js");
     if (cfg.augmentationActions) files.push("bootstrap.js");
