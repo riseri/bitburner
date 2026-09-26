@@ -1,4 +1,5 @@
 import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, emptySlotIncomeFloor, recentPipelineIncome } from "lib/background-prep.js";
+import { createXpPipeline, tickXpPipeline, consumeXpEvent, claimXpTarget, reclaimXpRam } from "lib/hacking-xp.js";
 
 // One event loop, one allocation ledger. A pipeline never owns the global ports,
 // process map, or reservation array. Changing its epoch cannot erase a peer.
@@ -58,6 +59,7 @@ export function createPipelinePool(ns, setup, api) {
 		lastAdmission: 0, nextAdmission: 0, readyScan: null, nextReadyScan: 0,
 		nextAdmissionService: 0, pendingAdmission: "", pendingAdmissionFloor: 0,
 	};
+	pool.xp = createXpPipeline(pool); pool.cfg.xpPipeline = pool.xp;
 	const first = createTargetPipeline(setup.target, setup.cfg, api, ns.pid, 0, setup.runtime, setup.stats);
 	pool.pipelines.set(first.name, first);
 	first.control = targetControl(pool, first);
@@ -128,6 +130,7 @@ export async function runTargetPipelines(ns, setup, api) {
 		if (pool.port.empty()) launchPipelineChunks(ns, pool);
 
 		if (now - pool.lastNetwork >= 10_000) refreshPipelineNetwork(ns, pool, now);
+		serviceHackingPolicy(ns, pool);
 		if (now - pool.lastReconcile >= 30_000) {
 			pool.lastReconcile = now;
 			api.reconcileRunning(ns, pool.running, pool.runningByChunk, 20);
@@ -153,6 +156,7 @@ export async function runTargetPipelines(ns, setup, api) {
 		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50) {
 			servicePipelineMaintenance(ns, pool);
 		}
+		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50) serviceXpPipeline(ns, pool);
 		if (now - pool.lastMonitor >= 1000) {
 			pool.lastMonitor = now;
 			monitorPipelineLoad(ns, pool, now);
@@ -174,11 +178,35 @@ export async function runTargetPipelines(ns, setup, api) {
 	}
 }
 
+export function serviceHackingPolicy(ns, pool) {
+	pool.api.refreshHackingPolicy?.(ns, pool.cfg, pool.network);
+}
+
+export function serviceXpPipeline(ns, pool) {
+	tickXpPipeline(ns, pool, {
+		canLaunch() {
+			const pending = [...pool.pipelines.values()].reduce((n, p) => n + p.queue.length, pool.running.size);
+			return pending < pool.cfg.maxWorkers - 4 && fitsLaunchBudget(pool.launchBuckets,
+				[{ launchAt: Date.now() }], Math.max(0, pool.cfg.maxLaunches - 8));
+		},
+		record: job => recordLaunchBudget(pool, [job]),
+	});
+}
+
+function moneySpareRam(ns, pool, host, cfg) {
+	const available = () => pool.api.availableRam(ns, host, cfg, pool.running, pool.reservations,
+		Date.now(), Infinity, pool.foreign);
+	let ram = available();
+	if (pool.xp?.jobs.size && ram < Math.min(cfg.ram.G, cfg.ram.W) && reclaimXpRam(ns, pool.xp, host.name)) ram = available();
+	return ram;
+}
+
 export function dispatchPipelineEvents(ns, pool) {
 	const groups = new Map();
 	for (let count = 0; !pool.port.empty() && count < 512; count++) {
 		const event = pool.port.read();
 		if (!event || typeof event !== "object") continue;
+		if (consumeXpEvent(pool, event)) continue;
 		const p = pool.pipelines.get(event.target);
 		// Batch ids include owner, target slot and epoch. A foreign/stale message
 		// cannot release RAM or corrupt another target's timing/earnings counters.
@@ -821,8 +849,8 @@ function servicePipelineMaintenance(ns, pool) {
 			tickBackgroundPrep(ns, { state: p.repair, repair: true, target: p.name,
 				network: pool.network, cfg: p.cfg, runtime: p.runtime, stats: p.stats, healthy: true,
 				reclaimShare: host => api.reclaimFleetShare(ns, host),
-				spareRam: host => api.availableRam(ns, host, p.cfg, pool.running, pool.reservations,
-					Date.now(), Infinity, pool.foreign) });
+				claimTarget: target => claimXpTarget(ns, pool, target),
+				spareRam: host => moneySpareRam(ns, pool, host, p.cfg) });
 			p.note = `Target repair: ${p.repair.status} ${p.repair.reason}`;
 			if (p.repair.status === "READY" && !p.repair.active) {
 				p.mode = "TUNING"; p.nextRetry = 0;
@@ -943,8 +971,8 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			replacementRate: support.runtime.plan.expected,
 			replacementBatchRate: support.runtime.plan.batchRate,
 			reclaimShare: host => api.reclaimFleetShare(ns, host),
-			spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
-				now, Infinity, pool.foreign) });
+			claimTarget: target => claimXpTarget(ns, pool, target),
+			spareRam: host => moneySpareRam(ns, pool, host, cfg) });
 		const prep = cfg.backgroundPrep;
 		const target = prep.target ? ` ${prep.target}` : "";
 		pool.note = `Promotion prep${target} over ${support.name}: ${prep.status || "WAITING"}` +
@@ -1001,14 +1029,15 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			slotFill: cfg.maxTargets > 1 && !full,
 			availableBatchRate: Math.max(0, cfg.maxBatchRate - anchor.runtime.plan.batchRate),
 			reclaimShare: host => api.reclaimFleetShare(ns, host),
-			spareRam: host => api.availableRam(ns, host, cfg, pool.running, pool.reservations,
-				now, Infinity, pool.foreign) });
+			claimTarget: target => claimXpTarget(ns, pool, target),
+			spareRam: host => moneySpareRam(ns, pool, host, cfg) });
 		const prep = cfg.backgroundPrep;
 		const target = prep.target ? ` ${prep.target}` : "";
 		pool.note = `Background prep${target}: ${prep.status || "WAITING"}` +
 			(prep.reason ? ` | ${prep.reason}` : "");
 	}
 	if (!name || cfg.maxTargets === 1 || full || !productive(anchor, now)) return;
+	if (!claimXpTarget(ns, pool, name)) return;
 	if (!api.targetHealth(ns, name).clean) {
 		pool.pendingAdmission = "";
 		return;

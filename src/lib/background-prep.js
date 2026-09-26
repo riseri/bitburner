@@ -126,7 +126,8 @@ export function estimateBackgroundCandidate(ns, name, ctx) {
 				Number.isFinite(replacementBatchRate) && replacementBatchRate > 0
 					? replacementBatchRate : 1000 / ctx.runtime.plan.period))
 			: Math.max(ctx.runtime.plan.period, 4 * ctx.cfg.gap + 20);
-	const potential = h.max * ctx.cfg.maxSteal * 0.95 * chance * 1000 / period;
+	const potential = h.max * ctx.cfg.maxSteal * 0.95 * chance * 1000 / period *
+		(ctx.cfg.hackingPolicy?.multipliers?.ScriptHackMoneyGain ?? 1);
 	const requiredPotential = slotFill
 		? emptySlotIncomeFloor(activeRate, ctx.cfg.switchThreshold)
 		: promotion ? replacementRate * ctx.cfg.switchThreshold : activeRate * ctx.cfg.switchThreshold;
@@ -268,6 +269,10 @@ function stepPrep(ns, ctx, now) {
 
 	if (!ns.hasRootAccess(state.target) || ns.getServerRequiredHackingLevel(state.target) > ns.getHackingLevel()) {
 		throw new Error(`prep target is no longer accessible: ${state.target}`);
+	}
+	if (ctx.claimTarget?.(state.target) === false) {
+		state.status = "WAITING_TARGET"; state.reason = "waiting for optional XP worker to release target";
+		return;
 	}
 	const h = prepHealth(ns, state.target);
 	state.health = h;

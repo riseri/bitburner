@@ -3,6 +3,8 @@ import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboar
 import { PORTS } from "lib/ports.js";
 import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary, recentPipelineIncome } from "lib/background-prep.js";
 import { hackingFormulasAvailable, preparedHackingModel } from "lib/formulas.js";
+import { refreshHackingPolicy, renderHackingPolicy } from "lib/hacking-policy.js";
+import { runHackingFallback, reclaimXpRam, xpPipelineStatus } from "lib/hacking-xp.js";
 
 const HOME = "home";
 
@@ -180,6 +182,7 @@ export async function main(ns) {
 
 	const cloudState =
 		createCloudState();
+	cfg.cloudState = cloudState;
 
 	startFleetManager(
 		ns,
@@ -205,83 +208,40 @@ export async function main(ns) {
 
 	port.clear();
 
-	let targetAnalysis =
-		cfg.requestedTarget === "auto"
-			? rankTargets(
-				ns,
-				network,
-				cfg,
-				new Map()
-			)
-			: [];
-
-	let target = resolveTarget(
-		ns,
-		network,
-		cfg,
-		targetAnalysis
-	);
-
-	if (!target) {
-		ns.tprint(
-			"ERROR: no hackable money target found."
-		);
-		return;
-	}
-
-	const stats = createStats();
-
-	await prepTarget(
-		ns,
-		target,
-		network,
-		cfg,
-		port,
-		stats,
-		targetAnalysis
-	);
-
-	// Prep changes the selected target's economics.
-	if (cfg.requestedTarget === "auto") {
-		targetAnalysis = rankTargets(
-			ns,
-			network,
-			cfg,
-			new Map()
-		);
-	}
-
-	let runtime = tuneTarget(
-		ns,
-		target,
-		network.hosts,
-		cfg,
-		new Map()
-	);
-
-	if (!runtime) {
-		ns.tprint(
-			`ERROR: unable to build a batch plan for ${target}`
-		);
-		return;
-	}
-
-	await runTargetPipelines(ns, {
-		target, runtime, stats, cfg, network, port, fleetPort, controlPort, cloudState,
-		targetAnalysis, minimumWorkerRam,
-	}, {
+	const schedulerApi = {
 		createStats, resetPipelineStats, targetHealth, createPreppedModel, tuneTargetSteps,
 		seedForeignUsage, refreshOneForeignUsage, syncForeignUsageHosts, poolProfile,
 		networkFromFleetStatus, applyFleetStatus, workerFleetCapacity,
 		consumeEvents, findOverdueBatch, settleChunk, recordPhaseMiss, finishReadyBatches,
 		beginSoftRecovery, updateSoftRecovery, cancelHackWindow, cancelPoisonedBatch,
 		beginDrain, serviceHardDrain, cancelChunk, publishHackPause,
-		reconcileRunning, untrackRunningByChunk, isTerminalChunk,
+		reconcileRunning, untrackRunningByChunk, isTerminalChunk, trackRunning, untrackRunning, reserveChunk,
 		reconcileFleetShare, reclaimFleetShare, clearFleetShare,
 		reserveIncomeBatch, reserveBatch, rollbackReservations, cleanupReservations, rebuildReservationIndex,
 		enqueueChunks, makeBatchState, launchDueChunks, availableRam, totalRunningRam,
-		incomeRate, countRate, renderSchedulerDashboard, hackingFormulasAvailable,
-	});
+		incomeRate, countRate, renderSchedulerDashboard, hackingFormulasAvailable, refreshHackingPolicy,
+	};
+	while (true) {
+		refreshHackingPolicy(ns, cfg, network, true);
+		const context = { cfg, network, port, fleetPort, controlPort, cloudState, minimumWorkerRam };
+		let targetAnalysis = cfg.requestedTarget === "auto" ? rankTargets(ns, network, cfg) : [];
+		const target = resolveTarget(ns, network, cfg, targetAnalysis);
+		if (!target) {
+			if (cfg.requestedTarget !== "auto") return; // Keep invalid explicit-target diagnostics.
+			network = await runHackingFallback(ns, context, schedulerApi);
+			continue;
+		}
+		const stats = createStats();
+		await prepTarget(ns, target, network, cfg, port, stats, targetAnalysis);
+		if (cfg.requestedTarget === "auto") targetAnalysis = rankTargets(ns, network, cfg);
+		const runtime = tuneTarget(ns, target, network.hosts, cfg, new Map());
+		if (!runtime) {
+			network = await runHackingFallback(ns, context, schedulerApi);
+			continue;
+		}
+		await runTargetPipelines(ns, { ...context, target, runtime, stats, targetAnalysis }, schedulerApi);
+		return;
+	}
 }
 
 function validateDaemonPorts(cfg) {
@@ -1192,6 +1152,8 @@ async function prepTarget(
 	let wave = 0;
 
 	while (true) {
+		// Keep capability/status information fresh while money prep continues.
+		refreshHackingPolicy(ns, cfg, network);
 		const minSec =
 			ns.getServerMinSecurityLevel(
 				target
@@ -1976,7 +1938,7 @@ function* tuneTargetSteps(
 			maxMoney *
 			steal * 0.95 *
 			chance *
-			batchRate;
+			batchRate * (cfg.hackingPolicy?.multipliers?.ScriptHackMoneyGain ?? 1);
 
 		if (
 			!best ||
@@ -2180,6 +2142,7 @@ function reclaimPrepRam(ns, cfg, host = null) {
 function reserveIncomeBatch(ns, target, id, landing, plan, hosts, cfg, reservations, running, foreign) {
 	const reserve = () => reserveBatch(ns, target, id, landing, plan, hosts, cfg, reservations, running, foreign);
 	let result = reserve();
+	if (!result && reclaimXpRam(ns, cfg.xpPipeline)) result = reserve();
 	if (!result && reclaimPrepRam(ns, cfg)) result = reserve();
 	return result;
 }
@@ -3052,6 +3015,7 @@ function reserveChunk(
 	hostReservations.push(
 		reservation
 	);
+	return reservation;
 }
 
 function rollbackReservations(
@@ -4029,6 +3993,7 @@ function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runnin
 			chunk.stealBudget ?? 0, chunk.threads, chunk.epoch || "", chunk.generation ?? 0);
 		reclaimFleetShare(ns, chunk.host);
 		let pid = launch();
+		if (!pid && reclaimXpRam(ns, cfg.xpPipeline, chunk.host)) pid = launch();
 		if (!pid && reclaimPrepRam(ns, cfg, chunk.host)) pid = launch();
 		if (!pid) {
 			recordPhaseMiss(stats, chunk.phase, true);
@@ -4525,10 +4490,13 @@ function renderSchedulerDashboard(ns, pool) {
 	const usedRam = totalRunningRam(pool.running) + prepRam + [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
 	const snapshot = {
 		type: "jit-status", version: 2, pid: ns.pid, generatedAt: now,
+		policy: pool.cfg.hackingPolicy ? { ...pool.cfg.hackingPolicy, ...xpPipelineStatus(ns, pool),
+			bestMoney: pool.targetAnalysis?.[0] ? { name: pool.targetAnalysis[0].name, estimatedMoneyPerSecond: pool.targetAnalysis[0].steady } : null } : null,
 		mode: rows.length > 1 || pool.history.length || rows.some(p => !["LIVE", "WARMUP", "RECOVERING"].includes(p.mode)) ? "multi" : "running",
 		pipelines: rows, limit: pool.cfg.maxTargets, priority: pool.anchor,
-		income60: all.reduce((n, p) => n + p.stats.income.filter(s => s.time >= now - 60_000).reduce((sum, s) => sum + s.money, 0), 0) / elapsed,
-		earned: all.reduce((n, p) => n + p.stats.money, 0),
+		income60: (all.reduce((n, p) => n + p.stats.income.filter(s => s.time >= now - 60_000).reduce((sum, s) => sum + s.money, 0), 0) +
+			(pool.xp?.income || []).filter(s => s.time >= now - 60_000).reduce((sum, s) => sum + s.money, 0)) / elapsed,
+		earned: (pool.earned || 0) + (pool.xp?.earned || 0) + all.reduce((n, p) => n + p.stats.money, 0),
 		model: rows.reduce((n, p) => n + (["LIVE", "WARMUP"].includes(p.mode) ? p.model : 0), 0),
 		usedRam, totalRam, prepRam, note: pool.note, loopLag: pool.lagMax,
 		backgroundPrep: background ? {
@@ -4552,6 +4520,7 @@ function renderSchedulerDashboard(ns, pool) {
 			pool.running, pool.reservations, p.batches, pool.targetAnalysis, pool.cloudState,
 			p.drain, p.recovery, pool.foreign);
 		renderGenerationStatus(ns, rows[0], pool.cfg.dashboardDetails);
+		renderHackingPolicy(ns, snapshot.policy, pool.cfg.dashboardDetails);
 		const currentSlotPressure = Boolean(p.admissionReason);
 		const slotHistory = currentSlotPressure || p.stats.allocationFails || p.admissionSkips;
 		if (p.cfg.dashboardDetails) {
@@ -4568,6 +4537,7 @@ function renderSchedulerDashboard(ns, pool) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	ns.clearLog();
 	dashboardTitle(ns, `JIT DAEMON :: MULTI :: hacking ${ns.getHackingLevel()}`);
+	renderHackingPolicy(ns, snapshot.policy, pool.cfg.dashboardDetails);
 
 	dashboardSection(ns, "Overview");
 	row("Target slots", `${rows.length}/${pool.cfg.maxTargets} | priority ${pool.anchor}`);
@@ -4678,6 +4648,7 @@ function renderPrep(
 
 	ns.clearLog();
 	dashboardTitle(ns, `JIT DAEMON :: PREP :: ${target}`);
+	renderHackingPolicy(ns, cfg.hackingPolicy, cfg.dashboardDetails);
 	dashboardSection(ns, "Preparing target");
 	row("Stage", stage);
 	row("Wave", `#${wave} | ETA ${dashboardTime(end ? Math.max(0, end - Date.now()) : 0)}`);

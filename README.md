@@ -153,6 +153,15 @@ Formula, skill, and fleet-capacity changes use background plan tuning. If a safe
 overlap cannot fit, the old plan continues earning. Safety faults can still pause
 a target. A **plan** hot swap does not reload changed JavaScript files.
 
+Hacking also adapts its objective when capabilities are available. Ordinary and
+fresh saves keep the existing money behavior. With healthy infrastructure,
+Formulas and usable XP under severe money penalties, the daemon can grind toward
+2500 hacking in a secondary pipeline using only RAM left over by money work.
+Money batches stay active, and XP releases its borrowed RAM when money needs it.
+XP uses a separate target and the best modeled hack/grow/weaken cycle. `HOSTILE`
+diagnoses poor hacking multipliers while retaining safe fallback work. See
+[hacking policy, configuration and testing](docs/hacking-policy.md).
+
 If the actual batch rate stays near zero with thousands of launch deferrals and
 mostly unused RAM, update and restart the daemon as described below. Older
 versions could spread Grow/Weaken across too many small, higher-core servers and

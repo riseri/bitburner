@@ -737,6 +737,8 @@ function renderOverview(ns, daemon, fleet, shareStatus = null) {
 	if (!daemon) {
 		row("Money engine", processStatus(ns, DAEMON));
 		row("Status", "Waiting for daemon dashboard");
+	} else if (["experience", "fallback"].includes(daemon.mode)) {
+		renderExperienceStatus(ns, daemon);
 	} else if (daemon.mode === "multi") {
 		row("Income 60s", `${cash(daemon.income60)}/s | model ${cash(daemon.model)}/s`);
 		row("Targets", daemon.pipelines?.length
@@ -768,6 +770,10 @@ function renderOverview(ns, daemon, fleet, shareStatus = null) {
 		if (daemon.background) row("Background", daemon.background);
 	}
 
+	if (daemon?.policy?.xp) {
+		const xp = daemon.policy.xp;
+		row("XP pipeline", `${xp.target || "waiting"} | ${xp.state} | spare RAM only`);
+	}
 	if (fleet) {
 		const network = fleet.network ?? {};
 		const cloud = fleet.cloud ?? {};
@@ -909,6 +915,8 @@ function renderAttention(ns, { cfg, goal, daemon, fleet, contracts, progression,
 
 function renderMoneyEngine(ns, daemon, details = false) {
 	const row = (label, value) => dashboardRow(ns, label, value);
+	if (["experience", "fallback"].includes(daemon.mode)) { renderExperienceStatus(ns, daemon); return; }
+	if (daemon.policy?.xp) renderExperienceStatus(ns, daemon);
 	if (daemon.mode === "multi") {
 		dashboardSection(ns, "Combined income");
 		row("Income 60s", `${cash(daemon.income60)}/s`);
@@ -949,6 +957,24 @@ function renderMoneyEngine(ns, daemon, details = false) {
 	if (daemon.money) row("Money", daemon.money);
 	if (daemon.security) row("Security", daemon.security);
 	if (details && daemon.steal) row("Steal", daemon.steal);
+}
+
+function renderExperienceStatus(ns, daemon) {
+	if (daemon.mode === "fallback") {
+		dashboardRow(ns, "Money engine", "Waiting for a viable money batch; retrying planning");
+		dashboardRow(ns, "Fallback", `${daemon.target || "waiting for target"} | weaken`);
+		return;
+	}
+	const policy = daemon.policy, xp = policy?.xp;
+	dashboardRow(ns, "Hacking policy", `${policy?.mode || "NORMAL"} | ${policy?.reason || daemon.note}`);
+	dashboardRow(ns, "XP work", `${xp?.target || "waiting"} | ${xp?.action || ""} | ${xp?.state || "WAITING"}`);
+	if (xp?.estimatedXpPerSecond > 0) dashboardRow(ns, "XP model", `${xp.estimatedXpPerSecond.toPrecision(3)}/s`);
+	const progress = policy?.progress;
+	if (progress) {
+		dashboardRow(ns, "XP level", `${progress.level} / ${progress.targetLevel}`);
+		if (Number.isFinite(progress.skillMultiplier)) dashboardRow(ns, "XP skill mult", `${progress.skillMultiplier.toPrecision(3)}x (player x BitNode)`);
+		dashboardRow(ns, "XP ETA", progress.etaReason || (Number.isFinite(progress.etaMs) ? `~${dashboardTime(progress.etaMs)} at recent rate` : "unavailable"));
+	}
 }
 
 function renderTargetAnalysis(ns, targets) {
@@ -1105,8 +1131,9 @@ function readDaemonDashboard(ns) {
 	const process = findProcess(ns, DAEMON);
 	if (!process) return null;
 	const snapshot = typeof ns.getPortHandle === "function" ? ns.getPortHandle(PORTS.JIT_STATUS).peek() : null;
-	if (snapshot?.type === "jit-status" && snapshot.version === 2 && snapshot.pid === process.pid &&
-		Date.now() - snapshot.generatedAt <= 30_000 && snapshot.mode === "multi" && Array.isArray(snapshot.pipelines)) {
+	const current = snapshot?.type === "jit-status" && snapshot.version === 2 && snapshot.pid === process.pid &&
+		Date.now() >= snapshot.generatedAt && Date.now() - snapshot.generatedAt <= 30_000 && Array.isArray(snapshot.pipelines) ? snapshot : null;
+	if (current && ["multi", "experience", "fallback"].includes(snapshot.mode)) {
 		return snapshot;
 	}
 
@@ -1138,6 +1165,7 @@ function readDaemonDashboard(ns) {
 	const headerMatch = header.match(/JIT DAEMON ::\s*(.*?)\s*:: hacking\s+(\d+)/);
 	return {
 		mode: "running",
+		policy: current?.policy,
 		target: headerMatch?.[1] ?? "unknown",
 		hackingLevel: headerMatch?.[2] ?? "",
 		targetMode: field(logs, "Selection") || field(logs, "Target"),
