@@ -343,3 +343,203 @@ test('an inferior tuned trial is retired before it can become a LIVE second lane
     assert.equal(f.a.mode, 'RUNNING');
     assert.equal(f.a.drain, null);
 });
+
+function stalledFixture() {
+    const f = fixture();
+    f.pool.cfg.backgroundPrep = { enabled: true, status: 'WAITING' };
+    f.a.mode = 'TUNING';
+    f.a.tuner = { next: () => ({ done: false }) };
+    f.b.trialUntil = f.clock.now;
+    f.b.firstLanding = f.clock.now - 200000;
+    f.b.stats.pipeline.completed = 300;
+    f.b.stats.pipeline.productiveMs = 150000;
+    f.b.stats.lastHackAt = f.clock.now;
+    f.pool.api.incomeRate = stats => stats === f.b.stats ? 100000 : 0;
+    f.pool.trialGuard = f.multi.incomeGuard(f.pool, f.a, f.b, f.clock.now);
+    f.pool.trialGuard.baseline = 1000;
+    return f;
+}
+
+test('established tuning advances and activates in 30ms gaps without touching peer work', () => {
+    const f = stalledFixture();
+    f.pool.network = { hosts: [{ name: 'cloud', maxRam: 1024, cores: 1 }] };
+    const peerBatch = f.batch(f.b), peerEpoch = f.b.epoch;
+    let steps = 0;
+    f.a.tuner = { next: () => ++steps < 4 ? { done: false } : { done: true, value: f.runtime } };
+    const ns = { ...f.ns, getHackingLevel: () => 100 };
+    for (let i = 0; i < 4; i++) {
+        f.b.queue = [{ launchAt: f.clock.now + 30 }];
+        f.multi.serviceAdmissionOpportunity(ns, f.pool);
+        f.clock.now += 100;
+    }
+    assert.equal(steps, 4);
+    assert.equal(f.a.mode, 'RUNNING');
+    assert.equal(f.b.epoch, peerEpoch);
+    assert.equal(f.b.batches.get(peerBatch.id), peerBatch);
+    assert.equal(f.b.running.size, 4);
+    assert.deepEqual(f.killed, []);
+});
+
+test('tuning refuses a due launch, pending events and unreconciled owned batches', () => {
+    const f = stalledFixture();
+    let steps = 0;
+    f.a.tuner = { next: () => { steps++; return { done: false }; } };
+    f.b.queue = [{ launchAt: f.clock.now + 5 }];
+    f.multi.serviceAdmissionOpportunity(f.ns, f.pool);
+    f.b.queue = [{ launchAt: f.clock.now + 30 }];
+    f.pool.port.tryWrite({ type: 'done' });
+    f.multi.serviceAdmissionOpportunity(f.ns, f.pool);
+    f.pool.port.clear();
+    f.batch(f.a);
+    f.multi.serviceAdmissionOpportunity(f.ns, f.pool);
+    assert.equal(steps, 0);
+});
+
+test('starved maintenance defers new planning until committed launches leave a safe window', () => {
+    const f = stalledFixture();
+    let steps = 0;
+    f.a.tuner = { next: () => { steps++; return { done: false }; } };
+    f.b.queue = [{ launchAt: f.clock.now + 10 }];
+    assert.equal(f.multi.serviceMaintenanceOpportunity(f.ns, f.pool), false);
+    f.clock.now += 5000;
+    f.b.queue[0].launchAt = f.clock.now + 10;
+    assert.equal(f.multi.serviceMaintenanceOpportunity(f.ns, f.pool), true);
+    assert.equal(steps, 0);
+    assert.equal(f.b.queue.length, 1);
+    f.b.queue[0].launchAt = f.clock.now + 60;
+    assert.equal(f.multi.serviceMaintenanceOpportunity(f.ns, f.pool), true);
+    assert.equal(steps, 1);
+    assert.deepEqual(f.killed, []);
+});
+
+test('a continuously productive trial takes priority from a stalled incumbent after independent validation', () => {
+    const f = stalledFixture();
+    f.multi.monitorPipelineLoad(f.ns, f.pool, f.clock.now);
+    assert.match(f.b.trialNote, /waiting on alpha/);
+    assert.equal(f.b.trial, true);
+    for (let i = 0; i < 180; i++) {
+        f.clock.now += 1000;
+        f.b.stats.lastHackAt = f.clock.now;
+        f.b.stats.pipeline.completed++;
+        f.multi.monitorPipelineLoad(f.ns, f.pool, f.clock.now);
+    }
+    assert.equal(f.b.trial, false);
+    assert.equal(f.pool.anchor, 'beta');
+    assert.equal(f.pool.trialGuard.incumbent, 'beta');
+    assert.equal(f.a.mode, 'TUNING');
+    assert.equal(f.a.retiring, false);
+});
+
+test('independent validation resets for a miss or income gap and refuses insufficient income', () => {
+    for (const fault of ['miss', 'income', 'gap', 'no-completions']) {
+        const f = stalledFixture();
+        f.multi.monitorPipelineLoad(f.ns, f.pool, f.clock.now);
+        for (let i = 1; i <= 180; i++) {
+            f.clock.now += 1000;
+            f.b.stats.lastHackAt = f.clock.now;
+            if (fault !== 'no-completions') f.b.stats.pipeline.completed++;
+            if (i === 100) {
+                if (fault === 'miss') f.b.stats.misses.W2++;
+                if (fault === 'income') f.pool.api.incomeRate = () => 1;
+                if (fault === 'gap') f.b.stats.lastHackAt = f.clock.now - 20000;
+            }
+            f.multi.monitorPipelineLoad(f.ns, f.pool, f.clock.now);
+        }
+        assert.equal(f.b.trial, true, fault);
+        assert.equal(f.pool.anchor, 'alpha', fault);
+    }
+});
+
+test('a viable smaller trial can replace an unavailable richer incumbent', () => {
+    const f = stalledFixture();
+    f.pool.api.incomeRate = stats => stats === f.b.stats ? 800 : 0;
+    f.pool.trialGuard.baseline = 100000;
+    for (let i = 0; i <= 180; i++) {
+        f.b.stats.lastHackAt = f.clock.now;
+        f.b.stats.pipeline.completed++;
+        f.multi.monitorPipelineLoad(f.ns, f.pool, f.clock.now);
+        f.clock.now += 1000;
+    }
+    assert.equal(f.b.trial, false);
+    assert.equal(f.pool.anchor, 'beta');
+});
+
+test('incumbent rebuild cycles do not erase the healthy trial observation window', () => {
+    const f = stalledFixture();
+    for (let i = 0; i <= 180; i++) {
+        f.a.mode = i % 20 < 10 ? 'TUNING' : 'RUNNING';
+        f.a.firstLanding = f.clock.now; // rebuilding incumbent repeatedly warms up
+        f.a.stats.lastHackAt = f.clock.now;
+        f.b.stats.lastHackAt = f.clock.now;
+        f.b.stats.pipeline.completed++;
+        f.multi.monitorPipelineLoad(f.ns, f.pool, f.clock.now);
+        f.clock.now += 1000;
+    }
+    assert.equal(f.b.trial, false);
+    assert.equal(f.pool.anchor, 'beta');
+});
+
+test('retained preparation or tuning backoff does not force unnecessary planning gaps', () => {
+    const f = stalledFixture();
+    f.a.nextRetry = f.clock.now + 30000;
+    f.pool.cfg.backgroundPrep.status = 'READY'; // trial still blocks promotion
+    f.pool.maintenanceWaitSince = f.clock.now - 10000;
+    assert.equal(f.multi.serviceMaintenanceOpportunity(f.ns, f.pool), false);
+    f.pool.cfg.maxTargets = 1;
+    f.pool.pipelines.delete('beta');
+    f.pool.maintenanceWaitSince = f.clock.now - 10000;
+    assert.equal(f.multi.serviceMaintenanceOpportunity(f.ns, f.pool), false);
+});
+
+test('stalled replacement requires ten minutes, a validated healthy survivor and completed warmup', () => {
+    const f = stalledFixture();
+    f.multi.updatePipelineProgress(f.pool, f.clock.now);
+    f.b.trial = false;
+    assert.equal(f.multi.stalledPromotionSupport(f.pool, f.clock.now), null);
+    f.clock.now += 600000;
+    f.b.stats.lastHackAt = f.clock.now;
+    assert.equal(f.multi.stalledPromotionSupport(f.pool, f.clock.now), f.a);
+    f.b.trial = true;
+    assert.equal(f.multi.stalledPromotionSupport(f.pool, f.clock.now), null);
+    f.b.trial = false; f.b.recovery = {};
+    assert.equal(f.multi.stalledPromotionSupport(f.pool, f.clock.now), null);
+    f.b.recovery = null; f.a.firstLanding = f.clock.now + 1000;
+    assert.equal(f.multi.stalledPromotionSupport(f.pool, f.clock.now), null);
+    f.a.firstLanding = 0; f.a.mode = 'RUNNING'; f.a.stats.lastHackAt = f.clock.now;
+    f.multi.updatePipelineProgress(f.pool, f.clock.now);
+    assert.equal(f.multi.stalledPromotionSupport(f.pool, f.clock.now), null);
+});
+
+test('blocked promotion identifies tuning age, retry and suspended trial', () => {
+    const f = stalledFixture();
+    f.a.stalledSince = f.clock.now - 43000;
+    f.a.nextRetry = f.clock.now + 30000;
+    f.a.note = 'No plan fits shared limits';
+    f.b.trialNote = 'waiting on alpha';
+    f.multi.serviceBackgroundAndAdmission(f.ns, f.pool);
+    assert.match(f.pool.cfg.backgroundPrep.reason, /alpha tuning for 43s; retry in 30s/);
+    assert.match(f.pool.cfg.backgroundPrep.reason, /beta trial: waiting on alpha/);
+    f.pool.cfg.backgroundPrep.status = 'READY';
+    f.pool.cfg.backgroundPrep.target = 'prepared';
+    f.multi.serviceBackgroundAndAdmission(f.ns, f.pool);
+    assert.equal(f.pool.cfg.backgroundPrep.status, 'READY');
+    assert.equal(f.pool.cfg.backgroundPrep.target, 'prepared');
+    assert.match(f.pool.cfg.backgroundPrep.reason, /beta trial: waiting on alpha/);
+});
+
+test('replacement prep survives prolonged local recovery only while its validated peer stays healthy', () => {
+    const f = stalledFixture();
+    f.a.stalledSince = f.clock.now - 600000;
+    f.a.recovery = { pauseUntil: Infinity };
+    f.b.trial = false;
+    const prep = f.pool.cfg.backgroundPrep;
+    prep.active = { pid: 999, ram: 40 };
+    f.pool.api.updateSoftRecovery = (_ns, _target, recovery) => ({ recovery });
+    f.multi.servicePipelineSafety(f.ns, f.pool, f.a, f.clock.now);
+    assert.equal(prep.active.pid, 999);
+    f.b.recovery = {};
+    f.multi.servicePipelineSafety(f.ns, f.pool, f.a, f.clock.now);
+    assert.equal(prep.active, null);
+    assert.equal(f.b.mode, 'RUNNING');
+    assert.equal(f.b.drain, null);
+});

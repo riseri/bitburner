@@ -44,26 +44,35 @@ export function parsePasswordResponse(logs, attempted) {
 }
 
 export async function solveServer(ns, host, details, options = {}) {
-	const attempted = new Set(), maxAttempts = Math.max(10, Number(options.maxAttempts) || 400);
+	const attempted = new Map(), responses = new Map(), maxAttempts = Math.max(10, Number(options.maxAttempts) || 400);
+	const stateful = details.modelId === "(The Labyrinth)";
+	let attempts = 0;
 	const attempt = async password => {
 		password = String(password ?? "");
-		if (attempted.has(password) || attempted.size >= maxAttempts) return { success: false, duplicate: true };
-		attempted.add(password);
+		if (!stateful && attempted.has(password)) return attempted.get(password);
+		if (attempts >= maxAttempts) return { success: false, duplicate: true };
+		attempts++;
 		for (let retry = 0; retry < 3; retry++) {
+			options.beforeCall?.();
 			const result = await ns.dnet.authenticate(host, password);
 			if (result.success) return { success: true, password, result };
-			if (result.code !== 408) return { success: false, password, result };
+			if (result.code !== 408) { const failure = { success: false, password, result }; attempted.set(password, failure); return failure; }
 		}
 		return { success: false, password, result: { code: 408 } };
 	};
 	const feedback = async password => {
+		if (!stateful && responses.has(String(password))) return responses.get(String(password));
 		const result = await attempt(password);
 		if (result.success || result.duplicate) return { ...result, response: null };
+		if (result.result?.code !== 401) return { ...result, response: null };
+		options.beforeCall?.();
 		const bleed = await ns.dnet.heartbleed(host, { peek: true, logsToCapture: 20 });
-		return { ...result, response: bleed.success ? parsePasswordResponse(bleed.logs, String(password)) : null, bleed };
+		const response = { ...result, response: bleed.success ? parsePasswordResponse(bleed.logs, String(password)) : null, bleed };
+		if (!stateful) responses.set(String(password), response);
+		return response;
 	};
 
-	for (const candidate of staticCandidates(details)) { const r = await attempt(candidate); if (r.success) return solved(r, attempted); }
+	for (const candidate of staticCandidates(details)) { const r = await attempt(candidate); if (r.success) return solved(r, attempts); }
 	let result;
 	switch (details.modelId) {
 		case "PHP 5.4": result = await solveSorted(details, feedback); break;
@@ -80,10 +89,10 @@ export async function solveServer(ns, host, details, options = {}) {
 		case "(The Labyrinth)": result = await solveLabyrinth(feedback); break;
 		default: result = null;
 	}
-	return result?.success ? solved(result, attempted) : { success: false, reason: result?.reason || "unsupported-or-feedback-unavailable", attempts: attempted.size };
+	return result?.success ? solved(result, attempts) : { success: false, reason: result?.reason || "unsupported-or-feedback-unavailable", attempts };
 }
 
-function solved(result, attempted) { return { success: true, password: result.password, attempts: attempted.size }; }
+function solved(result, attempts) { return { success: true, password: result.password, attempts }; }
 
 async function solveOrderedNumber(details, feedback, lowerWord, higherWord, lo = 0, hi = null) {
 	hi ??= 10 ** Number(details.passwordLength || 1) - 1;

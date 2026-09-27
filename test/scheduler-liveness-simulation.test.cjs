@@ -69,3 +69,38 @@ test('idle replanning an established support target does not reset or pause its 
     assert.ok(sim.paid.some(p=>p.target==='foodnstuff'&&p.at>=sim.clock.now-60000));
     for(let t=faultAt;t<sim.clock.now;t+=30000) assert.ok(sim.paid.some(p=>p.target==='rich'&&p.at>=t&&p.at<t+30000));
 });
+
+test('a stalled incumbent cannot hold a productive peer in trial or block its own replacement', {timeout:120000}, async()=>{
+    const sim=boot({levelPerMinute:0,flags:{target:'foodnstuff','max-targets':2},backgroundTargets:{
+        rich:{max:200e6,money:200e6,sec:12,min:12,required:1,weakenTime:12000},
+        replacement:{max:150e6,money:15e6,sec:8,min:7,required:999999,weakenTime:10000},
+    }});
+    sim.run();await sim.clock.runUntil(sim.start+180000);
+    const old=sim.pool.pipelines.get('foodnstuff'), peer=sim.pool.pipelines.get('rich');
+    assert.ok(old&&peer);assert.equal(peer.trial,true);
+    const peerEpoch=peer.epoch;
+    // Request an owned rebuild, then hold its yielding tuner open. The real
+    // scheduler, workers, income guard and preparation perform the rest.
+    const tune=sim.pool.api.tuneTargetSteps;
+    sim.pool.api.tuneTargetSteps=function*(ns,name,...args) {
+        if(name==='foodnstuff') { while(true) yield null; }
+        else return yield* tune(ns,name,...args);
+    };
+    loadScript('lib/target-pipelines.js',sim.clock).beginPipelineDrain(sim.pool,old,
+        {kind:'drain',hard:false,reason:'injected stalled rebuild'});
+    sim.servers.get('replacement').required=1;
+    const faultAt=sim.clock.now;
+    await sim.clock.runUntil(sim.start+1300000);
+    assert.deepEqual(sim.errors.map(String),[]);
+    assert.equal(peer.trial,false,JSON.stringify({guard:sim.pool.trialGuard,status:sim.getPort(17).peek()}));
+    assert.equal(peer.epoch,peerEpoch);
+    assert.equal(peer.stats.restarts,0);
+    assert.equal(sim.killed.filter(k=>k.target==='rich').length,0);
+    assert.ok(sim.pool.history.some(p=>p.name==='foodnstuff'&&/stalled target replacement/.test(p.retireReason)));
+    assert.ok(sim.pool.pipelines.has('replacement'));
+    assert.ok(sim.paid.some(p=>p.target==='replacement'&&p.at>=sim.clock.now-60000));
+    assert.ok(sim.snapshots.every(s=>s.pipelines.length<=2));
+    for(let at=faultAt;at+60000<sim.clock.now;at+=60000)
+        assert.ok(sim.paid.some(p=>p.target==='rich'&&p.at>=at&&p.at<at+60000),`peer income at ${at}`);
+    for(const [host,ram]of sim.peakRam)assert.ok(ram<=sim.hosts.get(host).ram+1e-6,host);
+});

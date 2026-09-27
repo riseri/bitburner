@@ -1,26 +1,37 @@
 import { PORTS } from "lib/ports.js";
 import { solveServer } from "lib/darknet-solvers.js";
 import { darknetFormulaMetrics } from "lib/darknet-formulas.js";
+import { createCoordinator } from "lib/darknet-coordination.js";
 
 const AGENT = "darknet-agent.js", RUNNER = "darknet-bootstrap.js", PHISHER = "darknet-phish.js", SOLVERS = "lib/darknet-solvers.js", PORTS_FILE = "lib/ports.js", FORMULAS_FILE = "lib/darknet-formulas.js";
-const AGENT_VERSION = 5, CRAWLER_RAM = 15.9;
+const AGENT_VERSION = 7, CRAWLER_RAM = 15.9;
 const ACTIONS = { stasis: "darknet-stasis.js", migrate: "darknet-migrate.js", freeze: "darknet-freeze.js", stock: "darknet-stock.js", storm: "darknet-storm.js" };
-const DEPLOY_FILES = [RUNNER, AGENT, PHISHER, SOLVERS, PORTS_FILE, FORMULAS_FILE, ...Object.values(ACTIONS)];
+const DEPLOY_FILES = [RUNNER, AGENT, PHISHER, SOLVERS, PORTS_FILE, FORMULAS_FILE, "lib/darknet-coordination.js", ...Object.values(ACTIONS)];
 
 /** Roaming, disposable Darknet node. Durable state belongs to darknet-manager.js. @param {NS} ns */
 export async function main(ns) {
 	ns.disableLog("ALL");
 	const cfg = parseConfig(ns.args[0]);
+	const coordinator = createCoordinator(ns, cfg);
+	await Promise.all([crawl(ns, cfg, coordinator), heartbeat(ns, coordinator)]);
+}
+
+async function heartbeat(ns, coordinator) {
+	while (true) { coordinator.pulse(); await ns.asleep(5_000); }
+}
+
+async function crawl(ns, cfg, coordinator) {
 	const host = ns.getHostname();
 	const retryAt = new Map();
 	emit(ns, cfg, { kind: "agent", host, state: "started" });
 	let cycles = 0;
 	while (true) {
 		try {
-			await serviceCurrentHost(ns, cfg);
+			await serviceCurrentHost(ns, cfg, coordinator);
 			const neighbors = orderedNeighbors(ns, ns.dnet.probe());
+			for (const target of retryAt.keys()) if (!neighbors.includes(target)) retryAt.delete(target);
 			await visitNeighbors(neighbors.filter(target => Date.now() >= Number(retryAt.get(target) || 0)), cfg.concurrency, async target => {
-				const result = await visitNeighbor(ns, cfg, target);
+				const result = await visitNeighbor(ns, cfg, target, coordinator);
 				if (result?.blocked) retryAt.set(target, Date.now() + (result.retryDelay || cfg.retryDelay));
 				else retryAt.delete(target);
 			});
@@ -31,62 +42,110 @@ export async function main(ns) {
 	}
 }
 
-async function visitNeighbor(ns, cfg, target) {
-	let details;
-	try { details = ns.dnet.getServerDetails(target); } catch { return { blocked: true }; }
-	const formulaMetrics = darknetFormulaMetrics(ns, details, runningThreads(ns));
-	emit(ns, cfg, { kind: "seen", host: target, from: ns.getHostname(), details: compactDetails(details, formulaMetrics) });
+export async function visitNeighbor(ns, cfg, target, coordinator) {
+	let details, formulaMetrics;
+	try {
+		await coordinator.withApi(() => {
+			details = ns.dnet.getServerDetails(target);
+			formulaMetrics = darknetFormulaMetrics(ns, details, runningThreads(ns));
+			emit(ns, cfg, { kind: "seen", host: target, from: ns.getHostname(), details: compactDetails(details, formulaMetrics) });
+		});
+	} catch { return { blocked: true }; }
 	if (!details.isOnline || !details.isConnectedToCurrentServer) return { blocked: true };
-	let password = cluePassword(ns, target);
-	let connected = false;
-	if (password != null && ns.getServer(target).hasAdminRights) connected = ns.dnet.connectToSession(target, password).success;
-	if (!connected && !details.hasSession) {
-		emit(ns, cfg, { kind: "cracking", host: target, from: ns.getHostname(), modelId: details.modelId, difficulty: details.difficulty });
-		const solved = password != null ? await authenticateKnown(ns, target, password) : await solveServer(ns, target, details, { maxAttempts: cfg.maxAttempts });
-		if (!solved.success) { emit(ns, cfg, { kind: "blocked", host: target, modelId: details.modelId, reason: solved.reason, attempts: solved.attempts }); if (cfg.freezeUnknown && details.depth >= cfg.freezeDepth) launchAction(ns, cfg, ACTIONS.freeze, target); return { blocked: true, retryDelay: formulaRetryDelay(formulaMetrics, solved.attempts) }; }
-		password = solved.password;
-		emit(ns, cfg, { kind: "credential", host: target, password, modelId: details.modelId, attempts: solved.attempts });
-	}
-	await reclaimTarget(ns, target, details, formulaMetrics);
-	await deploy(ns, cfg, target);
+	const access = await establishSession(ns, cfg, target, details, formulaMetrics, coordinator);
+	if (!access.ok) return { blocked: true, retryDelay: access.retryDelay || 5_000 };
+	await reclaimTarget(ns, target, details, formulaMetrics, coordinator);
+	await coordinator.withApi(() => deploy(ns, cfg, target, coordinator));
 	return { blocked: false };
 }
 
-async function authenticateKnown(ns, host, password) {
-	for (let i = 0; i < 3; i++) { const result = await ns.dnet.authenticate(host, password); if (result.success) return { success: true, password, attempts: i + 1 }; if (result.code !== 408) break; }
-	return { success: false, reason: "known-credential-rejected", attempts: 3 };
-}
-
-async function reclaimTarget(ns, target, details, metrics = null) {
-	const blocked = safe(() => ns.dnet.getBlockedRam(target), Number(details?.blockedRam) || 0);
-	metrics ||= darknetFormulaMetrics(ns, details, runningThreads(ns));
-	const estimatedCalls = metrics?.ramPerCall > 0 ? Math.ceil(blocked / metrics.ramPerCall) + 2 : 100;
-	const maxCalls = Math.max(1, Math.min(100, estimatedCalls));
-	for (let i = 0; i < maxCalls && safe(() => ns.dnet.getBlockedRam(target), 0) > 0; i++) {
-		const result = await ns.dnet.memoryReallocation(target); if (!result.success && result.code !== 408) break;
+export async function establishSession(ns, cfg, target, details, metrics, coordinator) {
+	if (details.hasSession) return { ok: true };
+	const connect = password => coordinator.withApi(() => ns.dnet.connectToSession(target, password));
+	let password = coordinator.credential(target);
+	if (password != null && (await connect(password)).success) return { ok: true };
+	let grant = await coordinator.acquire(target, compactDetails(details, metrics), metrics, password != null);
+	// The registry may have been updated between our snapshot read and the grant request.
+	if (!grant.token && grant.password != null) {
+		password = grant.password;
+		if ((await connect(password)).success) return { ok: true };
+		grant = await coordinator.acquire(target, compactDetails(details, metrics), metrics, true);
+	}
+	if (!grant.token) return { ok: false, retryDelay: 5_000 };
+	const token = grant.token, progress = () => coordinator.progress(target, token);
+	// Recheck the lease when the call actually starts, after waiting in the PID queue.
+	const solverNs = { dnet: {
+		authenticate: (...args) => coordinator.withApi(() => { progress(); return ns.dnet.authenticate(...args); }),
+		heartbleed: (...args) => coordinator.withApi(() => { progress(); return ns.dnet.heartbleed(...args); }),
+	} };
+	try {
+		password = grant.password ?? password ?? await coordinator.withApi(() => cluePassword(ns, target));
+		let solved;
+		if (password != null) {
+			progress();
+			solved = (await connect(password)).success ? { success: true, password, attempts: 0 } : await authenticateKnown(solverNs, target, password);
+			// A bad local clue is only a hint. Try the actual model under the same lease.
+			if (!solved.success && grant.password == null && solved.code === 401) password = null;
+		}
+		if (password == null) solved = await solveServer(solverNs, target, details, { maxAttempts: cfg.maxAttempts });
+		if (solved.success) {
+			const result = await coordinator.finish({ kind: "credential", host: target, token, password: solved.password, modelId: details.modelId, attempts: solved.attempts });
+			return { ok: result.ok };
+		}
+		const retryDelay = formulaRetryDelay(metrics, solved.attempts) || cfg.retryDelay;
+		await coordinator.finish({ kind: "blocked", host: target, token, modelId: details.modelId, reason: solved.reason, attempts: solved.attempts, retryDelay,
+			rejectedPassword: solved.code === 401 ? grant.password : null });
+		if (cfg.freezeUnknown && details.depth >= cfg.freezeDepth) await coordinator.withApi(() => launchAction(ns, cfg, ACTIONS.freeze, target));
+		return { ok: false, retryDelay };
+	} catch (error) {
+		await coordinator.finish({ kind: "blocked", host: target, token, reason: String(error?.message ?? error), retryDelay: cfg.retryDelay });
+		return { ok: false, retryDelay: cfg.retryDelay };
 	}
 }
 
-async function deploy(ns, cfg, target) {
-	if (!await ns.scp(DEPLOY_FILES, target, "home")) { emit(ns, cfg, { kind: "blocked", host: target, reason: "scp-failed" }); return; }
+async function authenticateKnown(ns, host, password, beforeCall = () => {}) {
+	let result;
+	for (let i = 0; i < 3; i++) {
+		beforeCall(); result = await ns.dnet.authenticate(host, password);
+		if (result.success) return { success: true, password, attempts: i + 1 };
+		if (result.code !== 408) return { success: false, code: result.code, reason: `known-credential-${result.code}`, attempts: i + 1 };
+	}
+	return { success: false, code: result.code, reason: "known-credential-timeout", attempts: 3 };
+}
+
+async function reclaimTarget(ns, target, details, metrics, coordinator) {
+	const blocked = await coordinator.withApi(() => {
+		metrics ||= darknetFormulaMetrics(ns, details, runningThreads(ns));
+		return safe(() => ns.dnet.getBlockedRam(target), Number(details?.blockedRam) || 0);
+	});
+	const estimatedCalls = metrics?.ramPerCall > 0 ? Math.ceil(blocked / metrics.ramPerCall) + 2 : 100;
+	const maxCalls = Math.max(1, Math.min(100, estimatedCalls));
+	for (let i = 0; i < maxCalls; i++) {
+		const result = await coordinator.withApi(() => safe(() => ns.dnet.getBlockedRam(target), 0) > 0 ? ns.dnet.memoryReallocation(target) : null);
+		if (!result || (!result.success && result.code !== 408)) break;
+	}
+}
+
+async function deploy(ns, cfg, target, coordinator) {
 	const crawlers = ns.ps(target).filter(p => [AGENT, RUNNER].includes(p.filename));
 	if (crawlers.some(process => agentVersion(process) === AGENT_VERSION)) return;
+	if (!await ns.scp(DEPLOY_FILES, target, "home")) { await coordinator.request({ kind: "blocked", host: target, reason: "scp-failed" }); return; }
 	for (const process of crawlers.filter(p => agentVersion(p) !== AGENT_VERSION)) ns.kill(process.pid);
 	const ram = ns.getServerMaxRam(target) - ns.getServerUsedRam(target), agentRam = CRAWLER_RAM;
-	if (ram < agentRam) { emit(ns, cfg, { kind: "blocked", host: target, reason: "agent-ram", freeRam: ram, requiredRam: agentRam }); return; }
+	if (ram < agentRam) { await coordinator.request({ kind: "blocked", host: target, reason: "agent-ram", freeRam: ram, requiredRam: agentRam }); return; }
 	const phishReserve = cfg.phish && target !== "darkweb" ? ns.getScriptRam(PHISHER, target) : 0;
 	const scalableRam = ram >= agentRam + phishReserve ? ram - phishReserve : ram;
 	const threads = Math.max(1, Math.min(cfg.agentThreads, Math.floor(scalableRam / agentRam)));
 	const pid = ns.exec(RUNNER, target, { threads, ramOverride: agentRam, preventDuplicates: true, temporary: true }, JSON.stringify(cfg));
-	if (!pid) emit(ns, cfg, { kind: "blocked", host: target, reason: "exec-failed", freeRam: ram, requiredRam: agentRam * threads });
-	else emit(ns, cfg, { kind: "deployed", host: target, pid, threads });
+	if (!pid) await coordinator.request({ kind: "blocked", host: target, reason: "exec-failed", freeRam: ram, requiredRam: agentRam * threads });
+	else await coordinator.request({ kind: "deployed", host: target, deployedPid: pid, threads });
 }
 
-async function serviceCurrentHost(ns, cfg) {
+async function serviceCurrentHost(ns, cfg, coordinator) {
 	const host = ns.getHostname();
 	if (host !== "home" && host !== "darkweb") {
 		for (const file of ns.ls(host, ".cache")) {
-			try { const reward = ns.dnet.openCache(file, true); emit(ns, cfg, { kind: "cache", host, file, reward: reward?.message || "opened" }); } catch {}
+			try { const reward = ns.dnet.openCache(file, true); await coordinator.request({ kind: "cache", host, file, reward: reward?.message || "opened" }); } catch {}
 		}
 		if (cfg.stasis && safe(() => ns.dnet.getDepth(host), -1) >= cfg.stasisDepth) launchAction(ns, cfg, ACTIONS.stasis);
 		launchPhishing(ns, cfg);
@@ -117,7 +176,11 @@ function launchAction(ns, cfg, script, target = "") {
 export async function visitNeighbors(neighbors, concurrency, visitor) {
 	let next = 0;
 	const worker = async () => { while (next < neighbors.length) { const index = next++; await visitor(neighbors[index]); } };
-	await Promise.all(Array.from({ length: Math.min(neighbors.length, Math.max(1, concurrency)) }, worker));
+	// Drain every worker before returning to crawl's unqueued API calls, even if
+	// one visit fails while another still has an authentication in flight.
+	const results = await Promise.allSettled(Array.from({ length: Math.min(neighbors.length, Math.max(1, concurrency)) }, worker));
+	const failed = results.find(result => result.status === "rejected");
+	if (failed) throw failed.reason;
 }
 
 export function orderedNeighbors(ns, neighbors) {
@@ -130,19 +193,31 @@ function neighborRank(ns, host) {
 	return (d.hasSession ? -1e12 : 0) + (Number(d.requiredCharismaSkill) || 0) * 1e6 + (Number(d.difficulty) || 0) * 1e3 + (Number(d.depth) || 0);
 }
 
-function cluePassword(ns, target) {
+export function cluePassword(ns, target) {
+	const neighbors = ns.dnet.probe();
 	for (const file of ns.ls(ns.getHostname()).filter(name => /\.(txt|lit|msg)$/.test(name))) {
 		const text = String(ns.read(file));
-		for (const match of text.matchAll(/([^\s:]+):([^\s]+)/g)) if (match[1] === target) return match[2];
-		const direct = text.match(new RegExp(`(?:password|passcode|key)(?:\\s+is|:)\\s*["']?([^\\s"']+)`, "i"));
-		if (direct && ns.dnet.probe().length === 1 && ns.dnet.probe()[0] === target) return direct[1];
+		const password = passwordFromClue(text, target, neighbors.length === 1 && neighbors[0] === target);
+		if (password != null) return password;
 	}
 	return null;
 }
 
+export function passwordFromClue(text, target, onlyNeighbor = false) {
+	const host = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const named = text.match(new RegExp(`(?:^|\\s)Server:\\s*${host}\\s+Password:\\s*"([^"]*)"`, "i"));
+	if (named) return named[1];
+	const pair = text.match(new RegExp(`(?:^|\\s)${host}:(?:"([^"]*)"|'([^']*)'|([^\\s]+))(?=\\s|$)`));
+	if (pair) return pair[1] ?? pair[2] ?? pair[3];
+	// A named clue for some other host must never become an unnamed local hint.
+	if (!onlyNeighbor || /Server:/i.test(text)) return null;
+	const direct = text.match(/(?:password|passcode|key)(?:\s+is|:)\s*(?:"([^"]*)"|'([^']*)'|([^\r\n]+))/i);
+	return direct ? (direct[1] ?? direct[2] ?? direct[3].trim()) : null;
+}
+
 export function parseConfig(raw) {
 	let input = {}; try { input = JSON.parse(String(raw || "{}")); } catch {}
-	return { version: AGENT_VERSION, eventPort: Number(input.eventPort) || PORTS.DARKNET_EVENTS, interval: Math.max(1_000, Number(input.interval) || 5_000),
+	return { version: AGENT_VERSION, eventPort: Number(input.eventPort) || PORTS.DARKNET_EVENTS, coordinationPort: Number(input.coordinationPort) || PORTS.DARKNET_STATUS, interval: Math.max(1_000, Number(input.interval) || 5_000),
 		maxAttempts: Math.max(25, Number(input.maxAttempts) || 600), retryDelay: Math.max(5_000, Number(input.retryDelay) || 60_000),
 		concurrency: Math.max(1, Math.min(16, Number(input.concurrency) || 4)), agentThreads: Math.max(1, Number(input.agentThreads) || 4),
 		phish: input.phish !== false, phishThreads: Math.max(1, Number(input.phishThreads) || 1024),

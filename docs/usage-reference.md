@@ -80,7 +80,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--share` | `true` | Fill spare home and unreserved remote RAM with elastic faction-share workers |
 | `--darknet` / `--darknet-phish` | `true` / `true` | Supervise exploration and idle phishing; disabling Darknet also skips automatic navigator purchases/savings |
 | `--darknet-phish-threads` / `--darknet-max-attempts` | `1024` / `600` | Bound per-server phishing workers and password attempts |
-| `--darknet-concurrency` / `--darknet-agent-threads` | `4` / `4` | Crack several visible neighbors concurrently and scale roaming calls when a server has spare RAM |
+| `--darknet-concurrency` / `--darknet-agent-threads` | `4` / `4` | Keep bounded neighbor workflows in flight, interleaving API calls per PID, and scale roaming calls when a server has spare RAM |
 | `--darknet-stasis` / `--darknet-stasis-depth` | `false` / `8` | Opt in to scarce stasis links on sufficiently deep servers |
 | `--darknet-migrate` / `--darknet-migrate-depth` | `false` / `8` | Opt in to induced migration of deep movable neighbors |
 | `--darknet-promote-stock` / `--darknet-stock-symbols` | `false` / `auto` | Opt in to volatility promotion for held or explicitly listed symbols |
@@ -146,16 +146,28 @@ The roaming crawler enters through a 15.90 GB dynamic-RAM bootstrap, below the
 16 GB `darkweb` limit; the game still enforces every API actually called. Expensive
 optional calls (stasis, migration, stock promotion, freezing, and Storm Seed) run
 as isolated one-shot workers so enabling their code cannot prevent exploration.
-Neighbor authentication is bounded-concurrent, preventing one slow server from
-stalling every other visible route.
+Neighbor workflows are bounded-concurrent. Bitburner allows only one timed
+Netscript call per PID ([upstream concurrency guard](https://github.com/bitburner-official/bitburner-src/blob/stable/src/Netscript/NetscriptHelpers.tsx#L375-L407)), so each agent queues its API calls and interleaves neighbors
+between attempts. Separate agents can authenticate simultaneously. Heartbeats use
+`asleep` and cached port handles so they remain safe during a timed API call.
 
 To restart a supervisor-launched coordinator without reproducing its arguments,
 use `run darknet-restart.js` on home while the supervisor is running. It stops the
 manager by PID and gives the supervisor time to replace it with its saved arguments.
-If no replacement appears, the helper starts the manager directly with default arguments.
+If no replacement appears, the helper reclaims home share-worker RAM and starts the
+manager directly, preserving the stopped manager's arguments when available and
+otherwise using defaults. The manager also reclaims sharing RAM when launching its
+home crawler, while preserving the configured home/utility reserve. The supervisor
+restart helper likewise makes home sharing yield before launching its replacement.
 Use `run darknet-status.js` for a one-shot activity report, or
-`run darknet-status.js --watch` for a live tail window showing coverage, agents,
-deployments, caches, blockers, and the most recent event.
+`run darknet-status.js --watch` for a live tail window showing saved credentials
+versus known servers, live agents, active lease owners/models/ages, deepest discovery,
+deployments, caches, blockers, errors, and recovered leases. A credential count is
+not a session count: every PID must establish its own session. The compact dashboard
+shows `creds / known`, agents, and the number of active cracking leases. A new home
+crawler reports `WAIT` until its heartbeat arrives; missing heartbeats, exited
+crawlers, and zero active agents report `BLOCKED`. The detailed report retains the
+last agent error and counts home crawler restarts during this manager run.
 After syncing dashboard changes, use `run supervisor-restart.js` to reload the
 supervisor while preserving its saved command-line flags.
 
@@ -163,6 +175,17 @@ When `Formulas.exe` becomes available, active agents immediately use Darknet
 formulas to estimate authentication and Heartbleed timing, retry cooldowns, and
 the number of memory-reallocation calls. The coordinator and dashboard expose the
 active mode; no Darknet service restart is needed.
+
+The API audit used the repository's `NetscriptDefinitions.d.ts` and upstream
+[Darknet API implementation](https://github.com/bitburner-official/bitburner-src/blob/stable/src/NetscriptFunctions/Darknet.ts),
+[timing and clue generation](https://github.com/bitburner-official/bitburner-src/blob/stable/src/DarkNet/effects/effects.ts),
+and [model IDs](https://github.com/bitburner-official/bitburner-src/blob/stable/src/DarkNet/Enums.ts).
+All 25 listed model families have solver paths. Authentication requires a direct
+neighbor; `connectToSession` reuses credentials on already-rooted servers without
+the timed authentication step. Four threads reduce the base authentication time
+to 62.5% of the single-thread time, before other modifiers. Low charisma can make
+authentication slow and prevent heartbleed feedback altogether; network movement,
+instability, blocked RAM, and model attempt limits remain real progression limits.
 
 The default supervisor settings enable exploration,
 loot, and phishing but do not enable consequential topology mutations. Stasis,

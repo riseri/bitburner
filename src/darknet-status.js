@@ -28,12 +28,15 @@ export function report(ns) {
 		return lines;
 	}
 	const age = Math.max(0, Date.now() - Number(snapshot.generatedAt || 0));
-	lines.push(`Heartbeat: ${snapshot.state} | age ${(age / 1000).toFixed(1)}s | Formulas ${snapshot.formulas ? "ON" : "OFF"}`);
-	lines.push(`Coverage: ${Number(snapshot.authenticated) || 0}/${Number(snapshot.known) || 0} authenticated | ${Number(snapshot.activeAgents) || 0} active agents`);
+	lines.push(`Heartbeat: ${!manager || age > 15_000 ? "STALE (last reported state below)" : snapshot.state} | age ${(age / 1000).toFixed(1)}s | Formulas ${snapshot.formulas ? "ON" : "OFF"}`);
+	lines.push(`Coverage: ${Number(snapshot.credentials) || 0} creds / ${Number(snapshot.known) || 0} known | ${Number(snapshot.activeAgents) || 0} active agents | deepest ${Number(snapshot.deepest) || 0}`);
 	const cracking = Array.isArray(snapshot.cracking) ? snapshot.cracking : [];
-	lines.push(`Activity: ${cracking.length ? `cracking ${cracking.map(item => `${item.host} (${item.modelId || "unknown"})`).join(", ")}` : "no authentication calls in flight"}`);
+	lines.push(`Activity: ${cracking.length ? `cracking ${cracking.map(item => `${item.host} (${item.modelId || "unknown"}, PID ${item.pid}, ${Math.max(0, Math.floor((Date.now() - item.since) / 1000))}s)`).join(", ")}` : "no active cracking leases"}`);
+	lines.push(`Coordination: ${Number(snapshot.leaseContentions) || 0} duplicate cracks prevented | ${Number(snapshot.leaseRecoveries) || 0} leases recovered`);
 	lines.push(`Results: ${Number(snapshot.deployments) || 0} deployments | ${Number(snapshot.caches) || 0} caches | ${Number(snapshot.blocked) || 0} blocked attempts | ${Number(snapshot.errors) || 0} errors`);
 	if (snapshot.blocker) lines.push(`BLOCKER: ${snapshot.blocker}`);
+	if (snapshot.homeAgentRestarts) lines.push(`Home crawler restarts: ${snapshot.homeAgentRestarts}`);
+	if (snapshot.lastError) lines.push(`Last agent error: ${snapshot.lastError}`);
 	lines.push(`Last event: ${snapshot.last || "none"}`);
 	const blocked = Array.isArray(snapshot.currentBlockers) ? snapshot.currentBlockers.slice(0, 8) : [];
 	if (blocked.length) lines.push(`Current server blockers: ${blocked.map(item => `${item.host}=${item.reason}${Number.isFinite(item.freeRam) ? ` (${Number(item.freeRam).toFixed(2)}/${Number(item.requiredRam).toFixed(2)} GB)` : ""}`).join(" | ")}`);

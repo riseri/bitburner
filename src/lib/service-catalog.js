@@ -54,7 +54,7 @@ export function supervisorFiles(cfg, capabilities = null) {
         files.push("home-upgrade.js", "node-complete.js", "intelligence-handoff.js", "intelligence-farm.js");
     if (singularity && cfg.progression && cfg.progressionActions) files.push("progression-purchase.js", "progression-backdoor.js");
     if (darknet && cfg.darknet) files.push("darknet-bootstrap.js", "darknet-agent.js", "darknet-phish.js", "darknet-stasis.js",
-        "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js", "lib/darknet-solvers.js", "lib/darknet-formulas.js");
+        "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js", "lib/darknet-solvers.js", "lib/darknet-formulas.js", "lib/darknet-coordination.js", "lib/home-share.js");
     return files;
 }
 

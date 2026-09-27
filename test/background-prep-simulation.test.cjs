@@ -108,3 +108,37 @@ test('post-reset empty second slot chooses a fast-paying target instead of a lon
     assert.ok(sim.paid.some(p => p.target === 'phantasy'),
         'the incumbent must keep earning while the second slot is acquired');
 });
+
+
+test('real distributed prep workers repair a 2.8% target in a few waves despite completion-time security changes', async () => {
+    const { loadScript } = require('./helpers.cjs');
+    const sim = new NetscriptSimulation({ hostCount: 4, levelPerMinute: 0, weakenTime: 300000,
+        money: 4.96e9 * .028, sec: 12 });
+    for (const [name, host] of sim.hosts) if (name !== 'home') host.ram = 4096;
+    const api = loadScript('lib/background-prep.js', sim.clock), ns = sim.ns(sim.controller);
+    const state = api.createBackgroundPrep(); state.target = sim.target;
+    const stats = sim.daemon.createStats(); stats.pipeline.productiveMs = 500000;
+    const cfg = { backgroundPrep: state, homeReserve: 8 };
+    const running = new Map(), reservations = [], foreign = new Map();
+    const hosts = [...sim.hosts].map(([name, host]) => ({ name, maxRam: host.ram, cores: host.cores }));
+    const ctx = { state, target: 'incumbent', cfg, stats, healthy: true,
+        network: { hosts, servers: [sim.target] }, runtime: { plan: { period: 500 } },
+        spareRam: host => sim.daemon.availableRam(ns, host, cfg, running, reservations, sim.clock.now, Infinity, foreign) };
+    let firstGrowHosts = 0, grows = 0, lastWave = 0;
+    for (let tick = 0; tick < 7200 && state.status !== 'READY'; tick++) {
+        stats.lastHackAt = sim.clock.now;
+        api.tickBackgroundPrep(ns, ctx);
+        if (state.active?.phase === 'G' && state.waves !== lastWave) {
+            lastWave = state.waves; grows++;
+            firstGrowHosts ||= state.active.jobs.length;
+        }
+        assert.equal(api.backgroundPrepRam(state), api.backgroundPrepJobs(state).reduce((n, job) => n + job.ram, 0));
+        await sim.clock.runUntil(sim.clock.now + 500);
+    }
+    assert.deepEqual(sim.errors, []);
+    assert.ok(firstGrowHosts > 1, 'a complete grow requirement must span workers');
+    assert.equal(state.status, 'READY');
+    assert.ok(grows <= 3, `expected a few meaningful grow waves, got ${grows}`);
+    assert.ok(sim.server.money >= sim.server.max * .9999); assert.ok(sim.server.sec <= sim.server.min + .001);
+    for (const [host, ram] of sim.peakRam) assert.ok(ram <= sim.hosts.get(host).ram + 1e-6);
+});

@@ -1,3 +1,5 @@
+import { reclaimHomeShare } from "lib/home-share.js";
+
 const HOME = "home", SUPERVISOR = "supervisor.js", BOOTSTRAP = "bootstrap.js";
 
 /** Reload supervisor code while preserving its saved arguments. @param {NS} ns */
@@ -9,6 +11,7 @@ export async function main(ns) {
 		ns.tprint(`${stopped ? "Stopped" : "Could not stop"} ${SUPERVISOR} PID ${process.pid}`);
 	}
 	await ns.sleep(1_000);
+	reclaimHomeShare(ns, Math.max(ns.getScriptRam(BOOTSTRAP, HOME), ns.getScriptRam(SUPERVISOR, HOME)));
 	const pid = ns.run(BOOTSTRAP, { threads: 1, temporary: true });
 	if (!pid) { ns.tprint(`ERROR: could not start ${BOOTSTRAP}; inspect home free RAM and script availability`); return; }
 	ns.tprint(`Started ${BOOTSTRAP} PID ${pid}; it will restore the saved supervisor arguments`);

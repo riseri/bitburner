@@ -35,6 +35,20 @@ occupied and both lanes are stable and productive, spare RAM can prepare a third
 candidate. A stronger ready candidate replaces the support lane after its owned
 work drains; at most two earning lanes remain active.
 
+A target that has stopped earning for ten minutes can also be replaced when its
+peer is validated and productive. Initial warmup is allowed to finish first.
+This replacement uses the empty-slot marginal income floor instead of requiring
+a candidate to beat the stalled target's old model. Preparation uses spare RAM
+and the healthy peer's health checks; the old target still drains owned work
+before the replacement is admitted. If the old target recovers, normal promotion
+requirements apply again.
+
+Quiescent established targets receive the same incremental tuning opportunities
+as new trials, including scheduler gaps above 20 ms. If maintenance cannot get a
+window for five seconds, new batch planning is deferred until a gap above 50 ms
+opens. Committed launches continue to run. Maintenance rotates between targets
+so one target's preparation cannot monopolize the available windows.
+
 Formula, skill, and capacity retunes are elective. The daemon never drains its only
 productive lane for one of those optimizations; it waits until another fully
 productive lane can cover income. Safety recovery may still pause the affected
@@ -102,6 +116,17 @@ After a successful three-minute post-warmup trial, the higher measured earner
 gets priority. The smaller earner becomes optional and remains subject to the
 same shared-load/income protections. Retired targets keep their earned-money
 history and have a ten-minute readmission cooldown.
+
+If the incumbent stops earning or is tuning/recovering, a trial can validate
+independently. It must finish its original observation period, accumulate two
+productive minutes, and then sustain three minutes of recent income with new
+successful batches. Measured income must reach either 95% of the incumbent's
+admission income baseline or 70% of the trial's own modeled income, so a failed
+richer incumbent cannot permanently block a viable smaller successor.
+A new worker miss or income gap resets that independent evidence window. Shared
+overload checks still apply. The incumbent's rebuild cycles do not erase the
+healthy trial's own evidence. On success the earning trial gets priority while
+the stalled incumbent continues recovery or becomes eligible for replacement.
 
 A normal retirement stops new admissions and queued Hacks, lets committed repair
 tails settle, then releases only owned state. Catastrophic retirement cancels

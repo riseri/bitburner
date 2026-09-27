@@ -484,6 +484,7 @@ function createManagedServices(ns, cfg, daemonArgs) {
 		["--port", PORTS.DARKNET_STATUS, "--event-port", PORTS.DARKNET_EVENTS,
 			"--phish", cfg.darknetPhish, "--phish-threads", cfg.darknetPhishThreads, "--max-attempts", cfg.darknetMaxAttempts,
 			"--concurrency", cfg.darknetConcurrency, "--agent-threads", cfg.darknetAgentThreads,
+			"--home-reserve", Math.max(cfg.homeReserve || 0, cfg.shareReserve || 0),
 			"--stasis", cfg.darknetStasis, "--stasis-depth", cfg.darknetStasisDepth,
 			"--migrate", cfg.darknetMigrate, "--migrate-depth", cfg.darknetMigrateDepth,
 			"--promote-stock", cfg.darknetPromoteStock, "--stock-symbols", cfg.darknetStockSymbols,
@@ -849,11 +850,12 @@ function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, pr
 	if (!cfg.darknet) row("8 Darknet", status("OFF", "disabled by setting"));
 	else if (!darknet) row("8 Darknet", waiting(DARKNET_MANAGER, "waiting for status"));
 	else if (!darknet.unlocked) row("8 Darknet", status("LOCKED", "saving for DarkscapeNavigator.exe"));
-	else if (darknet.state === "BLOCKED" || (darknet.currentBlockers?.length && !Number(darknet.deployments))) row("8 Darknet", status("BLOCKED", darknet.blocker || formatDarknetBlocker(darknet.currentBlockers[0]) || darknet.last || "crawler could not start"));
+	else if (darknet.state === "STARTING") row("8 Darknet", status("WAIT", darknet.blocker || "waiting for crawler heartbeat"));
+	else if (darknet.state === "BLOCKED" || (darknet.currentBlockers?.length && !Number(darknet.deployments))) row("8 Darknet", status("BLOCKED", darknet.blocker || formatDarknetBlocker(darknet.currentBlockers?.[0]) || darknet.last || "crawler could not start"));
+	else if (!Number(darknet.activeAgents)) row("8 Darknet", status("BLOCKED", "0 active agents; run darknet-status.js"));
 	else {
 		const cracking = Array.isArray(darknet.cracking) ? darknet.cracking : [];
-		const activity = cracking.length ? `cracking ${cracking.slice(0, 3).map(item => item.host).join(", ")}${cracking.length > 3 ? ` +${cracking.length - 3}` : ""}` : (darknet.last || "waiting for probe");
-		row("8 Darknet", status(cracking.length ? "RUN" : "OK", `${darknet.authenticated}/${darknet.known} authenticated | ${darknet.activeAgents} agents | ${activity}`));
+		row("8 Darknet", status(cracking.length ? "RUN" : "OK", `${Number(darknet.credentials) || 0} creds / ${darknet.known} known | ${darknet.activeAgents} agents | ${cracking.length} cracking`));
 		row("Darknet results", `${Number(darknet.deployments) || 0} deployments | ${Number(darknet.caches) || 0} caches | ${Number(darknet.blocked) || 0} blocked | ${Number(darknet.errors) || 0} errors`);
 	}
 
@@ -1270,9 +1272,10 @@ function renderDarknet(ns, darknet, cfg) {
 	if (!darknet) { row("Status", "Starting / waiting for coordinator"); return; }
 	if (!darknet.unlocked) { row("Status", "Locked; DarkscapeNavigator.exe is the next Darknet prerequisite"); return; }
 	if (darknet.state === "BLOCKED") row("Status", `Blocked: ${darknet.blocker || "crawler could not start"}`);
-	row("Coverage", `${Number(darknet.authenticated) || 0}/${Number(darknet.known) || 0} authenticated | ${Number(darknet.activeAgents) || 0} active agents`);
+	row("Coverage", `${Number(darknet.credentials) || 0} creds / ${Number(darknet.known) || 0} known | ${Number(darknet.activeAgents) || 0} active agents | depth ${Number(darknet.deepest) || 0}`);
 	const cracking = Array.isArray(darknet.cracking) ? darknet.cracking : [];
-	row("Activity", cracking.length ? `Cracking ${cracking.map(item => `${item.host} (${item.modelId || "unknown"})`).join(", ")}` : (darknet.last || "Waiting for probe"));
+	row("Activity", cracking.length ? `Cracking ${cracking.map(item => `${item.host} (${item.modelId || "unknown"}, PID ${item.pid}, ${Math.max(0, Math.floor((Date.now() - item.since) / 1000))}s)`).join(", ")}` : "No active cracking leases");
+	row("Coordination", `${Number(darknet.leaseContentions) || 0} duplicate cracks prevented | ${Number(darknet.leaseRecoveries) || 0} leases recovered`);
 	row("Planning", darknet.formulas ? "Exact Darknet Formulas" : "Adaptive fallback; switches live when Formulas.exe appears");
 	row("Loot", `${Number(darknet.caches) || 0} caches | ${Number(darknet.deployments) || 0} deployments | ${Number(darknet.blocked) || 0} blocked attempts`);
 	row("Stability", `${Number(darknet.stasis) || 0} stasis links | auth +${(100 * Number(darknet.instability?.authenticationDurationMultiplier - 1 || 0)).toFixed(1)}% | timeout ${(100 * Number(darknet.instability?.authenticationTimeoutChance || 0)).toFixed(1)}%`);

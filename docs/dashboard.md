@@ -19,6 +19,12 @@ mid-batch target money/security dip is displayed without declaring the pipeline
 broken. Warmup, paused recovery and draining take precedence over historical
 Hack completions. Normal zero counters are not a claim of universal stability.
 
+Multi-target promotion pauses name the blocking target and state, with elapsed
+stall time and tuning retry or scheduler-wait information. Trials show their
+observation progress or the incumbent they are waiting on. During tuning,
+preparation or draining, saved plan generations are labeled `RETAINED`; they do
+not imply that the target is currently earning.
+
 The default daemon no longer prints the old four-row `TARGETS / NEXT 10M / PLANNING SNAPSHOT` table. When background preparation is active, that target is shown directly as the actionable next target with ETA, health, potential and held RAM. When background prep is disabled or has no candidate, the daemon shows only the best alternative candidate. The full ranking remains available in details as `AUTO TARGET RANKING / DETAILS`, where the next-ten-minute and steady-state rates are explicitly labeled.
 
 Long reasons and action descriptions wrap instead of running off the right edge.

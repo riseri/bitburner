@@ -95,13 +95,41 @@ worker ports or target selection.
 
 ## Darknet service
 
-Port 10 carries the singleton `darknet-manager.js` heartbeat and port 9 is a
-bounded event queue from disposable Darknet agents. The manager owns the durable,
+Port 10 carries the singleton `darknet-manager.js` heartbeat and an immutable
+coordination snapshot (credentials, leases, replies). Port 9 is a bounded request
+and observation queue from disposable Darknet agents. The manager owns the durable,
 reset-bound `data/darknet-state.json` record and launches one home agent after
 `DarkscapeNavigator.exe` is available. Agents authenticate neighboring servers,
 copy themselves and their dependencies, recover blocked RAM, open caches and
 launch bounded phishing workers. A lost or moved server therefore affects only
 its local disposable processes; surviving neighbors rediscover it.
+
+Agents reuse shared credentials with `connectToSession` before requesting a crack
+lease. Only the manager grants per-host leases, and it saves grants, results and
+one deduplicated reply per agent before publishing acknowledgements. Agents retry
+full queues with backpressure; an unavailable manager pauses new cracking and
+holds pending results in the agent until acknowledged. Different hosts still run
+concurrently. Lost observational events cannot grant or release a lease.
+
+Workers pulse every five seconds, including while awaiting authentication. Cached
+port handles and `asleep` keep these pulses outside Netscript's per-PID blocking
+call restriction. Bounded neighbor workflows share one API queue in each PID;
+different agents still run timed calls simultaneously. Leases
+expire after 60 seconds without renewal. Dead owners are removed on the next
+coordinator pass (at most one second); expired live owners are stopped before their
+targets can be reassigned. This also cancels any outstanding Netscript calls.
+A separate no-progress deadline uses three times the estimated longest API call,
+with a two-minute minimum, or 30 minutes without Formulas.exe, multiplied by the
+neighbor concurrency cap to allow for queued API work. A stalled owner may
+lose its other concurrent work when stopped. Persisted leases and replies survive
+manager restarts. Old uncoordinated crawler versions are retired on upgrade.
+Dead reply records expire after a minute; records for servers actually removed by
+the game are pruned after an hour without observation. Existing servers retain
+their credentials even when temporarily unreachable.
+
+Home crawler launches scale up to `--darknet-agent-threads` within free RAM after
+the supervisor's home/utility reserve. Existing crawlers keep their thread count
+until restarted. Direct manager launches use `--home-reserve 8` by default.
 
 `Formulas.exe` is a live capability rather than a startup requirement. The JIT
 scheduler tunes replacement plans in the background when hacking formulas become

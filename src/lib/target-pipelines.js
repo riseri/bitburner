@@ -1,4 +1,4 @@
-import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, emptySlotIncomeFloor, recentPipelineIncome } from "lib/background-prep.js";
+import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, backgroundPrepJobs, emptySlotIncomeFloor, recentPipelineIncome } from "lib/background-prep.js";
 import { createXpPipeline, tickXpPipeline, consumeXpEvent, claimXpTarget, reclaimXpRam } from "lib/hacking-xp.js";
 
 // One event loop, one allocation ledger. A pipeline never owns the global ports,
@@ -10,6 +10,8 @@ const UI_MS = 10_000;
 const BUCKET_MS = 250;
 const IDLE_REPLAN_MS = 5_000;
 const IDLE_REPLAN_MAX_BACKOFF_MS = 300_000;
+const MAINTENANCE_WAIT_MS = 5_000;
+const STALLED_REPLACEMENT_MS = 10 * 60_000;
 
 export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime = null, stats = null) {
 	const pipeline = {
@@ -25,6 +27,7 @@ export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime 
 		repair: null, control: null, note: "", nextRetry: 0, tunedCapacity: 0, lastCapacityRetune: 0,
 		idleSince: null, idleRetunes: 0, idleFailures: 0, idleRetryAt: 0, idleReplanning: false,
 		admissionReason: "", completedAtIdleReplan: 0, minimumExpected: 0,
+		stalledSince: null, tuningWaitSince: null, lastTuneStep: 0, trialNote: "",
 	};
 	pipeline.cfg.epoch = pipeline.epoch;
 	pipeline.cfg.generation = pipeline.generation;
@@ -142,14 +145,13 @@ export async function runTargetPipelines(ns, setup, api) {
 			for (const slot of pool.launchBuckets.keys()) if (slot < Math.floor((now - 1000) / BUCKET_MS)) pool.launchBuckets.delete(slot);
 		}
 
-		// Discovery and initial trial tuning get a bounded liveness opportunity
-		// before another incumbent batch is planned. Recovery/repair maintenance
-		// keeps its original ordering so a rebuilding support lane cannot steal
-		// the incumbent's scheduling cadence.
+		// Discovery and quiescent tuning get a bounded opportunity before new
+		// batches. Starved maintenance can defer new planning to open a safe gap.
 		serviceAdmissionOpportunity(ns, pool);
+		const deferPlanning = serviceMaintenanceOpportunity(ns, pool);
 		// Budget is shared, not multiplied by the number of targets. Never queue
 		// new work in front of an already committed due launch or worker event.
-		if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 20) {
+		if (!deferPlanning && pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 20) {
 			planPipelineBatch(ns, pool);
 		}
 		if (pool.port.empty()) launchPipelineChunks(ns, pool);
@@ -186,19 +188,39 @@ export function serviceXpPipeline(ns, pool) {
 	tickXpPipeline(ns, pool, {
 		canLaunch() {
 			const pending = [...pool.pipelines.values()].reduce((n, p) => n + p.queue.length, pool.running.size);
-			return pending < pool.cfg.maxWorkers - 4 && fitsLaunchBudget(pool.launchBuckets,
+			return pending + prepWorkerCount(pool) < pool.cfg.maxWorkers - 4 && fitsLaunchBudget(pool.launchBuckets,
 				[{ launchAt: Date.now() }], Math.max(0, pool.cfg.maxLaunches - 8));
 		},
 		record: job => recordLaunchBudget(pool, [job]),
 	});
 }
 
+function prepWorkerCount(pool) {
+	return (pool.cfg.prepStates || [pool.cfg.backgroundPrep]).reduce((n, state) => n + backgroundPrepJobs(state).length, 0);
+}
+
+// Prep shares the live scheduler's launch and worker budgets, leaving room for
+// income. Check again between exec calls so a large wave cannot block due work.
+function prepLaunchHooks(pool) {
+	return {
+		canPlan: () => pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50,
+		canLaunch() {
+			const pending = [...pool.pipelines.values()].reduce((n, p) => n + p.queue.length, pool.running.size) +
+				prepWorkerCount(pool);
+			return pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50 &&
+				pending < pool.cfg.maxWorkers - 4 && fitsLaunchBudget(pool.launchBuckets,
+					[{ launchAt: Date.now() }], Math.max(4, pool.cfg.maxLaunches - 8));
+		},
+		recordLaunch: job => recordLaunchBudget(pool, [job]),
+	};
+}
+
 function moneySpareRam(ns, pool, host, cfg) {
 	const available = () => pool.api.availableRam(ns, host, cfg, pool.running, pool.reservations,
 		Date.now(), Infinity, pool.foreign);
-	let ram = available();
-	if (pool.xp?.jobs.size && ram < Math.min(cfg.ram.G, cfg.ram.W) && reclaimXpRam(ns, pool.xp, host.name)) ram = available();
-	return ram;
+	// Prep/recovery outranks optional XP even when a few GB are already free.
+	if (pool.xp?.jobs.size) reclaimXpRam(ns, pool.xp, host.name);
+	return available();
 }
 
 export function dispatchPipelineEvents(ns, pool) {
@@ -276,7 +298,8 @@ function servicePipelineSafety(ns, pool, p, now) {
 		else if (!p.recovery) p.nextLanding = Math.max(p.nextLanding,
 			now + p.runtime.plan.times.W + p.cfg.lead + 250);
 	}
-	if ((p.recovery || p.drain) && pool.cfg.backgroundPrep?.active) {
+	if ((p.recovery || p.drain) && pool.cfg.backgroundPrep?.active &&
+		(p.drain || stalledPromotionSupport(pool, now) !== p)) {
 		cancelBackgroundPrep(ns, pool.cfg.backgroundPrep, "earning target recovery has priority");
 	}
 	if (p.drain) {
@@ -395,7 +418,11 @@ function reserveBudgetedBatch(ns, pool, p, id, landing, plan, cfg, priorChunks =
 			break;
 		}
 		const chunks = [...priorChunks, ...result.chunks];
-		if (pending + chunks.length > pool.cfg.maxWorkers) reason = "shared worker-commitment limit";
+		// Money can reclaim optional prep process slots as well as RAM. Owned
+		// recovery workers remain protected and count toward the shared limit.
+		if (income && pending + chunks.length + prepWorkerCount(pool) > pool.cfg.maxWorkers)
+			cancelBackgroundPrep(ns, pool.cfg.backgroundPrep, "active hacking needs worker slots");
+		if (pending + chunks.length + prepWorkerCount(pool) > pool.cfg.maxWorkers) reason = "shared worker-commitment limit";
 		else if (!fitsLaunchBudget(pool.launchBuckets, chunks, limit)) reason = "shared launch budget / fragmented batch";
 		else return { ...result, compact, reason: "", ramFailure: false };
 		api.rollbackReservations(pool.reservations, mark);
@@ -539,6 +566,7 @@ function replanIdlePipeline(ns, pool, p, now) {
 function servicePipelineTuning(ns, pool, p) {
 	const { api } = pool;
 	if (p.mode !== "TUNING" || Date.now() < p.nextRetry) return false;
+	p.lastTuneStep = Date.now(); p.tuningWaitSince = null;
 	if (!api.targetHealth(ns, p.name).clean) {
 		p.tuner = null;
 		if (p.trial) beginPipelineDrain(pool, p,
@@ -811,9 +839,35 @@ export function serviceHotSwapHealth(ns, pool, p) {
 	return Boolean(next.failed);
 }
 
+// If committed launches leave no maintenance window, stop adding batches until
+// one opens. Existing workers and queued launches always keep their deadlines.
+export function serviceMaintenanceOpportunity(ns, pool) {
+	const now = Date.now(), prep = pool.cfg.backgroundPrep;
+	const readyHandoff = prep?.status === "READY" && pool.cfg.maxTargets > 1 &&
+		(pool.pipelines.size < pool.cfg.maxTargets || steadyPromotionSupport(pool, now) || stalledPromotionSupport(pool, now));
+	const needed = [...pool.pipelines.values()].some(p =>
+		p.mode === "TUNING" ? now >= p.nextRetry : p.mode === "PREPARING" || p.mode === "DRAINING" ||
+		p.mode === "RUNNING" && !p.recovery && !p.queue.length && !p.running.size && !p.batches.size &&
+			!recentPipelineIncome(p.stats, p.runtime, now)) ||
+		readyHandoff || prep?.status === "WAITING_SCHEDULER";
+	if (!needed) { pool.maintenanceWaitSince = null; return false; }
+	pool.maintenanceWaitSince ??= Date.now();
+	if (Date.now() - pool.maintenanceWaitSince < MAINTENANCE_WAIT_MS) return false;
+	if (!pool.port.empty() || nextPipelineLaunch(pool) - Date.now() <= 50) return true;
+	servicePipelineMaintenance(ns, pool);
+	if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50)
+		serviceBackgroundAndAdmission(ns, pool);
+	return true;
+}
+
 function servicePipelineMaintenance(ns, pool) {
 	const { api } = pool;
-	for (const p of pool.pipelines.values()) {
+	pool.maintenanceWaitSince = null;
+	const lanes = [...pool.pipelines.values()];
+	const start = (pool.maintenanceCursor || 0) % Math.max(1, lanes.length);
+	for (let i = 0; i < lanes.length; i++) {
+		const index = (start + i) % lanes.length, p = lanes[index];
+		pool.maintenanceCursor = (index + 1) % lanes.length;
 		replanIdlePipeline(ns, pool, p, Date.now());
 		if (p.mode === "DRAINING" && p.queue.length === 0 && p.running.size === 0 && !p.repair?.active && pool.port.empty()) {
 			api.finishReadyBatches(p.batches, p.stats, p.cfg);
@@ -846,7 +900,7 @@ function servicePipelineMaintenance(ns, pool) {
 				p.repair.target = p.name;
 				pool.cfg.prepStates.push(p.repair);
 			}
-			tickBackgroundPrep(ns, { state: p.repair, repair: true, target: p.name,
+			tickBackgroundPrep(ns, { ...prepLaunchHooks(pool), state: p.repair, repair: true, target: p.name,
 				network: pool.network, cfg: p.cfg, runtime: p.runtime, stats: p.stats, healthy: true,
 				reclaimShare: host => api.reclaimFleetShare(ns, host),
 				claimTarget: target => claimXpTarget(ns, pool, target),
@@ -866,6 +920,44 @@ function productive(p, now) {
 	return p?.mode === "RUNNING" && !p.recovery && !p.drain &&
 		(p.stats.pipeline.productiveMs || 0) >= PRODUCTIVE_MS &&
 		recentPipelineIncome(p.stats, p.runtime, now);
+}
+
+function updatePipelineProgress(pool, now) {
+	for (const p of pool.pipelines.values()) {
+		if (p.mode === "RUNNING" && !p.recovery && !p.drain && recentPipelineIncome(p.stats, p.runtime, now))
+			p.stalledSince = null;
+		else p.stalledSince ??= now;
+		if (p.mode === "TUNING" && now >= p.nextRetry) p.tuningWaitSince ??= now;
+		else p.tuningWaitSince = null;
+	}
+}
+
+function stalledPromotionSupport(pool, now) {
+	const lanes = [...pool.pipelines.values()];
+	if (pool.cfg.maxTargets <= 1 || lanes.length < pool.cfg.maxTargets ||
+		lanes.some(p => p.retiring || p.drain)) return null;
+	const survivor = lanes.find(p => !p.trial && productive(p, now));
+	if (!survivor) return null;
+	return lanes.find(p => p !== survivor && p.stalledSince != null &&
+		now - p.stalledSince >= STALLED_REPLACEMENT_MS &&
+		now >= (p.firstLanding || 0) + TRIAL_MS) || null;
+}
+
+function promotionBlockers(pool, now) {
+	return [...pool.pipelines.values()].flatMap(p => {
+		const age = p.stalledSince == null ? "" : ` for ${Math.floor((now - p.stalledSince) / 1000)}s`;
+		if (p.mode !== "RUNNING" || p.recovery || p.drain) {
+			const reason = p.recovery ? "recovering" : p.drain ? "draining" : p.mode.toLowerCase();
+			const tuning = p.mode === "TUNING" ? now < p.nextRetry
+				? `; retry in ${Math.ceil((p.nextRetry - now) / 1000)}s: ${p.note}`
+				: p.tuningWaitSince != null && now - p.tuningWaitSince >= 1000
+					? "; waiting for scheduler window" : "; plan search advancing" : "";
+			return [`${p.name} ${reason}${age}${tuning}`];
+		}
+		if (p.trial) return [`${p.name} trial: ${p.trialNote || "collecting productive income"}`];
+		if (!productive(p, now)) return [`${p.name} waiting for productive income${age}`];
+		return [];
+	}).join(" | ");
 }
 
 function steadyPromotionSupport(pool, now) {
@@ -918,18 +1010,20 @@ function nextReadyCandidate(ns, pool, anchor, now) {
 
 export function serviceAdmissionOpportunity(ns, pool) {
 	const now = Date.now();
+	updatePipelineProgress(pool, now);
 	if (!pool.port.empty() || now < (pool.nextAdmissionService || 0)) return false;
 	const slack = nextPipelineLaunch(pool) - now;
 	if (slack <= 5) return false;
 	pool.nextAdmissionService = now + 100;
 	serviceBackgroundAndAdmission(ns, pool, slack > 50);
-	// Only initial trial tuning gets this pre-planning liveness lane. Established
-	// targets in recovery/repair remain on normal maintenance ordering so they
-	// cannot reduce the healthy incumbent's cadence.
-	if (slack > 20) {
-		const trial = [...pool.pipelines.values()].find(p =>
-			p.trial && p.mode === "TUNING" && !p.recovery && !p.drain);
-		if (trial) servicePipelineTuning(ns, pool, trial);
+	// Recheck after scouting: it can consume part of the original launch window.
+	// Quiescent established targets need the same yielding search as new trials.
+	if (pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 20) {
+		const tuning = [...pool.pipelines.values()].filter(p => p.mode === "TUNING" &&
+			!p.retiring && !p.recovery && !p.drain && !p.repair?.active && now >= p.nextRetry &&
+			!p.queue.length && !p.running.size && !p.batches.size)
+			.sort((a, b) => (a.lastTuneStep || 0) - (b.lastTuneStep || 0))[0];
+		if (tuning) servicePipelineTuning(ns, pool, tuning);
 		else {
 			// A dense launch lattice may never offer the maintenance lane's 50ms
 			// window. Give one yielding shadow step the same bounded opportunity.
@@ -943,6 +1037,7 @@ export function serviceAdmissionOpportunity(ns, pool) {
 
 function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	const { api, cfg } = pool, now = Date.now();
+	updatePipelineProgress(pool, now);
 	const anchor = pool.pipelines.get(pool.anchor);
 	const full = pool.pipelines.size >= cfg.maxTargets;
 	if (cfg.maxTargets > 1 && full) {
@@ -952,34 +1047,41 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			pool.note = `Promotion handoff: draining ${retiring.name} before admitting ${cfg.backgroundPrep.target || "prepared target"}`;
 			return;
 		}
-		const support = steadyPromotionSupport(pool, now);
+		const steady = steadyPromotionSupport(pool, now);
+		const support = steady || stalledPromotionSupport(pool, now);
 		if (!support) {
+			const reason = `Promotion paused: ${promotionBlockers(pool, now)}`;
 			if (cfg.backgroundPrep.active) cancelBackgroundPrep(ns, cfg.backgroundPrep,
-				"promotion waits for two stable productive targets");
-			else if (cfg.backgroundPrep.status !== "READY") {
-				cfg.backgroundPrep.status = cfg.backgroundPrep.enabled ? "PAUSED" : "DISABLED";
+				reason);
+			else {
+				if (cfg.backgroundPrep.status !== "READY")
+					cfg.backgroundPrep.status = cfg.backgroundPrep.enabled ? "PAUSED" : "DISABLED";
 				cfg.backgroundPrep.reason = cfg.backgroundPrep.enabled
-					? "promotion waits for two stable productive targets" : "disabled";
+					? reason : "disabled";
 			}
-			pool.note = "Two target slots occupied; waiting for stable lanes before promotion scouting";
+			pool.note = reason;
 			return;
 		}
 		const activeTargets = new Set(pool.pipelines.keys());
-		tickBackgroundPrep(ns, { state: cfg.backgroundPrep, target: support.name, activeTargets,
-			blockedTargets: pool.blocked, network: pool.network, cfg, runtime: support.runtime, stats: support.stats,
-			healthy: true, allowLaunch: allowPrepLaunch, promotion: true,
-			replacementRate: support.runtime.plan.expected,
-			replacementBatchRate: support.runtime.plan.batchRate,
+		const survivor = lanes.find(p => p !== support && !p.retiring);
+		const healthSource = steady ? support : survivor;
+		const threshold = steady ? support.runtime.plan.expected * cfg.switchThreshold
+			: emptySlotIncomeFloor(survivor.runtime.plan.expected, cfg.switchThreshold);
+		tickBackgroundPrep(ns, { ...prepLaunchHooks(pool), state: cfg.backgroundPrep, target: healthSource.name, activeTargets,
+			blockedTargets: pool.blocked, network: pool.network, cfg, runtime: healthSource.runtime, stats: healthSource.stats,
+			healthy: true, allowLaunch: allowPrepLaunch, promotion: Boolean(steady), slotFill: !steady,
+			availableBatchRate: Math.max(0, cfg.maxBatchRate - survivor.runtime.plan.batchRate),
+			replacementRate: support.runtime?.plan.expected,
+			replacementBatchRate: support.runtime?.plan.batchRate,
 			reclaimShare: host => api.reclaimFleetShare(ns, host),
 			claimTarget: target => claimXpTarget(ns, pool, target),
 			spareRam: host => moneySpareRam(ns, pool, host, cfg) });
 		const prep = cfg.backgroundPrep;
 		const target = prep.target ? ` ${prep.target}` : "";
-		pool.note = `Promotion prep${target} over ${support.name}: ${prep.status || "WAITING"}` +
+		pool.note = `${steady ? "Promotion" : "Stalled target replacement"} prep${target} over ${support.name}: ${prep.status || "WAITING"}` +
 			(prep.reason ? ` | ${prep.reason}` : "");
 		if (prep.status !== "READY" || prep.active || !prep.target) return;
 		const candidatePotential = Number(prep.candidate?.potential) || 0;
-		const threshold = support.runtime.plan.expected * cfg.switchThreshold;
 		if (!(candidatePotential > threshold)) {
 			resetPreparedCandidate(prep,
 				`promotion candidate no longer clears ${support.name} by switch threshold`);
@@ -989,13 +1091,13 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			pool.note = `Promotion target ${prep.target} ready; waiting for a safe drain window`;
 			return;
 		}
-		const survivor = lanes.find(p => p !== support && !p.retiring);
+		prep.candidate.minimumExpected = threshold;
 		if (survivor) pool.anchor = survivor.name;
 		pool.trialGuard = null;
 		prep.reason = `ready to replace ${support.name}; waiting for slot handoff`;
 		beginPipelineDrain(pool, support, {
 			kind: "drain", hard: false,
-			reason: `steady-state promotion to ${prep.target} over ${support.name}`,
+			reason: `${steady ? "steady-state promotion" : "stalled target replacement"} to ${prep.target} over ${support.name}`,
 		}, true);
 		pool.note = `Promoting ${prep.target}; retiring ${support.name} after owned work drains`;
 		return;
@@ -1023,7 +1125,7 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	// may also scan/select a candidate there, but it cannot exec a prep worker
 	// until a >50ms scheduler window is available.
 	if (!pool.readyScan && !name) {
-		tickBackgroundPrep(ns, { state: cfg.backgroundPrep, target: anchor.name, activeTargets,
+		tickBackgroundPrep(ns, { ...prepLaunchHooks(pool), state: cfg.backgroundPrep, target: anchor.name, activeTargets,
 			blockedTargets: pool.blocked, network: pool.network, cfg, runtime: anchor.runtime, stats: anchor.stats,
 			healthy: productive(anchor, now), allowLaunch: allowPrepLaunch,
 			slotFill: cfg.maxTargets > 1 && !full,
@@ -1077,6 +1179,7 @@ function incomeGuard(pool, incumbent, trial, now) {
 function sumMisses(stats) { return Object.values(stats.misses).reduce((n, value) => n + value, 0); }
 
 export function monitorPipelineLoad(ns, pool, now) {
+	updatePipelineProgress(pool, now);
 	pool.slowTicks = pool.slowTicks.filter(time => time >= now - 60_000);
 	const guard = pool.trialGuard;
 	if (!guard) return;
@@ -1098,7 +1201,47 @@ export function monitorPipelineLoad(ns, pool, now) {
 		beginPipelineDrain(pool, trial, { kind: "drain", reason: "new target plan could not be admitted" }, true);
 		return;
 	}
-	if (trial.mode !== "RUNNING" || incumbent.mode !== "RUNNING" || incumbent.recovery ||
+	const incumbentUnavailable = incumbent.mode !== "RUNNING" || incumbent.recovery || incumbent.drain ||
+		!recentPipelineIncome(incumbent.stats, incumbent.runtime, now);
+	const incumbentWarming = now < incumbent.firstLanding + 60_000;
+	if (trial.trial) {
+		if (incumbentUnavailable || incumbentWarming) guard.suspendedSince ??= now;
+		else guard.suspendedSince = null;
+		const income = pool.api.incomeRate(trial.stats, 60_000, now);
+		const misses = sumMisses(trial.stats);
+		// A failed incumbent cannot veto a healthy successor forever. Require a
+		// continuous earning window, successful batches and enough measured income
+		// to replace the admission baseline or sustain its own model. Any new miss
+		// restarts the evidence; a dead richer incumbent cannot set an unreachable floor.
+		const incomeFloor = Math.min(guard.baseline * 0.95, trial.runtime?.plan.expected * 0.70);
+		const healthy = productive(trial, now) && !trial.repair?.active &&
+			Number.isFinite(income) && income > 0 && income >= incomeFloor;
+		if (!healthy || guard.takeoverMisses !== misses) {
+			guard.takeoverSince = null;
+			guard.takeoverCompleted = trial.stats.pipeline.completed;
+		}
+		guard.takeoverMisses = misses;
+		if (healthy) guard.takeoverSince ??= now;
+		trial.trialNote = guard.suspendedSince == null ? "" :
+			`waiting on ${incumbent.name} for ${Math.floor((now - guard.suspendedSince) / 1000)}s; ` +
+			(healthy ? `independent validation ${Math.floor((now - guard.takeoverSince) / 1000)}/${TRIAL_MS / 1000}s`
+				: "waiting for sustained replacement income");
+		// Keep the trial's own evidence through the incumbent's rebuild cycles.
+		// A briefly restored incumbent must not restart its peer's observation.
+		if ((incumbentUnavailable || incumbentWarming) && healthy &&
+			now >= trial.trialUntil && now - guard.takeoverSince >= TRIAL_MS &&
+			trial.stats.pipeline.completed > guard.takeoverCompleted) {
+			trial.trial = false; trial.trialNote = "";
+			pool.anchor = trial.name;
+			pool.trialGuard = incomeGuard(pool, trial, incumbent, now);
+			pool.note = `${trial.name} validated independently; ${incumbent.name} continues recovery`;
+			return;
+		}
+	} else {
+		guard.suspendedSince = null; guard.takeoverSince = null; guard.takeoverMisses = null;
+		trial.trialNote = "";
+	}
+	if (trial.mode !== "RUNNING" || incumbentUnavailable ||
 		now < Math.max(trial.firstLanding, incumbent.firstLanding) + 60_000) {
 		guard.badSince = 0;
 		return; // a target's own repair/warmup is not evidence against its peer
@@ -1108,12 +1251,16 @@ export function monitorPipelineLoad(ns, pool, now) {
 	const poor = !(b > 0) || !Number.isFinite(b) || a < guard.baseline * 0.70 || a + b < guard.baseline * 0.95;
 	if (poor) guard.badSince ||= now;
 	else guard.badSince = 0;
+	if (trial.trial) trial.trialNote = poor ? "measured income below admission baseline"
+		: now < trial.trialUntil ? `observation window: ${Math.ceil((trial.trialUntil - now) / 1000)}s remaining`
+			: "waiting for two productive minutes and recent income";
 	if (guard.badSince && now - guard.badSince >= 60_000) {
 		beginPipelineDrain(pool, trial, { kind: "drain", reason: "second target failed measured-income trial" }, true);
 		return;
 	}
 	if (trial.trial && now >= trial.trialUntil && productive(trial, now) && !poor) {
 		trial.trial = false;
+		trial.trialNote = "";
 		pool.anchor = b > a ? trial.name : incumbent.name;
 		pool.note = `Two productive targets; ${pool.anchor} has priority`;
 		// Once validated, protect the higher earner. The small target is not given

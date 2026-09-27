@@ -1,7 +1,7 @@
 import { runTargetPipelines } from "lib/target-pipelines.js";
 import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
-import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary, recentPipelineIncome } from "lib/background-prep.js";
+import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, backgroundPrepJobs, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary, recentPipelineIncome } from "lib/background-prep.js";
 import { hackingFormulasAvailable, preparedHackingModel } from "lib/formulas.js";
 import { refreshHackingPolicy, renderHackingPolicy } from "lib/hacking-policy.js";
 import { runHackingFallback, reclaimXpRam, xpPipelineStatus } from "lib/hacking-xp.js";
@@ -41,8 +41,8 @@ export async function main(ns) {
 		["max-launches", 32],
 		["dashboard-details", false],
 		["background-prep", true],
-		["prep-max-ram", 16_384],
-		["prep-ram-fraction", 0.01],
+		["prep-max-ram", 0],
+		["prep-ram-fraction", 0.5],
 		["prep-horizon", 120],
 		["gap", 100],
 		["lead", 600],
@@ -2132,8 +2132,10 @@ function isDirtyPhase(
 function reclaimPrepRam(ns, cfg, host = null) {
 	let released = false;
 	for (const prep of cfg.prepStates || [cfg.backgroundPrep]) {
-		if (prep?.active && (!host || prep.active.host === host)) {
-			released = cancelBackgroundPrep(ns, prep, "active hacking needs RAM") || released;
+		if (prep?.active && (!host || backgroundPrepRam(prep, host) > 0)) {
+			const before = backgroundPrepRam(prep);
+			cancelBackgroundPrep(ns, prep, "active hacking needs RAM");
+			released = backgroundPrepRam(prep) < before || released;
 		}
 	}
 	return released;
@@ -4428,6 +4430,7 @@ function renderDashboard(
 			row("Prep RAM", `${formatRam(prepRam)} held | ${prep?.preemptions ?? 0} preemptions | ${prep?.failures ?? 0} failures`);
 			if (prep?.candidate) row("Prep estimate", `${dashboardTime(prep.candidate.prepMs)} initial prep | ${dashboardTime(prep.horizon)} horizon`);
 			if (prep?.error || prep?.reason) row("Prep note", prep.error || prep.reason);
+			renderPrepDiagnostics(ns, prep);
 		}
 
 		if (cfg.requestedTarget === "auto") renderTargetAnalysis(ns, target, targetAnalysis, 6);
@@ -4465,6 +4468,9 @@ function renderSchedulerDashboard(ns, pool) {
 			restarts: p.stats.restarts, resyncs: p.stats.resyncs, admissionSkips: p.admissionSkips,
 			allocationFails: p.stats.allocationFails, idleRetunes: p.idleRetunes || 0, admissionReason: p.admissionReason || "",
 			productiveMs: p.stats.pipeline.productiveMs || 0,
+			stalledMs: p.stalledSince == null ? 0 : now - p.stalledSince,
+			trialNote: p.trialNote || "",
+			tuningWaitMs: p.tuningWaitSince == null ? 0 : now - p.tuningWaitSince,
 			note: p.recovery?.reason || p.drain?.reason || p.admissionReason || p.note,
 			lastReason: p.stats.lastReason || "",
 			workerRam: p.runningRam, epoch: p.epoch, generation: p.generation,
@@ -4502,6 +4508,8 @@ function renderSchedulerDashboard(ns, pool) {
 		backgroundPrep: background ? {
 			target: background.target || "", status: background.status || "", reason: background.reason || "",
 			ram: backgroundRam, eta: backgroundEta,
+			threads: backgroundPrepJobs(background).reduce((n, job) => n + (job.threads || 0), 0),
+			hosts: backgroundPrepJobs(background).length, diagnostics: background.diagnostics,
 			health: background.health ? { ...background.health } : null,
 			candidate: background.candidate ? {
 				potential: background.candidate.potential || 0,
@@ -4558,6 +4566,9 @@ function renderSchedulerDashboard(ns, pool) {
 	dashboardSection(ns, "Active targets");
 	for (const p of rows) {
 		row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s | money ${(100 * p.money / Math.max(1, p.maxMoney)).toFixed(1)}% | sec +${Math.max(0, p.security - p.minSecurity).toFixed(3)}`);
+		if (p.trialNote) row("Trial", p.trialNote);
+		if (p.mode === "TUNING") row("Tuning", `${dashboardTime(p.stalledMs)} without income | ${p.note}` +
+			(p.tuningWaitMs >= 1000 ? ` | scheduler wait ${dashboardTime(p.tuningWaitMs)}` : ""));
 		renderGenerationStatus(ns, p, pool.cfg.dashboardDetails);
 	}
 
@@ -4598,6 +4609,7 @@ function renderSchedulerDashboard(ns, pool) {
 		row("Home cores", `${homeCores} (${coreBonus(homeCores).toFixed(3)}x growth/weaken bonus)`);
 		row("Budget", `${pool.cfg.maxBatchRate} batches/s | ${pool.cfg.maxLaunches} planned launches/s | ${pool.cfg.maxWorkers} worker slots`);
 		row("Loop lag", `max ${pool.lagMax.toFixed(1)}ms session`);
+		renderPrepDiagnostics(ns, background);
 		if (repairRam > 0) row("Repair RAM", `${formatRam(repairRam)} held by target recovery`);
 		if (pool.history.length) row("Last retired", `${pool.history.at(-1).name}: ${pool.history.at(-1).retireReason}`);
 		if (pool.targetAnalysis?.length) renderTargetAnalysis(ns, pool.anchor, pool.targetAnalysis, 6);
@@ -4606,9 +4618,17 @@ function renderSchedulerDashboard(ns, pool) {
 	}
 }
 
+function renderPrepDiagnostics(ns, prep) {
+	if (!prep?.diagnostics) return;
+	dashboardRow(ns, "Prep plan", JSON.stringify(prep.diagnostics));
+	for (const job of backgroundPrepJobs(prep))
+		dashboardRow(ns, "Prep worker", `${job.host}: ${job.threads} threads | ${formatRam(job.ram)} held`);
+}
+
 function renderGenerationStatus(ns, p, details) {
 	if (!p.generations?.length) return;
-	const plans = p.generations.map(g => `gen ${g.number} ${g.state}`);
+	const retained = ["TUNING", "PREPARING", "DRAINING", "RETIRING"].includes(p.mode);
+	const plans = p.generations.map(g => `gen ${g.number} ${retained ? "RETAINED" : g.state}`);
 	if (p.shadow) plans.push(`gen ${p.shadow.number} ${p.shadow.state}`);
 	dashboardRow(ns, "Plan", plans.join(p.cutover ? " -> " : " | "));
 	if (p.cutover) dashboardRow(ns, "Cutover", `first new Hack ETA ${dashboardTime(p.cutover.eta)}`);
