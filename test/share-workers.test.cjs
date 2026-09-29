@@ -22,7 +22,10 @@ test('remote share workers use spare RAM and remain reclaimable', () => {
 	const processes = [];
 	let nextPid = 1;
 	const ns = {
-		ps: host => processes.filter(process => process.host === host),
+		ps: host => host === 'home' ? [{pid:9,filename:'augmentation-manager.js'}] : processes.filter(process => process.host === host),
+		getResetInfo: () => ({currentNode:4,lastNodeReset:1,lastAugReset:2}),
+		getPortHandle: () => ({peek: () => ({type:'augmentation-status',version:1,producerPid:9,resetEpoch:'4:1:2',generatedAt:1e6,
+			progression:{type:'progression-objective',version:1,producer:'augmentation-manager.js',producerPid:9,resetEpoch:'4:1:2',generatedAt:1e6,sharingDemand:'SPARE_ONLY'}})}),
 		getScriptRam: () => 4,
 		getServerUsedRam: host => processes.filter(process => process.host === host)
 			.reduce((sum, process) => sum + process.threads * 4, 0),

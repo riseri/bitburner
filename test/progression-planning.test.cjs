@@ -91,7 +91,8 @@ test('program ranking unlocks Navigator before costly SQL when RAM fits, and def
   const api=loadScript('lib/programs.js',clock), programs=Array.from(api.progressionPrograms(),p=>({...p,owned:p.cost<5e7}));
   let ranked=api.rankPrograms(programs,{homeRam:128,darknetRam:32,money:1e8});assert.equal(ranked[0].name,'DarkscapeNavigator.exe');
   assert.equal(ranked.find(p=>p.name==='Formulas.exe').useful,false);
-  ranked=api.rankPrograms(programs,{homeRam:8,darknetRam:32,money:1e8});assert.equal(ranked[0].name,'SQLInject.exe');
+  ranked=api.rankPrograms(programs,{homeRam:8,darknetRam:32,money:1e8});assert.equal(ranked[0].name,'DarkscapeNavigator.exe');
+  assert.equal(ranked[0].useful,true);assert.equal(ranked[0].activationReady,false);
   assert.equal(api.rankPrograms(programs,{homeRam:128,money:2e10}).find(p=>p.name==='Formulas.exe').useful,true);
 });
 test('program creation requires eligibility and a better bounded ETA than purchase',()=>{

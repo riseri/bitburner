@@ -1,4 +1,4 @@
-import { readProgressionSnapshot } from "lib/progression-objective.js";
+import { readProgressionSnapshot, readSharingDemand } from "lib/progression-objective.js";
 import { bn4Route } from "lib/bitnode-route.js";
 import { intelligenceSessionActive } from "lib/intelligence-session.js";
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
@@ -9,7 +9,7 @@ import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
 import { pathFromHome, singularityAvailable, resetEpoch } from "lib/progression-protocol.js";
-import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget, selectedServices } from "lib/service-catalog.js";
+import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget, selectedServices, darknetActivation } from "lib/service-catalog.js";
 import { starterHosts, starterWorkers, stopStarterPool, tickStarterPool } from "lib/starter-pool.js";
 
 const HOME = "home";
@@ -249,7 +249,9 @@ export async function main(ns) {
             else { cfg.homeInvestment = null; cfg.homeUpgradeStatus = ""; }
         }
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
-		reconcileHomeShare(ns, cfg.shareEnabled && readProgressionSnapshot(ns)?.limitingResource !== "hacking", cfg.shareReserve);
+		cfg.sharingDemand = readSharingDemand(ns);
+		reconcileHomeShare(ns, cfg.shareEnabled && cfg.sharingDemand !== "OFF", cfg.shareReserve);
+		cfg.darknetActivation = progressionStatus?.darknet || null;
 		cfg.shareStatus = collectSharingStatus(ns, cfg.shareEnabled, fleetStatus, cfg.shareReserve);
 		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
 		cfg.telemetryError = telemetry?.error || "";
@@ -1296,6 +1298,13 @@ function renderDarknet(ns, darknet, cfg) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Darknet");
 	if (!cfg.darknet) { row("Status", "Disabled"); return; }
+	const activation = cfg.darknetActivation;
+	if (activation) {
+		row("Navigator", activation.navigator);
+		row("Activation", activation.activation);
+		row("Minimum RAM", `${activation.minimumRam.toFixed(2)} GB | available ${activation.availableRam.toFixed(2)} GB reclaimable`);
+		row("Crawler", activation.threads ? `${activation.threads} threads` : `WAITING: ${activation.reason}`);
+	}
 	if (!darknet) { row("Status", "Starting / waiting for coordinator"); return; }
 	if (!darknet.unlocked) { row("Status", "Locked; DarkscapeNavigator.exe is the next Darknet prerequisite"); return; }
 	if (darknet.state === "BLOCKED") row("Status", `Blocked: ${darknet.blocker || "crawler could not start"}`);
@@ -1472,9 +1481,13 @@ export function starterAdmissionRam(ns, cfg = {}, helperRam = 0) {
 export function ongoingHomeTarget(ns,cfg,capabilities,services,jobs) {
     const enabled=selectedServices(cfg,capabilities), blocked=services.some(s=>enabled.some(e=>e.name===s.name) && ["WAITING_RAM","WAITING_PRIORITY"].includes(s.state)) ||
         jobs.some(j=>j.state === "WAITING_RAM" && !(j.type === "augmentation-plan" && readProgressionSnapshot(ns)));
-    if(!blocked) return ns.getServerMaxRam(HOME);
-    return ns.getScriptRam(SUPERVISOR,HOME) + enabled.reduce((n,s)=>n+ns.getScriptRam(s.name,HOME),0) +
-        Math.max(supervisorRamBudget(ns,cfg,capabilities).utilityRam, ns.getScriptRam("home-upgrade.js", HOME));
+    const budget = supervisorRamBudget(ns,cfg,capabilities);
+    const darknet = darknetActivation(ns, { enabled: cfg.darknet === true, reserve: budget.utilityRam });
+    // Plan prospective RAM now; ordinary home capital (75) waits behind the
+    // Navigator (84). Core/actor RAM blockers still take priority (90).
+    const required = blocked ? ns.getScriptRam(SUPERVISOR,HOME) + enabled.reduce((n,s)=>n+ns.getScriptRam(s.name,HOME),0) +
+        Math.max(budget.utilityRam, ns.getScriptRam("home-upgrade.js", HOME)) : ns.getServerMaxRam(HOME);
+    return Math.max(required, darknet.requiredHomeRam);
 }
 
 function progressionRamBlocked(services) {

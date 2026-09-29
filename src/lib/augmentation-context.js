@@ -1,5 +1,5 @@
 import { resetEpoch, singularityAvailable, progressionBackdoors } from "lib/progression-protocol.js";
-import { progressionObjective } from "lib/progression-objective.js";
+import { progressionObjective, sharingDemand } from "lib/progression-objective.js";
 import { PORTS } from "lib/ports.js";
 
 export function augmentationContext(ns, state = {}) {
@@ -32,11 +32,14 @@ export function augmentationContext(ns, state = {}) {
 
 export function makeProgressionSnapshot(ns, context, status) {
     const objective = progressionObjective({ ...context, currentNode: context.reset.currentNode, plan: status.plan });
+    let work = null;
+    try { work = ns.singularity.getCurrentWork(); } catch {}
     return { ...objective, type: "progression-objective", version: 1, generatedAt: Date.now(), producer: "augmentation-manager.js",
         producerPid: ns.pid, resetEpoch: context.resetEpoch, capabilities: context.capabilities, multipliers: context.multipliers,
         incomePerSecond: context.income, savings: status.savings || objective.savings,
         installDecision: status.installDecision || status.plan?.installDecision || null,
         resetImminent: status.phase === "INSTALL", recommendation: status.recommendation,
+        sharingDemand: sharingDemand({ ...objective, resetImminent: status.phase === "INSTALL" }, work),
         missingInformation: [!context.income && "measured income", !context.capabilities.formulas && "Formulas work/donation rates",
             !context.multipliers && "BitNode multipliers"].filter(Boolean) };
 }

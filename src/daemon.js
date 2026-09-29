@@ -5,6 +5,7 @@ import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, backgroun
 import { hackingFormulasAvailable, preparedHackingModel } from "lib/formulas.js";
 import { refreshHackingPolicy, renderHackingPolicy } from "lib/hacking-policy.js";
 import { runHackingFallback, reclaimXpRam, xpPipelineStatus } from "lib/hacking-xp.js";
+import { readSharingDemand } from "lib/progression-objective.js";
 
 const HOME = "home";
 
@@ -3480,7 +3481,13 @@ function reclaimFleetShare(ns, host) {
 }
 
 function reconcileFleetShare(ns, hosts, cfg, running, reservations, foreignUsedByHost, cursor = 0) {
-	if (!cfg.fleetShare || !hosts.length) return 0;
+	const demand = cfg.fleetShare ? readSharingDemand(ns) : "OFF";
+	if (demand === "OFF") {
+		if (cfg.sharingDemand !== "OFF") clearFleetShare(ns, hosts);
+		cfg.sharingDemand = demand; return 0;
+	}
+	cfg.sharingDemand = demand;
+	if (!hosts.length) return 0;
 	const index = Math.abs(Number(cursor) || 0) % hosts.length;
 	const host = hosts[index];
 	const processes = ns.ps(host.name).filter(process => process.filename === SHARE);

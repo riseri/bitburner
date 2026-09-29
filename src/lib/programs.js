@@ -18,20 +18,25 @@ export function isProgressionProgram(name) {
     return PROGRAMS.some(program => program.name === name);
 }
 
-export function rankPrograms(programs, { servers = [], homeRam = 0, darknetRam = Infinity, money = 0, income = null, objective = null } = {}) {
+export function rankPrograms(programs, { servers = [], homeRam = 0, darknetRam = Infinity, darknetAvailableRam = homeRam, money = 0, income = null, objective = null } = {}) {
     const openers = programs.filter(p=>!p.category && p.owned).length;
     return programs.filter(p=>!p.owned).map(p=>{
         const unlocked = !p.category ? servers.filter(s=>!s.hasAdminRights && s.numOpenPortsRequired <= openers+1 && s.numOpenPortsRequired > openers) : [];
         const addedRam = unlocked.reduce((n,s)=>n+(s.maxRam||0),0);
-        let priority = !p.category ? openers===0 ? 85 : 50 + Math.min(20, Math.log2(1+addedRam)) : p.category === "darknet" ? 55 : 45;
+        // Clear cloud's 79 plus arbitration hysteresis, below core RAM (90),
+        // Daedalus (95), and Red Pill (100).
+        let priority = !p.category ? openers===0 ? 85 : 50 + Math.min(20, Math.log2(1+addedRam)) : p.category === "darknet" ? 84 : 45;
         let useful = true, reason = !p.category ? unlocked.length + " newly rootable servers / " + addedRam + " GB" : "";
-        if (p.category === "darknet") { useful = homeRam >= darknetRam; reason = useful ? "Navigator unlock fits available subsystem RAM" : "Deferred: insufficient home RAM for Darknet"; }
+        if (p.category === "darknet") reason = darknetAvailableRam >= darknetRam
+            ? "Navigator unlocks enabled Darknet; minimum activation fits"
+            : "Navigator unlocks enabled Darknet; home RAM expansion needed afterward";
         if (p.category === "formulas") {
             useful = homeRam >= 64 && (money >= p.cost*4 || income>0 && p.cost/income <= 1800 || objective?.redPill === "installed" && money >= p.cost);
             reason = useful ? "Formulas improves hacking and faction estimates" : "Deferred: Formulas cost not justified by cash/rate evidence";
             if (objective?.redPill === "installed") priority=80;
         }
-        return {...p,priority,useful,reason,addedRam,unlocked:unlocked.length,score:priority/Math.max(1,Math.log10(p.cost))};
+        return {...p,priority,useful,reason,activationReady:p.category === "darknet" ? darknetAvailableRam >= darknetRam : null,
+            addedRam,unlocked:unlocked.length,score:priority/Math.max(1,Math.log10(p.cost))};
     }).sort((a,b)=>Number(b.useful)-Number(a.useful) || b.score-a.score || a.cost-b.cost || a.name.localeCompare(b.name));
 }
 
