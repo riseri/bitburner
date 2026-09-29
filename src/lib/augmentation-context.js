@@ -15,18 +15,22 @@ export function augmentationContext(ns, state = {}) {
     let finalRequirement = null;
     try { if (ns.serverExists("w0r1d_d43m0n")) finalRequirement = ns.getServerRequiredHackingLevel("w0r1d_d43m0n"); } catch {}
     const money = ns.getServerMoneyAvailable("home");
-    let income = null;
+    let income = null, balance = null, engineStable = false;
     try {
         const s = ns.getPortHandle(PORTS.JIT_STATUS).peek();
-        if (s?.type === "jit-status" && s.generatedAt <= Date.now() && Date.now() - s.generatedAt < 15000 &&
-            s.generatedAt >= reset.lastAugReset && ns.isRunning(s.pid) && s.income60 > 0) income = s.income60;
+        if (s?.type === "jit-status" && s.version === 2 && Number.isFinite(s.generatedAt) && s.generatedAt <= Date.now() && Date.now() - s.generatedAt < 15000 &&
+            s.generatedAt >= reset.lastAugReset && ns.ps("home").some(p => p.pid === s.pid && p.filename === "daemon.js")) {
+            if (Number.isFinite(s.income60) && s.income60 > 0) income = s.income60;
+            balance = s.policy?.balance || null;
+            engineStable = Array.isArray(s.pipelines) && s.pipelines.length > 0 && s.pipelines.every(p => p.mode === "LIVE") && !(s.prepRam > 0);
+        }
     } catch {}
     const capabilities = { singularity: singularityAvailable(reset), formulas: ns.fileExists("Formulas.exe", "home"),
         multipliers: !!multipliers, sleeves: reset.currentNode === 10 || Number(reset.ownedSF?.get?.(10)) > 0,
         gang: reset.currentNode === 2 || Number(reset.ownedSF?.get?.(2)) > 0,
         corporation: reset.currentNode === 3 || Number(reset.ownedSF?.get?.(3)) >= 3,
         optionalSystems: "Access hints only; no sleeve, gang, or corporation manager" };
-    return { reset, resetEpoch: epoch, installed, owned, player, money, multipliers, backdoors, finalRequirement, income, capabilities,
+    return { reset, resetEpoch: epoch, installed, owned, player, money, multipliers, backdoors, finalRequirement, income, balance, engineStable, capabilities,
         objective: progressionObjective({ plan: state.previousPlan, currentNode: reset.currentNode, installed, owned, player, money, multipliers, backdoors, finalRequirement }) };
 }
 

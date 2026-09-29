@@ -100,6 +100,38 @@ function supervisorFixture(node) {
     return { ns, api, clock, processes, launches, files, reads, logs, killed, uiCalls, unlockDarknet: () => { navigator = true; } };
 }
 
+test('reset policy override is validated, forwarded and survives bootstrap arguments', async () => {
+    for (const mode of ['auto', 'threshold']) {
+        const f = supervisorFixture(4); f.ns.args = ['--reset-policy', mode, '--min-install', 8];
+        await assert.rejects(f.api.main(f.ns), /end fixture/);
+        const aug = f.launches.find(p => p.filename === 'augmentation-manager.js');
+        assert.equal(aug.args[aug.args.indexOf('--reset-policy') + 1], mode);
+        const bootstrap = loadScript('bootstrap.js', f.clock), restored = [];
+        await bootstrap.main({ getHostname: () => 'home', read: () => f.files.get('data/supervisor-bootstrap.json'),
+            tprint() {}, spawn: (file, options, ...args) => restored.push(...args) });
+        assert.deepEqual(restored, f.ns.args);
+    }
+    const bad = supervisorFixture(4); bad.ns.args = ['--reset-policy', 'aggressive'];
+    await assert.rejects(bad.api.main(bad.ns), /reset-policy must be auto or threshold/);
+});
+
+test('detailed reset dashboard separates economic choice from blocked execution and compact mode stays concise', () => {
+    const f = supervisorFixture(4), p = loadScript('lib/augmentation-reset-policy.js', f.clock);
+    const d = p.decideAugmentationReset({ installed: [], pending: ['The Red Pill'], plan: { errors: [] }, minInstall: 5 });
+    const status = { state: 'BLOCKED', phase: 'INSTALL', queued: 1, recommendation: 'unrelated player activity', resetDecision: d,
+        progression: { milestone: 'INSTALL_RED_PILL', limitingResource: 'installation', installedCount: 0, countRequired: 30,
+            queuedDistinct: ['The Red Pill'], installDecision: p.resetDecisionSummary(d) } };
+    for (const details of [true, false]) {
+        f.logs.length = 0;
+        f.api.renderAugmentationLoop(f.ns, status, { augmentationActions: true, dashboardDetails: details, minInstall: 5, resetPolicy: 'auto' });
+        const log = f.logs.join('\n');
+        assert.match(log, /Install \/ wait/); assert.match(log, /INSTALL/);
+        assert.equal(/Reset decision/i.test(log), details);
+        if (details) { assert.match(log, /Execution/); assert.match(log, /BLOCKED: unrelated player activity/); }
+        assert.ok(!log.includes('[object Object]'));
+    }
+});
+
 test('plain supervisor startup in BN5 excludes locked helpers and persists new defaults', async () => {
     const f = supervisorFixture(5);
     await assert.rejects(f.api.main(f.ns), /end fixture/);

@@ -1,6 +1,9 @@
 import { augmentationContext, makeProgressionSnapshot } from "lib/augmentation-context.js";
-import { observeProgress } from "lib/progression-objective.js";
-import { bn4Route, routeCities, routeInstallation } from "lib/bitnode-route.js";
+import { observeProgress, progressionObjective } from "lib/progression-objective.js";
+import { bn4Route, routeCities } from "lib/bitnode-route.js";
+import { decideAugmentationReset, resetDecisionSummary } from "lib/augmentation-reset-policy.js";
+import { resetEconomics, recoveryResources } from "lib/augmentation-reset-context.js";
+import { migrateResetState, observeResetRecovery } from "lib/augmentation-recovery.js";
 import { routeSelectiveFaction, routeProgramCreation, routeOwnsWork, routeIntelligence, routeBackdoorYield, routeUnlock, routeEndgame, routeDaedalus, trainHacking } from "lib/route-actions.js";
 import { buildAugmentationPlan } from "lib/augmentation-plan.js";
 import { chooseInvitation, chooseFactionWorkType, matchingFactionWork, queuedAugmentations,
@@ -18,7 +21,7 @@ export async function main(ns) {
     const flags = ns.flags([
         ["port", PORTS.AUGMENTATION_STATUS], ["interval", 5_000], ["focus", "hacking"], ["target", ""],
         ["price-multiplier", 0], ["cash-reserve", 0.10], ["join-factions", true], ["city-faction", ""], ["work", true],
-        ["route", true], ["program-creation", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5],
+        ["route", true], ["program-creation", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5], ["reset-policy", "auto"],
     ]);
     ns.disableLog("ALL");
     if (ns.getHostname() !== HOME) throw new Error("Run augmentation-manager.js on home");
@@ -31,8 +34,6 @@ export async function main(ns) {
     while (true) {
         let status;
         try {
-            const reset = ns.getResetInfo(), epoch = resetEpoch(reset);
-            if (state.resetEpoch !== epoch) state = { resetEpoch: epoch, ownedWork: null, recoveryMs: state.recoveryMs, recoveryBaseline: state.recoveryBaseline?.nodeReset === reset.lastNodeReset ? state.recoveryBaseline : null };
             status = await tickAugmentationLoop(ns, cfg, state);
             await saveState(ns, state);
         } catch (error) {
@@ -45,13 +46,15 @@ export async function main(ns) {
 
 export async function tickAugmentationLoop(ns, cfg, state) {
     const reset = ns.getResetInfo();
+    migrateResetState(state, reset, resetEpoch(reset));
+    state.resetDecision = null;
     if (!singularityAvailable(reset)) return tickAugmentationDecision(ns, cfg, state);
     const context = augmentationContext(ns, state);
-    if(state.recoveryBaseline && context.income >= state.recoveryBaseline.income*.5 && context.income>0 && reset.lastAugReset>state.recoveryBaseline.at) {
-        state.recoveryMs=Date.now()-reset.lastAugReset; state.recoveryBaseline=null;
-    }
+    if (state.recoveryBaseline) observeResetRecovery(state, context, recoveryResources(ns, context));
     state.currentIncome=context.income;
     const status = await tickAugmentationDecision(ns, cfg, state, context);
+    status.resetDecision = state.resetDecision;
+    if (state.resetDecision) status.installDecision = resetDecisionSummary(state.resetDecision);
     context.installed=ns.singularity.getOwnedAugmentations(false); context.owned=ns.singularity.getOwnedAugmentations(true);
     context.money=ns.getServerMoneyAvailable(HOME); context.player=ns.getPlayer();
     status.progression = makeProgressionSnapshot(ns, context, status);
@@ -69,7 +72,14 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
     const installed = ns.singularity.getOwnedAugmentations(false);
     const pending = queuedAugmentations(installed, ns.singularity.getOwnedAugmentations(true));
     const queued = pending.length;
-    if (pending.includes("The Red Pill")) return handleInstallation(ns, cfg, state, null, queued, true);
+    if (!queued) state.queuedSince = null;
+    else if (!Number.isFinite(state.queuedSince) || state.queuedSince < reset.lastAugReset || state.queuedSince > Date.now()) state.queuedSince = Date.now();
+    if (pending.includes("The Red Pill") || !installed.includes("The Red Pill") && route && new Set(installed).size < context.objective.countRequired &&
+        new Set([...installed, ...pending]).size >= context.objective.countRequired) {
+        state.resetDecision = decideAugmentationReset({ installed, pending, plan: { errors: [] },
+            countRequired: context.objective.countRequired, minInstall: cfg.minInstall });
+        return handleInstallation(ns, cfg, state, null, queued, true);
+    }
     if (installed.includes("The Red Pill")) return route ? { ...routeEndgame(ns, cfg, state), queued } : { state: "READY", phase: "COMPLETE_NODE", queued,
         recommendation: "The Red Pill is installed; raise hacking and backdoor w0r1d_d43m0n to finish this BitNode" };
     if (!route && queued >= cfg.minInstall) return handleInstallation(ns, cfg, state, null, queued);
@@ -98,10 +108,17 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
     const progress = observeProgress(state, { key: plan.next?.name || "unlock", cash: context.money,
         rep: plan.next ? plan.next.repRequired - plan.next.repGap : 0, owned: context.owned.length, level: context.player.skills?.hacking });
     if (route) {
-        const reason = routeInstallation({ installed, pending, plan, money: ns.getServerMoneyAvailable(HOME),
-            minInstall: cfg.minInstall, lastAugReset: reset.lastAugReset, progress, recoveryMs: state.recoveryMs, countRequired: context.objective.countRequired });
-        plan.installDecision = reason || `Wait for ${plan.next?.name || "faction unlock"}; ETA ${plan.next?.etaMs == null ? "unknown" : Math.ceil(plan.next.etaMs / 1000) + "s"}; stalled ${Math.floor(progress.stalledMs / 1000)}s`;
-        if (reason) return handleInstallation(ns, cfg, state, plan, queued, true);
+        context.objective = progressionObjective({ ...context, currentNode: reset.currentNode, plan });
+        const economics = cfg.resetPolicy === "threshold" ? {} : resetEconomics(ns, context, plan, state, pending);
+        const decision = decideAugmentationReset({ ...economics, installed, pending, plan, money: context.money,
+            mode: cfg.resetPolicy || "auto", minInstall: cfg.minInstall, lastAugReset: reset.lastAugReset, progress,
+            recoveryMs: state.recoveryMs, countRequired: context.objective.countRequired, resetEpoch: context.resetEpoch, queuedSince: state.queuedSince,
+            objectiveKey: JSON.stringify([context.objective.milestone, context.objective.limitingResource,
+                context.objective.requiredHacking, context.objective.requiredCash, plan.next?.faction]), history: state.resetHistory });
+        state.resetHistory = decision.history; state.resetDecision = decision;
+        plan.installDecision = resetDecisionSummary(decision);
+        if (decision.action === "INSTALL" || decision.action === "FALLBACK" && decision.fallback.action === "INSTALL")
+            return handleInstallation(ns, cfg, state, plan, queued, true);
         if (cfg.joinFactions && new Set(installed).size >= context.objective.countRequired && player.skills.hacking >= 2500) {
             const daedalus = routeDaedalus(ns, cfg, state, installed, context.objective.countRequired);
             if (daedalus) return { ...daedalus, queued, plan };
@@ -149,12 +166,18 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
     if (current && !ownedCurrentWork(current, state)) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: `Finish or stop current ${current.type || "player"} activity before automatic installation` };
     state.ownedWork = null;
+    if (resetEpoch(ns.getResetInfo()) !== state.resetEpoch) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+        recommendation: "Reset epoch changed; refresh the installation decision" };
     if(state.currentIncome>0) state.recoveryBaseline={nodeReset:ns.getResetInfo().lastNodeReset,at:Date.now(),income:state.currentIncome};
     await saveState(ns, state);
+    if (resetEpoch(ns.getResetInfo()) !== state.resetEpoch) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+        recommendation: "Reset epoch changed while saving; refresh the installation decision" };
+    if (ns.singularity.isBusy() || ns.singularity.getCurrentWork()) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+        recommendation: "Player activity changed while saving; refresh before automatic installation" };
     const installed = ns.singularity.installAugmentations(BOOTSTRAP);
     if (installed === false) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: "Augmentation installation failed; inspect the game log before retrying" };
-    return { state: "RESETTING", phase: "INSTALL", action: `Installing ${queued} augmentations`, recommendation: "", queued };
+    return { state: "RESETTING", phase: "INSTALL", plan, action: `Installing ${queued} augmentations`, recommendation: "", queued };
 }
 
 function handleNextAugmentation(ns, cfg, state, plan, next) {
@@ -262,10 +285,12 @@ function normalizeConfig(flags) {
         joinFactions: bool(flags["join-factions"]), cityFaction: String(flags["city-faction"]), work: bool(flags.work), donate: bool(flags.donate),
         purchase: bool(flags.purchase), focusWork: bool(flags["focus-work"]),
         minInstall: Number(flags["min-install"]),
+        resetPolicy: String(flags["reset-policy"] || "auto"),
     };
     if (!Number.isSafeInteger(cfg.port) || cfg.port <= 0 || Object.values(PORTS).filter(p => p !== PORTS.AUGMENTATION_STATUS).includes(cfg.port)) throw new Error("Invalid or reserved augmentation status port");
     if (!["hacking", "all"].includes(cfg.focus)) throw new Error("focus must be hacking or all");
     if (!Number.isSafeInteger(cfg.minInstall) || cfg.minInstall < 1) throw new Error("min-install must be a positive integer");
+    if (!["auto", "threshold"].includes(cfg.resetPolicy)) throw new Error("reset-policy must be auto or threshold");
     return cfg;
 }
 

@@ -78,6 +78,7 @@ export async function main(ns) {
 		["augmentation-purchase", true],
 		["augmentation-focus-work", false],
 		["min-install", 5],
+		["reset-policy", "auto"],
 		["savings", "auto"],
 		["save-amount", -1],
 		["save-label", "Savings"],
@@ -119,6 +120,7 @@ export async function main(ns) {
 		augmentationPurchase: asBoolean(flags["augmentation-purchase"]),
 		augmentationFocusWork: asBoolean(flags["augmentation-focus-work"]),
 		minInstall: Number(flags["min-install"]),
+		resetPolicy: String(flags["reset-policy"]),
 		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
 		cloudRoi: asBoolean(flags["cloud-roi"]),
 		cloudPayback: Number(flags["cloud-payback"]),
@@ -506,7 +508,7 @@ function createManagedServices(ns, cfg, daemonArgs) {
 			"--city-faction", cfg.augmentationCityFaction, "--work", cfg.augmentationWork,
 			"--donate", cfg.augmentationDonate ?? true,
 			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
-			"--min-install", cfg.minInstall, "--route", cfg.progression && cfg.progressionActions]));
+			"--min-install", cfg.minInstall, "--reset-policy", cfg.resetPolicy || "auto", "--route", cfg.progression && cfg.progressionActions]));
 	if (cfg.contracts) services.push(managed(CONTRACTS, ["--fleet-port", fleetPort]));
 	if (cfg.stocks) services.push(managed(STOCK_TRADER,
 		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve]));
@@ -1124,7 +1126,22 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
     }
 	if (augmentation.recommendation) row("Next", augmentation.recommendation);
 	if (augmentation.formulas) row("Work model", `Exact Formulas | ${Number(augmentation.reputationPerSecond || 0).toFixed(3)} rep/s | share ${Number(augmentation.sharePower || 1).toFixed(3)}x${Number.isFinite(Number(augmentation.projectedFavor)) ? ` | projected favor ${Number(augmentation.projectedFavor).toFixed(2)}` : ""}`);
-	row("Queued", `${Number(augmentation.queued) || 0} augmentation(s) | automatic install at ${cfg.minInstall}`);
+	row("Queued", `${Number(augmentation.queued) || 0} augmentation(s) | ${cfg.resetPolicy || "auto"} policy | fallback threshold ${cfg.minInstall}`);
+    const d = augmentation.resetDecision;
+    if (cfg.dashboardDetails && d) {
+        dashboardSection(ns, "Reset decision");
+        row("Decision", `${d.action}${d.action === "FALLBACK" ? " -> " + d.fallback.action : ""} | confidence ${d.confidence}`);
+        row("Recovery", dashboardTime(d.recoveryMs));
+        const benefit = n => Number.isFinite(n) ? `${n.toFixed(2)}x` : "unknown";
+        row("Current package", `${benefit(d.installNow.packageBenefit)} relevant benefit | break-even ${dashboardTime(d.installNow.breakEvenMs)}`);
+        row("Install now", `${dashboardTime(d.installNow.etaMs)} projected | residual loss ${dashboardTime(d.installNow.lostProgressMs)}`);
+        row("Next aug", `${d.wait.nextAugmentation || "none"} | ETA ${dashboardTime(d.wait.etaMs)} | benefit ${benefit(d.wait.incrementalBenefit)}`);
+        row("Wait total", dashboardTime(d.wait.totalMs));
+        if (d.package?.multipliers) row("Package stats", Object.entries(d.package.multipliers).filter(([,v]) => v !== 1).map(([k,v]) => `${k} ${v.toFixed(2)}x`).join(" | ") || "No modeled multipliers");
+        row("Reason", d.reason);
+        row("Fallback", `${d.queued}/${d.fallback.minInstall} | stalled ${dashboardTime(d.fallback.stalledMs)} | waiting ${dashboardTime(d.fallback.waitingMs)}`);
+        if (augmentation.phase === "INSTALL") row("Execution", `${augmentation.state}${augmentation.recommendation ? ": " + augmentation.recommendation : ""}`);
+    }
 }
 
 function renderGoStatus(ns, go, cfg, services) {
@@ -1513,6 +1530,7 @@ function validateSupervisorOptions(flags, cfg) {
         throw new Error("cloud-min-ram must be a power of two, at least 2 GB");
 	if (!Number.isFinite(Number(flags["home-reserve"])) || Number(flags["home-reserve"]) < 0) throw new Error("home-reserve must be nonnegative");
 	if (!Number.isSafeInteger(cfg.minInstall) || cfg.minInstall < 1) throw new Error("min-install must be a positive integer");
+	if (!["auto", "threshold"].includes(cfg.resetPolicy)) throw new Error("reset-policy must be auto or threshold");
 	if (!Number.isSafeInteger(cfg.darknetMaxAttempts) || cfg.darknetMaxAttempts < 25) throw new Error("darknet-max-attempts must be an integer of at least 25");
 	if (!Number.isSafeInteger(cfg.darknetPhishThreads) || cfg.darknetPhishThreads < 1) throw new Error("darknet-phish-threads must be positive");
 	if (!Number.isSafeInteger(cfg.darknetConcurrency) || cfg.darknetConcurrency < 1 || cfg.darknetConcurrency > 16) throw new Error("darknet-concurrency must be an integer from 1 to 16");

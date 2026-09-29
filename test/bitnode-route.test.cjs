@@ -2,6 +2,82 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { Clock, loadScript } = require('./helpers.cjs');
 
+function economicFixture() {
+    const f = fixture();
+    f.world.pending = ['A', 'B', 'C']; f.world.rep = 1000;
+    f.world.scripts.push({ filename: 'daemon.js', pid: 20 });
+    f.cfg.joinFactions = false; f.cfg.programCreation = false;
+    const getPlayer = f.ns.getPlayer;
+    f.ns.getPlayer = () => ({ ...getPlayer(), exp: { hacking: 10000, intelligence: 0 } });
+    f.ns.fileExists = name => ['Formulas.exe', 'bootstrap.js'].includes(name);
+    f.ns.formulas = { work: { factionGains: () => ({ reputation: 2.5 }) } };
+    f.ns.singularity.getAugmentationStats = name => ({ faction_rep: name === 'BitWire' ? 1.1 : 1.6 });
+    f.ns.singularity.getAugmentationRepReq = () => 9000;
+    f.ns.getPortHandle = () => ({ peek: () => ({ type: 'jit-status', version: 2, pid: 20, generatedAt: f.clock.now,
+        income60: 1000, pipelines: [{ mode: 'LIVE' }], prepRam: 0, policy: { balance: {
+            generatedAt: f.clock.now, milestone: 'AUGMENTATIONS', requiredHacking: null, requiredCash: 1000,
+            cashSource: 'measured', cashRate: 1000, xpSource: 'measured', xpRate: 100 } } }) });
+    f.state.recoveryProfile = { nodeReset: 1, samples: [100000, 500000].map(at => ({ at, ms: 90000,
+        income: 1000, cash: 1e9, xp: 10000, hacking: 600, reputation: { CyberSec: 1000 } })) };
+    return f;
+}
+
+test('BN4 economics installs three strong queued augmentations through the existing safe bootstrap path', async () => {
+    const f = economicFixture(); let status;
+    for (let i = 0; i <= 12; i++) {
+        status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        if (i < 12) { assert.equal(status.resetDecision.action, 'WAIT'); f.clock.now += 5000; }
+    }
+    assert.equal(status.resetDecision.action, 'INSTALL'); assert.equal(status.state, 'RESETTING');
+    assert.equal(f.world.calls.filter(c => c[0] === 'install').length, 1);
+    const persisted = JSON.parse(f.world.files.get('data/augmentation-loop-state.json'));
+    assert.equal(persisted.resetDecision.action, 'INSTALL'); assert.equal(persisted.recoveryBaseline.income, 1000);
+    assert.match(status.progression.installDecision, /INSTALL: break-even/);
+});
+
+test('economic INSTALL remains visible when bootstrap, saved settings, manual work or busy execution blocks it', async () => {
+    for (const reason of ['bootstrap', 'settings', 'manual', 'busy', 'epoch', 'new-activity']) {
+        const f = economicFixture(); let status;
+        for (let i = 0; i < 12; i++) { await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state); f.clock.now += 5000; }
+        if (reason === 'bootstrap') f.ns.fileExists = name => name === 'Formulas.exe';
+        if (reason === 'settings') f.world.files.set('data/supervisor-bootstrap.json', '{}');
+        if (reason === 'manual') { f.world.work = { type: 'CRIME' }; f.world.calls.length = 0; }
+        if (reason === 'busy') { f.world.work = null; f.ns.singularity.isBusy = () => true; }
+        if (reason === 'epoch') f.ns.write = async () => { f.reset.lastAugReset++; };
+        if (reason === 'new-activity') f.ns.write = async () => { f.world.work = { type: 'CRIME' }; };
+        status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.equal(status.resetDecision.action, 'INSTALL', reason); assert.equal(status.state, 'BLOCKED', reason);
+        assert.equal(f.world.calls.filter(c => c[0] === 'install').length, 0, reason);
+        if (reason === 'manual') assert.equal(f.world.calls.filter(c => c[0] === 'stop').length, 0);
+    }
+});
+
+test('auto can wait beyond five while threshold mode resets and uncertain auto evidence falls back', async () => {
+    for (const mode of ['auto', 'threshold', 'missing-recovery', 'forged-producer']) {
+        const f = economicFixture(); f.world.pending.push('D', 'E'); f.cfg.resetPolicy = mode === 'threshold' ? mode : 'auto';
+        f.ns.singularity.getAugmentationRepReq = () => 1450; // 45 seconds to purchase
+        if (mode === 'missing-recovery') f.state.recoveryProfile.samples = [];
+        if (mode === 'forged-producer') f.world.scripts[0].filename = 'manual.js';
+        // Legacy short-wait grace has expired; economics may still choose WAIT.
+        f.state.progress = { key: 'BitWire', since: f.clock.now - 180000, lastProgressAt: f.clock.now,
+            cash: f.world.cash, rep: f.world.rep, owned: 5, level: f.world.hacking };
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        if (mode === 'auto') {
+            assert.equal(status.resetDecision.action, 'WAIT'); assert.notEqual(status.state, 'RESETTING');
+        } else {
+            assert.equal(status.resetDecision.action, 'FALLBACK', mode); assert.equal(status.state, 'RESETTING', mode);
+        }
+    }
+});
+
+test('Daedalus count crossing installs before invitation handling even below the fallback threshold', async () => {
+    const f = fixture(); f.world.installed = Array.from({ length: 29 }, (_, i) => 'Old' + i);
+    f.world.pending = ['A', 'B']; f.world.invites = ['NiteSec'];
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.state, 'RESETTING'); assert.match(status.resetDecision.reason, /Daedalus/);
+    assert.equal(f.world.calls.filter(c => c[0] === 'join').length, 0);
+});
+
 function fixture() {
     const clock = new Clock();
     const reset = { currentNode: 4, lastNodeReset: 1, lastAugReset: clock.now, ownedSF: new Map([[5, 1]]) };

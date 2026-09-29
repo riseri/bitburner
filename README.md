@@ -89,9 +89,10 @@ Optional flags express specific preferences. For example:
 
 ```text
 run supervisor.js --min-install 8 --augmentation-city-faction Aevum
+run supervisor.js --reset-policy threshold
 ```
 
-This sets the installation threshold to eight and permits joining Aevum when
+The first command sets the fallback installation threshold to eight and permits joining Aevum when
 eligible. The BN4 route automatically chooses compatible city factions when none
 is explicitly selected; outside that route, city factions are skipped by default. The default
 hacking plan includes The Red Pill, faction reputation upgrades, and
@@ -103,8 +104,17 @@ than the threshold, unlock another faction, install manually, or lower
 `--min-install`. In BN4, the route controller also installs completed smaller
 batches and batches that reach Daedalus's 30-augmentation requirement. It limits
 waiting to 30 minutes of actual stalled progress, with a 60-minute absolute
-cap per selected objective. A valuable near-term purchase can delay the threshold
-by at most two minutes; measured recovery and favor unlocks can justify installing.
+cap per selected objective. `--reset-policy auto` (default) uses conservative reset
+economics on this route when recovery and resource evidence are reliable. It can
+install fewer than five meaningful upgrades or wait beyond five for a better next
+purchase. Auto mode also caps a nonempty queue at one hour across objective changes.
+Unknown economics falls back to the existing count/stall policy.
+`--reset-policy threshold` keeps that policy, including its two-minute near-term
+purchase grace. Both options persist through supervisor/bootstrap restarts.
+Red Pill, Daedalus count crossings, completed reachable batches and donation/favor
+exceptions retain priority. Execution still requires a safe bootstrap and protects
+unrelated player work. See [reset economics](docs/augmentation-reset-policy.md) for
+the model, recovery requirements, limitations and worked examples.
 
 Service toggles remain available, such as `--stocks false` or
 `--augmentation-actions false` (disables supervision of the augmentation service). The latter
