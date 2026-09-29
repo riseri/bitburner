@@ -4,6 +4,7 @@ import { PORTS } from "lib/ports.js";
 import { progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
 import { progressionPrograms, rankPrograms } from "lib/programs.js";
 import { singularityRecommendation } from "lib/augmentation-loop.js";
+import { darknetActivation } from "lib/service-catalog.js";
 
 const HOME = "home";
 const WORLD_DAEMON = "w0r1d_d43m0n";
@@ -88,16 +89,19 @@ function buildStatus(ns, fleetStatus, options = {}) {
 
 	    const objective = readProgressionSnapshot(ns);
     const servers = [...discovered].flatMap(host => { try { return [ns.getServer(host)]; } catch { return []; } });
-    const ranked = rankPrograms(programs, { servers, money, homeRam: ns.getServerMaxRam("home"),
-        darknetRam: ns.getScriptRam("darknet-manager.js", "home") + ns.getScriptRam("darknet-agent.js", "home") + ns.getServerUsedRam("home"),
+    const darknet = darknetActivation(ns, { enabled: options.darknet !== false });
+    const ranked = rankPrograms(programs, { servers, money, homeRam: ns.getServerMaxRam(HOME), darknetAvailableRam: darknet.availableRam,
+        darknetRam: darknet.minimumRam,
         income: objective?.incomePerSecond, objective });
     const objectives = planObjectives({ torOwned, programs: ranked, backdoors, money });
+    if (darknet.navigator === "MISSING") darknet.navigator = money >= programs.find(p => p.category === "darknet")?.cost && torOwned ? "PURCHASABLE" : "SAVING";
 	const milestone = planMilestone({ currentNode, player: ns.getPlayer(), money, worldDaemon,
 		observation: readProgressionObservation(ns) });
     const shared = readProgressionSnapshot(ns);
     if (shared) { milestone.stage = shared.milestone; milestone.label = shared.recommendation || `${shared.milestone}: ${shared.limitingResource}`; milestone.savings = shared.savings; }
 	return {
         progression: shared,
+        darknet,
 		type: "progression-status",
 		generatedAt: Date.now(),
 		plannedAt: Date.now(),

@@ -1,5 +1,6 @@
 import { readSavings } from "lib/savings.js";
 import { claimAction, publishAction, validateRequest } from "lib/progression-protocol.js";
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 
 /** @param {NS} ns */
 export async function main(ns) {
@@ -23,6 +24,10 @@ export async function main(ns) {
 		}
 		const error = validateRequest(request, ns.getResetInfo());
 		if (error) { publishAction(ns, request, "blocked", error); return; }
+		const objective = readProgressionSnapshot(ns);
+		if (objective?.resetImminent || objective?.redPill === "queued") {
+			publishAction(ns, request, "blocked", "installation-imminent"); return;
+		}
 		const purchased = tor ? ns.singularity.purchaseTor() : ns.singularity.purchaseProgram(request.target);
 		const owned = tor ? ns.hasTorRouter() : ns.fileExists(request.target, "home");
 		publishAction(ns, request, purchased && owned ? "succeeded" : "failed",

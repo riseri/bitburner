@@ -18,6 +18,19 @@ export function readProgressionSnapshot(ns, now = Date.now()) {
 
 export function distinctAugmentations(names = []) { return [...new Set(names)]; }
 
+export function sharingDemand(objective, work) {
+    const next = objective?.selectedPlan?.next;
+    if (objective?.limitingResource !== "reputation" || objective.resetImminent || !(next?.repGap > 0) ||
+        work?.type !== "FACTION" || work.factionName !== next.faction) return "OFF";
+    return objective.milestone === "RED_PILL" && (next.name === "The Red Pill" || next.chainTarget === "The Red Pill")
+        ? "AGGRESSIVE" : "SPARE_ONLY";
+}
+
+export function readSharingDemand(ns) {
+    const demand = readProgressionSnapshot(ns)?.sharingDemand;
+    return ["SPARE_ONLY", "AGGRESSIVE"].includes(demand) ? demand : "OFF";
+}
+
 export function progressionObjective({ currentNode, installed = [], owned = [], player = {}, money = 0,
     multipliers = null, finalRequirement = null, backdoors = [], plan = null }) {
     const installedCount = distinctAugmentations(installed).length;

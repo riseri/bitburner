@@ -1,5 +1,6 @@
 import { PORTS } from "lib/ports.js";
 import { readArgument } from "lib/service-lifecycle.js";
+import { homeShareRam } from "lib/home-share.js";
 
 // In admission priority order. Capability names are data, not expensive API calls.
 export const SERVICES = Object.freeze([
@@ -73,4 +74,23 @@ export function supervisorRamBudget(ns, cfg, capabilities) {
 
 function enabled(value) {
     return !["false", "0", "no", "off"].includes(String(value).trim().toLowerCase());
+}
+
+// Unlock usefulness is independent of admission. Count one crawler, not its cap.
+export function darknetActivation(ns, { enabled = true, reserve = 8 } = {}) {
+    if (!enabled) return { navigator: "DISABLED", activation: "DISABLED", minimumRam: 0, availableRam: 0, requiredHomeRam: 0 };
+    const owned = ns.fileExists("DarkscapeNavigator.exe", "home"), access = owned || Number(ns.getResetInfo()?.currentNode) === 15;
+    const managerRam = ns.getScriptRam("darknet-manager.js", "home"), agentRam = ns.getScriptRam("darknet-agent.js", "home");
+    const processes = ns.ps("home"), manager = processes.some(p => p.filename === "darknet-manager.js");
+    const threads = processes.filter(p => p.filename === "darknet-agent.js").reduce((n, p) => n + Math.max(1, p.threads || 1), 0);
+    const minimumRam = managerRam + agentRam + Math.max(8, reserve);
+    const maxRam = ns.getServerMaxRam("home");
+    const availableRam = Math.max(0, maxRam - ns.getServerUsedRam("home") + homeShareRam(ns) +
+        (manager ? managerRam : 0) + threads * agentRam);
+    const fits = managerRam > 0 && agentRam > 0 && availableRam >= minimumRam;
+    return { navigator: owned ? "OWNED" : access ? "BITNODE_ACCESS" : "MISSING",
+        activation: !access ? "LOCKED" : manager && threads ? "ACTIVE" : fits ? "READY" : "NEED_HOME_RAM",
+        minimumRam, availableRam, threads, fits,
+        requiredHomeRam: managerRam > 0 && agentRam > 0 ? maxRam + Math.max(0, minimumRam - availableRam) : maxRam,
+        reason: !(managerRam > 0 && agentRam > 0) ? "Darknet scripts missing" : fits ? "minimum crawler fits" : "home RAM required" };
 }

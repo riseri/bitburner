@@ -1,6 +1,8 @@
 import { readSavings } from "lib/savings.js";
 import { PORTS } from "lib/ports.js";
 import { progressionPrograms } from "lib/programs.js";
+import { readProgressionSnapshot } from "lib/progression-objective.js";
+import { reclaimHomeShare } from "lib/home-share.js";
 import { freshStatus, resetEpoch, singularityAvailable, actionKey, createRequest, terminalAction, validateRequest } from "lib/progression-protocol.js";
 
 const PURCHASE = "progression-purchase.js", BACKDOOR = "progression-backdoor.js";
@@ -73,6 +75,10 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		state.current = { state: "blocked", reason: "Invalid progression cash reserve" }; return;
 	}
 	const cash = ns.getServerMoneyAvailable("home");
+	const progression = readProgressionSnapshot(ns);
+	if (progression?.resetImminent || progression?.redPill === "queued") {
+		state.current = { state: "blocked", reason: "Installation takes priority over progression purchases" }; return;
+	}
 	const objectives = Array.isArray(plan.objectives) ? plan.objectives : [];
 	let blockedReason = "No runnable progression objectives";
 	for (const objective of objectives) {
@@ -92,6 +98,7 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		if (validateRequest(request, reset, now)) { blockedReason = "Invalid objective in plan"; continue; }
 		const script = objective.kind === "backdoor" ? BACKDOOR : PURCHASE;
 		const ram = ns.getScriptRam(script, "home");
+		if (ram > 0) reclaimHomeShare(ns, ram);
 		const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
 		if (!Number.isFinite(ram) || ram <= 0 || !Number.isFinite(free) || ram > free) {
 			blockedReason = `${objective.target}: WAITING_RAM (need ${ram > 0 ? ram.toFixed(2) : "valid script"} GB)`;
