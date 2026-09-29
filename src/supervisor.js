@@ -1,3 +1,4 @@
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { bn4Route } from "lib/bitnode-route.js";
 import { intelligenceSessionActive } from "lib/intelligence-session.js";
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
@@ -8,7 +9,7 @@ import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
 import { pathFromHome, singularityAvailable, resetEpoch } from "lib/progression-protocol.js";
-import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget } from "lib/service-catalog.js";
+import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget, selectedServices } from "lib/service-catalog.js";
 import { starterHosts, starterWorkers, stopStarterPool, tickStarterPool } from "lib/starter-pool.js";
 
 const HOME = "home";
@@ -40,6 +41,7 @@ export async function main(ns) {
 		["stocks", true],
 		["stock-cash-reserve", 0.20],
 		["go", true],
+        ["go-opponent", "auto"],
 		["go-takeover", true],
 		["darknet", true],
 		["darknet-phish", true],
@@ -63,7 +65,7 @@ export async function main(ns) {
 		["augmentations", true],
 		["augmentation-focus", "hacking"],
 		["augmentation-target", ""],
-		["augmentation-price-multiplier", 1],
+		["augmentation-price-multiplier", 0],
 		["augmentation-actions", ACTION_DEFAULTS["augmentation-actions"]],
 		["augmentation-cash-reserve", 0.10],
 		["augmentation-join-factions", true],
@@ -79,6 +81,7 @@ export async function main(ns) {
 		["save-target", ""],
 		["cloud-roi", true],
 		["cloud-payback", 1800],
+        ["cloud-min-ram", 8],
 		["home-reserve", 8],
 		["share", true],
 	]);
@@ -114,6 +117,7 @@ export async function main(ns) {
 		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
 		cloudRoi: asBoolean(flags["cloud-roi"]),
 		cloudPayback: Number(flags["cloud-payback"]),
+        cloudMinRam: Number(flags["cloud-min-ram"]),
 		// A property named share is charged as the worker API by the RAM analyzer.
 		shareEnabled: asBoolean(flags["share"]),
 		contracts: asBoolean(flags.contracts),
@@ -124,6 +128,7 @@ export async function main(ns) {
 		stockCashReserve: clampFraction(flags["stock-cash-reserve"]),
 		go: asBoolean(flags.go),
 		goTakeover: asBoolean(flags["go-takeover"]),
+        goOpponent: String(flags["go-opponent"]),
 		darknet: asBoolean(flags.darknet),
 		darknetPhish: asBoolean(flags["darknet-phish"]),
 		darknetPhishThreads: Number(flags["darknet-phish-threads"]),
@@ -155,6 +160,8 @@ export async function main(ns) {
 		}
 	}
 
+    if (cfg.savingsMode === "fixed") await writeSavings(ns, Number(flags["save-amount"]), flags["save-label"], flags["save-target"]);
+    else if (cfg.savingsMode === "none") await writeSavings(ns, 0, "No savings goal");
 	await runStarterMode(ns, cfg);
 
 	if (cfg.contractSelftest && ns.fileExists(CONTRACT_SELFTEST, HOME)) {
@@ -210,12 +217,15 @@ export async function main(ns) {
 			admittedServices.push(service);
 		}
 		yieldFleetRamToDaemon(ns, coreServices);
-		const serviceBlocker = tickServicePriority(ns, reserveRouteHelper(ns, services, admittedServices));
+        const upgradeReserve = capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions
+            ? ns.getScriptRam("home-upgrade.js", HOME) : 0;
+        cfg.shareReserve = Math.max(cfg.shareReserve, upgradeReserve);
+		const serviceBlocker = tickServicePriority(ns, reserveRouteHelper(ns, services, admittedServices), "", upgradeReserve);
 
 		// Short-lived helpers are lower priority than every enabled persistent service.
 		for (const job of jobs) {
 			const other = jobs.find(candidate => candidate !== job && ns.ps(HOME).some(p => p.filename === candidate.script));
-			const gate = job.type === "augmentation-plan" && !capabilities.singularity ? "Singularity is locked"
+			const gate = job.type === "stock-access" && !readProgressionSnapshot(ns)?.multipliers ? "Stock access waits for current progression and multiplier evidence" : job.type === "augmentation-plan" && readProgressionSnapshot(ns) ? "Manager publishes the live plan" : job.type === "augmentation-plan" && !capabilities.singularity ? "Singularity is locked"
 				: serviceBlocker || (other ? `Waiting for ${other.script}` : "");
 			tickUtilityJob(ns, job, gate);
 		}
@@ -230,10 +240,16 @@ export async function main(ns) {
 			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER),
 			goStatus = ownedServiceStatus(ns, services.find(service => service.name === GO_BOT), snapshot(GO_BOT)),
 			augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER);
-		try { await updateSupervisorSavings(ns, cfg, cfg.augmentationPlan, progressionStatus, augmentationStatus); }
+		try { await updateSupervisorSavings(ns, cfg, cfg.augmentationPlan, progressionStatus, augmentationStatus, fleetStatus); }
 		catch (error) { cfg.savingsStatus = `Savings update failed: ${String(error.message || error)}`; }
+        if (capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions) {
+            cfg.homeUpgradeCritical = progressionRamBlocked(services);
+            const target = ongoingHomeTarget(ns, cfg, capabilities, services, jobs);
+            if (target > ns.getServerMaxRam(HOME)) await tickStarterHomeUpgrade(ns, starterHosts(ns), target, cfg);
+            else { cfg.homeInvestment = null; cfg.homeUpgradeStatus = ""; }
+        }
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
-		reconcileHomeShare(ns, cfg.shareEnabled, cfg.shareReserve);
+		reconcileHomeShare(ns, cfg.shareEnabled && readProgressionSnapshot(ns)?.limitingResource !== "hacking", cfg.shareReserve);
 		cfg.shareStatus = collectSharingStatus(ns, cfg.shareEnabled, fleetStatus, cfg.shareReserve);
 		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
 		cfg.telemetryError = telemetry?.error || "";
@@ -243,7 +259,7 @@ export async function main(ns) {
 	}
 }
 
-function tickServicePriority(ns, services, blockedBy = "") {
+function tickServicePriority(ns, services, blockedBy = "", reserveRam = 0) {
 	let blocker = blockedBy;
 	for (let index = 0; index < services.length; index++) {
 		const service = services[index];
@@ -266,18 +282,18 @@ function tickServicePriority(ns, services, blockedBy = "") {
 			continue;
 		}
 		const needed = ns.getScriptRam(service.name, HOME) * Math.max(1, service.threads || 1);
-		let free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+		let free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) - reserveRam;
 		if (needed > free) {
 			yieldHomeShare(ns);
-			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) - reserveRam;
 		}
 		if (needed > free) {
 			preemptLowerPriorityServices(ns, service, services.slice(index + 1), needed - free);
-			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) - reserveRam;
 		}
 		if (needed > 0 && needed > free) {
 			service.state = "WAITING_RAM";
-			service.waitReason = `needs ${needed.toFixed(2)} GB; ${Math.max(0, free).toFixed(2)} GB free`;
+			service.waitReason = `needs ${needed.toFixed(2)} GB; ${Math.max(0, free).toFixed(2)} GB free${reserveRam > 0 ? ` after ${reserveRam.toFixed(2)} GB upgrade reserve` : ""}`;
 			blocker = `${service.name} ${service.waitReason}`;
 			continue;
 		}
@@ -369,27 +385,31 @@ function preemptLowerPriorityServices(ns, owner, lowerServices, shortfall) {
 // Borrow free network RAM while home cannot yet hold the full money engine.
 async function runStarterMode(ns, cfg = {}) {
 	const autoHome = cfg.augmentationActions && cfg.progression && cfg.progressionActions && bn4Route(ns.getResetInfo());
+    const coreFiles = [DAEMON, FLEET, ...(cfg.progression ? [PROGRESSION] : [])];
+    const helperRam = autoHome ? ns.getScriptRam("home-upgrade.js", HOME) : 0;
+    cfg.homeUpgradeCritical = Boolean(autoHome);
 	const copied = new Set();
 	while (true) {
 		const hosts = starterHosts(ns);
 		const maxRam = ns.getServerMaxRam(HOME);
-		const coreRam = ns.getScriptRam(SUPERVISOR, HOME) + ns.getScriptRam(DAEMON, HOME) + ns.getScriptRam(FLEET, HOME) +
-            (autoHome ? ns.getScriptRam(AUGMENTATION_MANAGER, HOME) + ns.getScriptRam(PROGRESSION, HOME) + ns.getScriptRam(CONTRACTS, HOME) +
-                Math.max(ns.getScriptRam("intelligence-handoff.js", HOME), ns.getScriptRam("node-complete.js", HOME), ns.getScriptRam(PROGRESSION_BACKDOOR, HOME), ns.getScriptRam("augmentation-planner.js", HOME)) + 8 : 0);
+        const coreRam = starterAdmissionRam(ns, cfg, helperRam) +
+            (findProcess(ns, AUGMENTATION_MANAGER) ? ns.getScriptRam(AUGMENTATION_MANAGER, HOME) : 0);
+
 		const workerRam = ns.getScriptRam(STARTER_WORKER, HOME);
 		const homeWorkerRam = starterWorkers(ns, HOME).reduce((sum, process) => sum + workerRam * process.threads, 0);
-		const missingCore = [DAEMON, FLEET].filter(file => !findProcess(ns, file))
-			.reduce((sum, file) => sum + ns.getScriptRam(file, HOME), 0);
+		const missingCore = coreFiles.filter(file => !findProcess(ns, file))
+			.reduce((sum, file) => sum + ns.getScriptRam(file, HOME), helperRam);
 		const ready = coreRam > 0 && maxRam >= coreRam &&
 			maxRam - ns.getServerUsedRam(HOME) + homeWorkerRam >= missingCore;
 		if (ready && stopStarterPool(ns, hosts)) {
-			ns.tprint(`Starter mode complete at ${maxRam.toFixed(2)} GB home RAM; launching the full automation stack`);
+			ns.tprint(`Starter mode complete at ${maxRam.toFixed(2)} GB home RAM; admitting services in RAM priority order`);
 			return;
 		}
+        if (!ready) await tickStarterProgression(ns, cfg, helperRam);
 		const pool = ready ? { rooted: true, threads: 0, workers: 0, failures: 1 }
 			: await tickStarterPool(ns, hosts, copied);
 
-        if (autoHome && !ready) await tickStarterHomeUpgrade(ns, hosts, coreRam);
+        if (autoHome && !ready) await tickStarterHomeUpgrade(ns, hosts, coreRam, cfg);
 		ns.clearLog();
 		dashboardTitle(ns, "BITBURNER AUTOMATION :: STARTER MODE");
 		dashboardSection(ns, "Income bootstrap");
@@ -398,7 +418,8 @@ async function runStarterMode(ns, cfg = {}) {
 			? `${pool.threads} threads across ${pool.workers} servers` : "WAITING FOR RAM on home and rooted servers");
 		if (pool.failures) dashboardRow(ns, "Retry", ready ? "Waiting for starter workers to stop before handoff" : `${pool.failures} deployment(s) will retry`);
 		dashboardSection(ns, "Upgrade path");
-		dashboardRow(ns, "Home RAM", `${formatRam(maxRam)} / ${formatRam(coreRam)} needed for supervisor + daemon + fleet`);
+		dashboardRow(ns, "Home RAM", `${formatRam(maxRam)} / ${formatRam(coreRam)} needed for core services${helperRam ? " + upgrade helper" : ""}`);
+        if (cfg.homeUpgradeStatus) dashboardRow(ns, "Home upgrade", cfg.homeUpgradeStatus);
 		dashboardRow(ns, "Next", autoHome ? "Saving for automatic home RAM upgrades; remote starter workers keep earning" : "Upgrade home RAM manually; full automation starts when enough RAM is free");
 		await ns.sleep(5_000);
 	}
@@ -448,7 +469,7 @@ function createManagedServices(ns, cfg, daemonArgs) {
 		"--cloud-payback", cfg.cloudPayback ?? 1800,
 		"--cloud", readArgument(managedDaemonArgs, "--cloud", true),
 		"--cloud-reserve", readArgument(managedDaemonArgs, "--cloud-reserve", 0.10),
-		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", 32),
+		"--cloud-min-ram", readArgument(managedDaemonArgs, "--cloud-min-ram", cfg.cloudMinRam ?? 8),
 		"--cloud-prefix", readArgument(managedDaemonArgs, "--cloud-prefix", "cloud")];
 	const fleetPort = Number(readArgument(existingFleet?.args ?? fleetArgs, "--port", PORTS.FLEET_STATUS));
 	const reserved = Object.values(PORTS).filter(port => port !== PORTS.FLEET_STATUS);
@@ -466,20 +487,20 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	};
 	const services = [managed(DAEMON, launchDaemonArgs), managed(FLEET, fleetArgs, fleetPort)];
 	if (cfg.progression) services.push(managed(PROGRESSION, ["--fleet-port", fleetPort, "--darknet", cfg.darknet !== false]));
-	if (cfg.contracts) services.push(managed(CONTRACTS, ["--fleet-port", fleetPort]));
 	if (cfg.augmentationActions) services.push(managed(AUGMENTATION_MANAGER,
-		["--port", PORTS.AUGMENTATION_STATUS, "--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget,
+		["--price-multiplier", cfg.augmentationMultiplier || 0, "--port", PORTS.AUGMENTATION_STATUS, "--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget,
 			"--cash-reserve", cfg.augmentationCashReserve, "--join-factions", cfg.augmentationJoinFactions,
 			"--city-faction", cfg.augmentationCityFaction, "--work", cfg.augmentationWork,
 			"--donate", cfg.augmentationDonate ?? true,
 			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
 			"--min-install", cfg.minInstall, "--route", cfg.progression && cfg.progressionActions]));
+	if (cfg.contracts) services.push(managed(CONTRACTS, ["--fleet-port", fleetPort]));
 	if (cfg.stocks) services.push(managed(STOCK_TRADER,
 		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve]));
 	// Go publishes status for the dashboard, but slow opponent API calls are allowed to wait indefinitely.
 	// Process liveness owns restart decisions; the generic heartbeat watchdog does not.
 	if (cfg.go) services.push(managed(GO_BOT,
-		["--port", PORTS.GO_STATUS, "--takeover", cfg.goTakeover ?? true]));
+		["--port", PORTS.GO_STATUS, "--takeover", cfg.goTakeover ?? true, "--opponent", cfg.goOpponent || "auto"]));
 	if (cfg.darknet) services.push(managed(DARKNET_MANAGER,
 		["--port", PORTS.DARKNET_STATUS, "--event-port", PORTS.DARKNET_EVENTS,
 			"--phish", cfg.darknetPhish, "--phish-threads", cfg.darknetPhishThreads, "--max-attempts", cfg.darknetMaxAttempts,
@@ -620,7 +641,7 @@ function render(ns, state) {
 		renderOverview(ns, daemon, fleet, cfg.shareStatus);
 		renderNextSteps(ns, { cfg, goal, progression, augmentation, actions: state.actions });
 		renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet,
-			actions: state.actions, services: state.services, stockAccess: state.stockAccess });
+			services: state.services, stockAccess: state.stockAccess });
 		ns.print("  More detail: restart with --dashboard-details true");
 		return;
 	}
@@ -786,7 +807,8 @@ function renderOverview(ns, daemon, fleet, shareStatus = null) {
 function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	const entries = [];
-	if (actions?.current) entries.push(["In progress", actions.current.reason]);
+	if (actions?.current) entries.push([actions.current.state === "blocked" ? "Blocked" : "In progress", actions.current.reason]);
+    if (cfg.homeUpgradeStatus) entries.push(["Home upgrade", cfg.homeUpgradeStatus]);
 	const progressionAdvice = [progression?.nextObjective?.label, ...(progression?.recommendations || [])]
 		.filter((value, index, all) => value && all.indexOf(value) === index && value !== actions?.current?.reason)
 		.slice(0, cfg.dashboardDetails ? 4 : 2);
@@ -806,7 +828,7 @@ function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) 
 	for (const [label, value] of entries) row(label, value);
 }
 
-function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet, actions, services, stockAccess }) {
+function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet, services, stockAccess }) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	const status = (state, value) => `[${state}] ${value}`;
 	const managed = name => services?.find(service => service.name === name);
@@ -827,15 +849,15 @@ function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, pr
 		row("3 Progression", status("OK", `${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`));
 	}
 
-	if (!cfg.contracts) row("4 Contracts", status("OFF", "disabled by setting"));
-	else if (!contracts) row("4 Contracts", waiting(CONTRACTS, "waiting for scan"));
-	else if (contracts.error) row("4 Contracts", status("BLOCKED", contracts.error));
-	else row("4 Contracts", status("OK", `${Number(contracts.waiting) || 0} waiting | ${Number(contracts.solved) || 0} solved`));
-
-	if (cfg.augmentationActions) row("5 Aug loop", augmentation
+	if (cfg.augmentationActions) row("4 Aug loop", augmentation
 		? status(augmentation.error ? "BLOCKED" : "OK", `${augmentation.state} / ${augmentation.phase || "WAIT"} | ${augmentation.action || augmentation.recommendation || "waiting"}`)
 		: waiting(AUGMENTATION_MANAGER, "waiting for status"));
-	else row("5 Aug loop", status("OFF", "disabled by setting"));
+	else row("4 Aug loop", status("OFF", "disabled by setting"));
+
+	if (!cfg.contracts) row("5 Contracts", status("OFF", "disabled by setting"));
+	else if (!contracts) row("5 Contracts", waiting(CONTRACTS, "waiting for scan"));
+	else if (contracts.error) row("5 Contracts", status("BLOCKED", contracts.error));
+	else row("5 Contracts", status("OK", `${Number(contracts.waiting) || 0} waiting | ${Number(contracts.solved) || 0} solved`));
 
 	if (!cfg.stocks) row("6 Stocks", status("OFF", "disabled by setting"));
 	else if (!stockAccess?.ok) row("6 Stocks", status("LOCKED", `missing ${stockAccess?.missing?.join(", ") || "market access"}`));
@@ -859,7 +881,6 @@ function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, pr
 		row("Darknet results", `${Number(darknet.deployments) || 0} deployments | ${Number(darknet.caches) || 0} caches | ${Number(darknet.blocked) || 0} blocked | ${Number(darknet.errors) || 0} errors`);
 	}
 
-	if (actions?.current) row("Active action", status("RUN", actions.current.reason));
 	const diagnostics = cfg.utilityJobs?.find(job => job.type === "diagnostics");
 	if (diagnostics) {
 		const state = ["ERROR", "CONFLICT"].includes(diagnostics.state) ? "BLOCKED"
@@ -878,10 +899,8 @@ function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, pr
 	else row("10 Aug plan", status("OFF", "disabled by setting"));
 	if (services?.length) {
 		const ready = services.filter(service => service.state === "RUNNING").length;
-		const pending = services.filter(service => service.state !== "RUNNING")
-			.map(service => `${service.name.replace("-manager.js", "").replace(".js", "")} ${serviceLabel(service)}`);
-		row("Services", pending.length
-			? status("WAIT", `${ready}/${services.length} running | ${pending.join(" | ")}`)
+		row("Services", ready < services.length
+			? status("WAIT", `${ready}/${services.length} running`)
 			: status("OK", `all ${services.length} running`));
 	}
 }
@@ -1080,6 +1099,14 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
 	if (!augmentation) { row("Status", "Starting / waiting for augmentation manager"); return; }
 	row("Status", `${augmentation.state || "UNKNOWN"}${augmentation.phase ? ` | ${augmentation.phase}` : ""}`);
 	if (augmentation.action) row("Last action", augmentation.action);
+    if (augmentation.progression) {
+        const p = augmentation.progression;
+        row("Objective", p.milestone + " | limited by " + p.limitingResource);
+        row("Installed distinct", p.installedCount + " / " + p.countRequired + " | queued distinct " + p.queuedDistinct.length);
+        if (p.installDecision) row("Install / wait", p.installDecision);
+        if (p.selectedPlan?.next) row("Selected", p.selectedPlan.next.name + " from " + p.selectedPlan.next.faction + " | " + (p.selectedPlan.next.explanation || ""));
+        if (p.missingInformation?.length) row("Unknown", p.missingInformation.join(", "));
+    }
 	if (augmentation.recommendation) row("Next", augmentation.recommendation);
 	if (augmentation.formulas) row("Work model", `Exact Formulas | ${Number(augmentation.reputationPerSecond || 0).toFixed(3)} rep/s | share ${Number(augmentation.sharePower || 1).toFixed(3)}x${Number.isFinite(Number(augmentation.projectedFavor)) ? ` | projected favor ${Number(augmentation.projectedFavor).toFixed(2)}` : ""}`);
 	row("Queued", `${Number(augmentation.queued) || 0} augmentation(s) | automatic install at ${cfg.minInstall}`);
@@ -1405,6 +1432,7 @@ function createSupervisorUtilities(cfg) {
 	if (cfg.diagnostics) jobs.push(createUtilityJob("doctor.js", "data/diagnostics.json", "diagnostics", [], 0));
 	if (cfg.augmentations) jobs.push(createUtilityJob("augmentation-planner.js", "data/augmentation-plan.json", "augmentation-plan",
 		["--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget, "--price-multiplier", cfg.augmentationMultiplier, "--route", Boolean(cfg.progression && cfg.progressionActions)]));
+	if (cfg.stocks) jobs.push(createUtilityJob("stock-access.js", "data/stock-access.json", "stock-access", [], 60000));
 	return jobs;
 }
 
@@ -1414,8 +1442,10 @@ function validateSupervisorOptions(flags, cfg) {
 	if (!Number.isFinite(amount) || amount < -1 || (amount < 0 && amount !== -1)) throw new Error("save-amount must be nonnegative or -1 (unset)");
 	if (amount >= 0 && !["auto", "keep"].includes(String(flags.savings))) throw new Error("Use save-amount or an automatic savings mode, not both");
 	if (!["hacking", "all"].includes(cfg.augmentationFocus)) throw new Error("augmentation-focus must be hacking or all");
-	if (!Number.isFinite(cfg.augmentationMultiplier) || cfg.augmentationMultiplier < 1) throw new Error("augmentation-price-multiplier must be at least 1");
+	if (!Number.isFinite(cfg.augmentationMultiplier) || cfg.augmentationMultiplier !== 0 && cfg.augmentationMultiplier < 1) throw new Error("augmentation-price-multiplier must be 0 (automatic) or at least 1");
 	if (!Number.isFinite(cfg.cloudPayback) || cfg.cloudPayback <= 0) throw new Error("cloud-payback must be positive");
+    if (cfg.cloudMinRam !== undefined && (!Number.isSafeInteger(cfg.cloudMinRam) || cfg.cloudMinRam < 2 || !Number.isInteger(Math.log2(cfg.cloudMinRam))))
+        throw new Error("cloud-min-ram must be a power of two, at least 2 GB");
 	if (!Number.isFinite(Number(flags["home-reserve"])) || Number(flags["home-reserve"]) < 0) throw new Error("home-reserve must be nonnegative");
 	if (!Number.isSafeInteger(cfg.minInstall) || cfg.minInstall < 1) throw new Error("min-install must be a positive integer");
 	if (!Number.isSafeInteger(cfg.darknetMaxAttempts) || cfg.darknetMaxAttempts < 25) throw new Error("darknet-max-attempts must be an integer of at least 25");
@@ -1434,23 +1464,74 @@ async function saveSupervisorBootstrap(ns) {
 }
 
 // Run the small upgrade helper remotely while home is occupied by the starter supervisor.
-async function tickStarterHomeUpgrade(ns, hosts, target) {
-    const file = "home-upgrade.js", cost = ns.getScriptRam(file, HOME);
-    if (!(cost > 0) || hosts.some(host => ns.ps(host).some(p => p.filename === file))) return;
-    const floor = readSavings(ns).floor;
-    if (!Number.isFinite(floor)) return;
-    const reset = ns.getResetInfo(), epoch = `${reset.currentNode}:${reset.lastNodeReset}:${reset.lastAugReset}`;
-    for (const host of hosts.filter(h => h !== HOME)) {
-        if (!ns.hasRootAccess(host) || ns.getServerMaxRam(host) < cost) continue;
-        const owned = starterWorkers(ns, host), ram = ns.getScriptRam(STARTER_WORKER, HOME);
-        const reclaimable = owned.reduce((sum, p) => sum + p.threads * ram, 0);
-        if (ns.getServerMaxRam(host) - ns.getServerUsedRam(host) + reclaimable < cost) continue;
-        if (!await ns.scp(file, host, HOME)) continue;
-        for (const p of owned) ns.kill(p.pid);
-        if (ns.getServerMaxRam(host) - ns.getServerUsedRam(host) < cost) continue;
-        ns.exec(file, host, 1, epoch, target, floor);
+export function starterAdmissionRam(ns, cfg = {}, helperRam = 0) {
+    return [SUPERVISOR, DAEMON, FLEET, ...(cfg.progression ? [PROGRESSION] : [])]
+        .reduce((sum, file) => sum + ns.getScriptRam(file, HOME), helperRam);
+}
+
+export function ongoingHomeTarget(ns,cfg,capabilities,services,jobs) {
+    const enabled=selectedServices(cfg,capabilities), blocked=services.some(s=>enabled.some(e=>e.name===s.name) && ["WAITING_RAM","WAITING_PRIORITY"].includes(s.state)) ||
+        jobs.some(j=>j.state === "WAITING_RAM" && !(j.type === "augmentation-plan" && readProgressionSnapshot(ns)));
+    if(!blocked) return ns.getServerMaxRam(HOME);
+    return ns.getScriptRam(SUPERVISOR,HOME) + enabled.reduce((n,s)=>n+ns.getScriptRam(s.name,HOME),0) +
+        Math.max(supervisorRamBudget(ns,cfg,capabilities).utilityRam, ns.getScriptRam("home-upgrade.js", HOME));
+}
+
+function progressionRamBlocked(services) {
+    return services.some(s => [FLEET, PROGRESSION, AUGMENTATION_MANAGER].includes(s.name) &&
+        ["WAITING_RAM", "WAITING_PRIORITY"].includes(s.state));
+}
+
+async function tickStarterProgression(ns,cfg,helperRam = 0) {
+    if(!cfg.progression || typeof ns.getPortHandle!=="function") return;
+    cfg.starterServices ||= createManagedServices(ns,cfg,[]).filter(s=>s.name===PROGRESSION || s.name===AUGMENTATION_MANAGER && singularityAvailable(ns.getResetInfo()));
+    const admitted = [];
+    for(const service of cfg.starterServices) {
+        const needed=ns.getScriptRam(service.name,HOME);
+        const owned=starterWorkers(ns,HOME), reclaim=owned.reduce((n,p)=>n+p.threads*ns.getScriptRam(STARTER_WORKER,HOME),0);
+        if (!findProcess(ns, service.name)) {
+            if (!(needed > 0) || needed + helperRam > ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) + reclaim) continue;
+            for(const process of owned) ns.kill(process.pid);
+        }
+        admitted.push(service);
+    }
+    tickServicePriority(ns,admitted,"",helperRam);
+    const progression=ns.getPortHandle(PORTS.PROGRESSION_STATUS).peek();
+    const augmentation=ns.getPortHandle(PORTS.AUGMENTATION_STATUS).peek();
+    await updateSupervisorSavings(ns,cfg,null,progression,augmentation);
+    cfg.starterActions ||= createActionState();
+    tickProgressionActions(ns,cfg.starterActions,progression,cfg);
+}
+
+export async function tickStarterHomeUpgrade(ns, hosts, target, state = {}) {
+    const file="home-upgrade.js", cost=ns.getScriptRam(file,HOME), now=Date.now();
+    if(!(cost>0)) { state.homeUpgradeStatus = "Missing home-upgrade.js or invalid RAM cost"; return; }
+    if(hosts.some(host=>ns.ps(host).some(p=>p.filename===file))) { state.homeUpgradeStatus = "Upgrade helper running"; return; }
+    const reset=ns.getResetInfo(), epoch=resetEpoch(reset), ram=ns.getServerMaxRam(HOME);
+    let quote;
+    try { quote=ns.getPortHandle(PORTS.HOME_UPGRADE_STATUS).peek(); } catch {}
+    const valid=quote?.type === "home-upgrade-quote" && quote.version===1 && quote.resetEpoch===epoch && quote.ram===ram &&
+        Number.isFinite(quote.cost) && quote.cost>0 && quote.generatedAt<=now && now-quote.generatedAt<300000;
+    const floor=readSavings(ns,"home:ram").floor;
+    if(!Number.isFinite(floor)) return;
+    if(valid) {
+        state.homeInvestment={amount:quote.cost,target:"home:ram",label:"Admit blocked services on home",priority:state.homeUpgradeCritical ? 90 : 75,reason:"Enabled service/helper RAM is blocked"};
+        if(ns.getServerMoneyAvailable(HOME)-quote.cost<floor) { state.homeUpgradeStatus = `Saving ${cash(quote.cost)} for RAM; protected floor ${cash(floor)}`; return; }
+    } else if(ram===state.nextHomeQuoteRam && now<(state.nextHomeQuoteAt||0)) return;
+    for(const host of [...hosts].sort((a,b)=>Number(b===HOME)-Number(a===HOME))) {
+        if(!ns.hasRootAccess(host) || ns.getServerMaxRam(host)<cost) continue;
+        const owned=starterWorkers(ns,host), workerRam=ns.getScriptRam(STARTER_WORKER,HOME);
+        const reclaimable=owned.reduce((n,p)=>n+p.threads*workerRam,0);
+        if(ns.getServerMaxRam(host)-ns.getServerUsedRam(host)+reclaimable<cost) continue;
+        if(host!==HOME && !await ns.scp([file,"lib/savings.js","lib/programs.js","lib/ports.js"],host,HOME)) continue;
+        for(const p of owned) ns.kill(p.pid);
+        if(ns.getServerMaxRam(host)-ns.getServerUsedRam(host)<cost) continue;
+        state.nextHomeQuoteAt=now+60000; state.nextHomeQuoteRam=ram;
+        const pid = ns.exec(file,host,1,epoch,target,floor,false);
+        state.homeUpgradeStatus = pid ? `Upgrade helper on ${host}` : "Upgrade helper launch failed; retry pending";
         return;
     }
+    state.homeUpgradeStatus = `Waiting for ${cost.toFixed(2)} GB helper space on home or a rooted host`;
 }
 
 function reserveRouteHelper(ns, services, admitted) {

@@ -145,7 +145,7 @@ async function serviceCurrentHost(ns, cfg, coordinator) {
 	const host = ns.getHostname();
 	if (host !== "home" && host !== "darkweb") {
 		for (const file of ns.ls(host, ".cache")) {
-			try { const reward = ns.dnet.openCache(file, true); await coordinator.request({ kind: "cache", host, file, reward: reward?.message || "opened" }); } catch {}
+			try { const reward = ns.dnet.openCache(file, true); await coordinator.request({ kind: "cache", host, file, reward: reward?.message || "opened", cacheResult: reward }); } catch {}
 		}
 		if (cfg.stasis && safe(() => ns.dnet.getDepth(host), -1) >= cfg.stasisDepth) launchAction(ns, cfg, ACTIONS.stasis);
 		launchPhishing(ns, cfg);

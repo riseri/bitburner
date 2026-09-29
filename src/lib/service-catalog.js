@@ -6,8 +6,8 @@ export const SERVICES = Object.freeze([
     { name: "daemon.js", core: true, type: "", port: 0 },
     { name: "fleet-manager.js", core: true, type: "fleet-status", port: PORTS.FLEET_STATUS },
     { name: "progression-manager.js", option: "progression", flag: "progression", defaultEnabled: true, type: "progression-status", port: PORTS.PROGRESSION_STATUS },
-    { name: "contract-manager.js", option: "contracts", flag: "contracts", defaultEnabled: true, type: "contract-status", port: PORTS.CONTRACT_STATUS },
     { name: "augmentation-manager.js", option: "augmentationActions", flag: "augmentation-actions", defaultEnabled: true, capability: "singularity", type: "augmentation-status", port: PORTS.AUGMENTATION_STATUS },
+    { name: "contract-manager.js", option: "contracts", flag: "contracts", defaultEnabled: true, type: "contract-status", port: PORTS.CONTRACT_STATUS },
     { name: "stock-trader.js", option: "stocks", flag: "stocks", defaultEnabled: true, capability: "stocks", type: "stock-status", port: PORTS.STOCK_STATUS },
     { name: "go-bot.js", option: "go", flag: "go", defaultEnabled: true, type: "go-status", port: PORTS.GO_STATUS, heartbeatRequired: false },
     { name: "darknet-manager.js", option: "darknet", flag: "darknet", defaultEnabled: true, capability: "darknet", type: "darknet-status", port: PORTS.DARKNET_STATUS },
@@ -47,6 +47,7 @@ export function supervisorFiles(cfg, capabilities = null) {
     const files = [...selectedServices(cfg, capabilities).map(service => service.name), "starter-worker.js",
         "jit-hack.js", "jit-grow.js", "jit-weaken.js", "lib/formulas.js"];
     if (cfg.shareEnabled) files.push("share-worker.js");
+    if (cfg.stocks && singularity) files.push("stock-access.js");
     if (cfg.diagnostics) files.push("doctor.js");
     if (singularity && cfg.augmentations) files.push("augmentation-planner.js");
     if (singularity && cfg.augmentationActions) files.push("bootstrap.js");
@@ -63,7 +64,7 @@ export function supervisorRamBudget(ns, cfg, capabilities) {
     const cost = file => Math.max(0, Number(ns.getScriptRam(file, "home")) || 0);
     const actorRam = capabilities.singularity && cfg.progression && cfg.progressionActions
         ? Math.max(cost("progression-purchase.js"), cost("progression-backdoor.js")) : 0;
-    const utilityRam = Math.max(actorRam, capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions ? Math.max(cost("node-complete.js"), cost("intelligence-handoff.js")) : 0, cfg.diagnostics ? cost("doctor.js") : 0,
+    const utilityRam = Math.max(actorRam, cfg.stocks && capabilities.singularity ? cost("stock-access.js") : 0, capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions ? Math.max(cost("node-complete.js"), cost("intelligence-handoff.js")) : 0, cfg.diagnostics ? cost("doctor.js") : 0,
         capabilities.singularity && cfg.augmentations ? cost("augmentation-planner.js") : 0);
     const optionalRam = (capabilities.singularity && cfg.augmentationActions ? cost("augmentation-manager.js") : 0) +
         (capabilities.darknet && cfg.darknet ? cost("darknet-manager.js") + cost("darknet-agent.js") : 0);

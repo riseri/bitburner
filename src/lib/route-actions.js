@@ -1,3 +1,5 @@
+import { augmentationValue } from "lib/augmentation-plan.js";
+import { progressionPrograms, programCreationEstimate } from "lib/programs.js";
 import { readIntelligenceSession } from "lib/intelligence-session.js";
 import { readSavings } from "lib/savings.js";
 import { nextRouteNode, routeCities } from "lib/bitnode-route.js";
@@ -6,6 +8,9 @@ import { matchingFactionWork } from "lib/augmentation-loop.js";
 
 export function routeOwnsWork(current, state) {
     if (!current) return false;
+    if (state.ownedCompany) return current.type === "COMPANY" && current.companyName === state.ownedCompany;
+    if (state.ownedCrime) return current.type === "CRIME" && current.crimeType === state.ownedCrime;
+    if (state.ownedProgram) return current.type === "CREATE_PROGRAM" && current.programName === state.ownedProgram;
     if (state.ownedClass) return current.type === "CLASS" && current.classType === state.ownedClass.classType && current.location === state.ownedClass.location;
     return Boolean(state.ownedWork && matchingFactionWork(current, state.ownedWork.faction, state.ownedWork.workType));
 }
@@ -15,7 +20,7 @@ export function releaseRouteWork(ns, state) {
     if (current && !routeOwnsWork(current, state)) return false;
     if (!current && ns.singularity.isBusy()) return false;
     if (current && !ns.singularity.stopAction()) return false;
-    state.ownedWork = null; state.ownedClass = null;
+    state.ownedWork = null; state.ownedClass = null; state.ownedProgram = null; state.ownedCompany = null; state.ownedCrime = null;
     return true;
 }
 
@@ -123,12 +128,90 @@ export function routeEndgame(ns, cfg, state) {
     return status(pid ? "ACTIVE" : "BLOCKED", "COMPLETE_NODE", pid ? "Completing this node and entering the next BN4 run" : "Node transition helper failed to launch");
 }
 
-export function routeDaedalus(ns, cfg, state, installed) {
+export function routeDaedalus(ns, cfg, state, installed, countRequired = 30) {
     const player = ns.getPlayer();
-    if (player.factions.includes("Daedalus") || new Set(installed).size < 30) return null;
+    if (player.factions.includes("Daedalus") || new Set(installed).size < countRequired) return null;
     if (player.skills.hacking < 2500) return trainHacking(ns, cfg, state, 2500);
     return status("WAITING", "DAEDALUS", "Preserving $100b for the Daedalus invitation", {
         savings: { amount: 100e9, label: "Daedalus invitation", target: "faction:Daedalus" } });
 }
 
 function status(state, phase, recommendation, extra = {}) { return { state, phase, recommendation, ...extra }; }
+
+export function routeProgramCreation(ns,cfg,state,context,plan) {
+    if(!cfg.work || !cfg.programCreation || context.owned.includes("The Red Pill") || plan.next?.repGap>0) return null;
+    const current=ns.singularity.getCurrentWork();
+    if(state.ownedProgram && current?.type === "CREATE_PROGRAM" && current.programName === state.ownedProgram)
+        return status("ACTIVE","PROGRAM_CREATE","Creating "+state.ownedProgram+"; owned work will yield to reputation or a milestone");
+    state.ownedProgram=null;
+    if(current || ns.singularity.isBusy()) return null; // Do not displace even owned useful work for an estimated saving.
+    const candidates=progressionPrograms({darknet:false}).filter(p=>!ns.fileExists(p.name,"home")).map(p=>({p,estimate:programCreationEstimate(p,context.player,context.income,context.money)}))
+        .filter(c=>c.estimate?.create).sort((a,b)=>a.estimate.creationMs-b.estimate.creationMs);
+    const candidate=candidates[0];
+    if(!candidate || candidate.estimate.creationMs>1800000 || plan.next?.etaMs!=null && plan.next.etaMs<candidate.estimate.creationMs) return null;
+    if(!ns.singularity.createProgram(candidate.p.name,cfg.focusWork)) return null;
+    state.ownedProgram=candidate.p.name;
+    return status("ACTIVE","PROGRAM_CREATE","Creating "+candidate.p.name+"; conservative ETA "+Math.ceil(candidate.estimate.creationMs/1000)+"s beats purchase ETA");
+}
+
+// Selective extensions only: existing company employment, or Slum Snakes when
+// combat requirements are already satisfied. Unknown requirement shapes fail closed.
+export function routeSelectiveFaction(ns,cfg,state,context,plan) {
+    if(!cfg.work || !cfg.joinFactions || context.owned.includes("The Red Pill") ||
+        typeof ns.singularity.getFactionInviteRequirements!=="function") return null;
+    const player=context.player, now=Date.now();
+    if(now<(state.factionRetryAt||0)) return null;
+    if(state.factionAttempt && now-state.factionAttempt.at>=1800000) {
+        releaseRouteWork(ns,state);state.factionAttempt=null;state.factionRetryAt=now+1800000;return null;
+    }
+    const companies=Object.keys(player.jobs||{}), candidates=[...companies,"Slum Snakes"].filter(f=>!player.factions.includes(f));
+    const baseline=plan.next ? augmentationValue(plan.next,context)/Math.sqrt(Math.max(1,plan.next.price)) : 0;
+    let selected=null;
+    if(!state.unlockCatalog || now-state.unlockCatalog.at>=60000) {
+        const items=[];
+        for(const faction of candidates) {
+            try { for(const name of ns.singularity.getAugmentationsFromFaction(faction)) {
+                if(context.owned.includes(name) || name === "NeuroFlux Governor" || cfg.target && name!==cfg.target) continue;
+                items.push({name,faction,stats:ns.singularity.getAugmentationStats(name),prerequisites:ns.singularity.getAugmentationPrereq(name)});
+            } } catch {}
+        }
+        state.unlockCatalog={at:now,items};
+    }
+    for(const item of state.unlockCatalog.items) {
+        if(!candidates.includes(item.faction) || context.owned.includes(item.name) || !item.prerequisites.every(p=>context.owned.includes(p))) continue;
+        const score=augmentationValue(item,context)/Math.sqrt(Math.max(1,ns.singularity.getAugmentationPrice(item.name)));
+        if(score>baseline*1.5 && (!selected || score>selected.score)) selected={...item,score};
+    }
+    if(!selected || plan.order?.length) return null;
+    const requirements=ns.singularity.getFactionInviteRequirements(selected.faction), pending=[];
+    for(const r of requirements) {
+        if(r.type === "skills") { if(Object.entries(r.skills).some(([k,v])=>!(player.skills[k]>=v))) return null; }
+        else if(r.type === "money") { if(context.money<r.money) return null; }
+        else if(r.type === "employedBy") { if(!player.jobs?.[r.company]) return null; }
+        else if(r.type === "companyReputation") { if(ns.singularity.getCompanyRep(r.company)<r.reputation) pending.push(r); }
+        else if(r.type === "karma") { if(ns.heart.break()>r.karma) pending.push(r); }
+        else return null;
+    }
+    if(!pending.length) return null; // Invitation poll in the existing loop will join.
+    if(!state.factionAttempt || state.factionAttempt.faction!==selected.faction) state.factionAttempt={faction:selected.faction,at:now};
+    const current=ns.singularity.getCurrentWork();
+    if(current && !routeOwnsWork(current,state) || !current && ns.singularity.isBusy()) return null;
+    const requirement=pending[0];
+    if(requirement.type === "companyReputation") {
+        if(state.ownedCompany===requirement.company && routeOwnsWork(current,state))
+            return status("ACTIVE","COMPANY","Working for "+requirement.company+" to unlock "+selected.name+"; invitation reputation "+requirement.reputation);
+        if(!releaseRouteWork(ns,state)) return null;
+        if(!ns.singularity.workForCompany(requirement.company,cfg.focusWork)) return null;
+        state.ownedCompany=requirement.company;
+        return status("ACTIVE","COMPANY","Company offerings improve the plan: "+selected.name+"; work bounded to 30 minutes");
+    }
+    if(requirement.type === "karma") {
+        if(state.ownedCrime && routeOwnsWork(current,state)) return status("ACTIVE","FACTION_KARMA","Completing owned crime for "+selected.name);
+        const choices=["Shoplift","Mug","Homicide"].map(name=>{const stats=ns.singularity.getCrimeStats(name);return {name,rate:Math.abs(stats.karma)*ns.singularity.getCrimeChance(name)/stats.time};}).sort((a,b)=>b.rate-a.rate);
+        if(!(choices[0]?.rate>0) || !releaseRouteWork(ns,state)) return null;
+        if(!(ns.singularity.commitCrime(choices[0].name,cfg.focusWork)>0)) return null;
+        state.ownedCrime=choices[0].name;
+        return status("ACTIVE","FACTION_KARMA","Reducing karma for Slum Snakes offering "+selected.name+"; combat requirements already met");
+    }
+    return null;
+}

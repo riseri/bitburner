@@ -462,7 +462,10 @@ export function planPipelineBatch(ns, pool) {
 			if (p.trial && p.allocationStreak >= 8) beginPipelineDrain(pool, p,
 				{ reason: "new target cannot fit shared RAM", kind: "drain", hard: false }, true);
 		}
-		p.nextLanding += plan.period;
+        // Change only future admission spacing. Existing reservations, HWGW timing,
+        // ownership, repairs and hot swaps retain their safety rules.
+        const xpAllocation = Math.min(.70, Math.max(0, pool.cfg.hackingPolicy?.xpAllocation || 0));
+        p.nextLanding += plan.period / (1 - xpAllocation);
 		return; // exactly one batch admission attempt per controller tick
 	}
 }

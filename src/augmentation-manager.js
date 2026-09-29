@@ -1,5 +1,7 @@
+import { augmentationContext, makeProgressionSnapshot } from "lib/augmentation-context.js";
+import { observeProgress } from "lib/progression-objective.js";
 import { bn4Route, routeCities, routeInstallation } from "lib/bitnode-route.js";
-import { routeOwnsWork, routeIntelligence, routeBackdoorYield, routeUnlock, routeEndgame, routeDaedalus, trainHacking } from "lib/route-actions.js";
+import { routeSelectiveFaction, routeProgramCreation, routeOwnsWork, routeIntelligence, routeBackdoorYield, routeUnlock, routeEndgame, routeDaedalus, trainHacking } from "lib/route-actions.js";
 import { buildAugmentationPlan } from "lib/augmentation-plan.js";
 import { chooseInvitation, chooseFactionWorkType, matchingFactionWork, queuedAugmentations,
     singularityRecommendation, spendableForAugmentation } from "lib/augmentation-loop.js";
@@ -15,8 +17,8 @@ const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP
 export async function main(ns) {
     const flags = ns.flags([
         ["port", PORTS.AUGMENTATION_STATUS], ["interval", 5_000], ["focus", "hacking"], ["target", ""],
-        ["cash-reserve", 0.10], ["join-factions", true], ["city-faction", ""], ["work", true],
-        ["route", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5],
+        ["price-multiplier", 0], ["cash-reserve", 0.10], ["join-factions", true], ["city-faction", ""], ["work", true],
+        ["route", true], ["program-creation", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5],
     ]);
     ns.disableLog("ALL");
     if (ns.getHostname() !== HOME) throw new Error("Run augmentation-manager.js on home");
@@ -30,7 +32,7 @@ export async function main(ns) {
         let status;
         try {
             const reset = ns.getResetInfo(), epoch = resetEpoch(reset);
-            if (state.resetEpoch !== epoch) state = { resetEpoch: epoch, ownedWork: null };
+            if (state.resetEpoch !== epoch) state = { resetEpoch: epoch, ownedWork: null, recoveryMs: state.recoveryMs, recoveryBaseline: state.recoveryBaseline?.nodeReset === reset.lastNodeReset ? state.recoveryBaseline : null };
             status = await tickAugmentationLoop(ns, cfg, state);
             await saveState(ns, state);
         } catch (error) {
@@ -42,6 +44,22 @@ export async function main(ns) {
 }
 
 export async function tickAugmentationLoop(ns, cfg, state) {
+    const reset = ns.getResetInfo();
+    if (!singularityAvailable(reset)) return tickAugmentationDecision(ns, cfg, state);
+    const context = augmentationContext(ns, state);
+    if(state.recoveryBaseline && context.income >= state.recoveryBaseline.income*.5 && context.income>0 && reset.lastAugReset>state.recoveryBaseline.at) {
+        state.recoveryMs=Date.now()-reset.lastAugReset; state.recoveryBaseline=null;
+    }
+    state.currentIncome=context.income;
+    const status = await tickAugmentationDecision(ns, cfg, state, context);
+    context.installed=ns.singularity.getOwnedAugmentations(false); context.owned=ns.singularity.getOwnedAugmentations(true);
+    context.money=ns.getServerMoneyAvailable(HOME); context.player=ns.getPlayer();
+    status.progression = makeProgressionSnapshot(ns, context, status);
+    state.previousPlan = status.plan ? { next: status.plan.next } : null;
+    return status;
+}
+
+async function tickAugmentationDecision(ns, cfg, state, context = null) {
     const reset = ns.getResetInfo();
     const route = cfg.route && bn4Route(reset);
     if (!singularityAvailable(reset)) return { state: "BLOCKED", phase: "UNLOCK", recommendation: singularityRecommendation(), queued: 0 };
@@ -76,13 +94,16 @@ export async function tickAugmentationLoop(ns, cfg, state) {
         const backdoor = routeBackdoorYield(ns, state);
         if (backdoor) return { ...backdoor, queued };
     }
-    const plan = buildAugmentationPlan(ns, { focus: cfg.focus, target: cfg.target, multiplier: 1, route });
+    const plan = buildAugmentationPlan(ns, { focus: cfg.focus, target: cfg.target, route, context, state, multiplier: cfg.priceMultiplier, cashReserve: cfg.cashReserve, donate: cfg.donate, focusWork: cfg.focusWork });
+    const progress = observeProgress(state, { key: plan.next?.name || "unlock", cash: context.money,
+        rep: plan.next ? plan.next.repRequired - plan.next.repGap : 0, owned: context.owned.length, level: context.player.skills?.hacking });
     if (route) {
         const reason = routeInstallation({ installed, pending, plan, money: ns.getServerMoneyAvailable(HOME),
-            minInstall: cfg.minInstall, lastAugReset: reset.lastAugReset });
+            minInstall: cfg.minInstall, lastAugReset: reset.lastAugReset, progress, recoveryMs: state.recoveryMs, countRequired: context.objective.countRequired });
+        plan.installDecision = reason || `Wait for ${plan.next?.name || "faction unlock"}; ETA ${plan.next?.etaMs == null ? "unknown" : Math.ceil(plan.next.etaMs / 1000) + "s"}; stalled ${Math.floor(progress.stalledMs / 1000)}s`;
         if (reason) return handleInstallation(ns, cfg, state, plan, queued, true);
-        if (cfg.joinFactions && new Set(installed).size >= 30 && player.skills.hacking >= 2500) {
-            const daedalus = routeDaedalus(ns, cfg, state, installed);
+        if (cfg.joinFactions && new Set(installed).size >= context.objective.countRequired && player.skills.hacking >= 2500) {
+            const daedalus = routeDaedalus(ns, cfg, state, installed, context.objective.countRequired);
             if (daedalus) return { ...daedalus, queued, plan };
         }
         if (cfg.joinFactions && !player.factions.includes("Daedalus")) {
@@ -90,13 +111,16 @@ export async function tickAugmentationLoop(ns, cfg, state) {
             if (unlock) return { ...unlock, queued, plan };
         }
     }
+    if (route) { const unlock = routeSelectiveFaction(ns, cfg, state, context, plan); if (unlock) return { ...unlock, plan, queued }; }
     if (plan.errors.length) return { state: "BLOCKED", phase: "PLAN", plan,
         recommendation: plan.errors.join("; "), queued: queuedCount(ns) };
+    const creation = routeProgramCreation(ns, cfg, state, context, plan);
+    if (creation) return { ...creation, plan, queued };
     const next = plan.next;
     if (next) return handleNextAugmentation(ns, cfg, state, plan, next);
 
     if (route) {
-        const daedalus = cfg.joinFactions ? routeDaedalus(ns, cfg, state, installed) : null;
+        const daedalus = cfg.joinFactions ? routeDaedalus(ns, cfg, state, installed, context.objective.countRequired) : null;
         return { ...(daedalus || trainHacking(ns, cfg, state, Math.max(2500, player.skills.hacking + 1))), plan, queued };
     }
     return handleInstallation(ns, cfg, state, plan, queued);
@@ -116,7 +140,7 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
     if (current && ownedCurrentWork(current, state)) {
         if (!ns.singularity.stopAction()) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
             recommendation: "Could not stop owned faction work; retrying before installation" };
-        state.ownedWork = null; state.ownedClass = null;
+        state.ownedWork = null; state.ownedClass = null; state.ownedProgram = null; state.ownedCompany = null; state.ownedCrime = null;
         current = ns.singularity.getCurrentWork();
         busy = ns.singularity.isBusy();
     }
@@ -125,6 +149,7 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
     if (current && !ownedCurrentWork(current, state)) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: `Finish or stop current ${current.type || "player"} activity before automatic installation` };
     state.ownedWork = null;
+    if(state.currentIncome>0) state.recoveryBaseline={nodeReset:ns.getResetInfo().lastNodeReset,at:Date.now(),income:state.currentIncome};
     await saveState(ns, state);
     const installed = ns.singularity.installAugmentations(BOOTSTRAP);
     if (installed === false) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
@@ -135,9 +160,14 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
 function handleNextAugmentation(ns, cfg, state, plan, next) {
     const queued = queuedCount(ns), current = ns.singularity.getCurrentWork(), busy = ns.singularity.isBusy();
 	if (next.repGap > 0) {
-        const donation = affordableDonation(ns, cfg, next);
+        next.repRequired=ns.singularity.getAugmentationRepReq(next.name);
+        next.repGap=Math.max(0,next.repRequired-ns.singularity.getFactionRep(next.faction));
+        next.price=ns.singularity.getAugmentationPrice(next.name);
+        const donation = Date.now() < (state.nextDonateAt || 0) ? 0 : affordableDonation(ns, cfg, next);
         if (donation > 0) {
             const donated = ns.singularity.donateToFaction(next.faction, donation);
+            if(donated) state.lastDonation = { faction: next.faction, at: Date.now() };
+            else state.nextDonateAt = Date.now() + 60000;
             return { state: donated ? "ACTIVE" : "BLOCKED", phase: "DONATE", plan, queued,
                 action: donated ? `Donated ${Math.ceil(donation)} to ${next.faction}` : "",
                 recommendation: donated ? `Refreshing reputation for ${next.name}` : `Donation to ${next.faction} failed; continuing with faction work` };
@@ -160,7 +190,7 @@ function handleNextAugmentation(ns, cfg, state, plan, next) {
         if (current && !ownedCurrentWork(current, state)) return { state: "BLOCKED", phase: "REPUTATION", plan, queued,
             recommendation: `Finish or stop current ${current.type || "player"} activity, then work for ${next.faction}` };
         const started = ns.singularity.workForFaction(next.faction, workType, cfg.focusWork);
-        if (started) { state.ownedClass = null; state.ownedWork = { faction: next.faction, workType }; }
+        if (started) { state.ownedProgram = null; state.ownedCompany = null; state.ownedCrime = null; state.ownedClass = null; state.ownedWork = { faction: next.faction, workType }; }
 		return { state: started ? "ACTIVE" : "BLOCKED", phase: "REPUTATION", plan, queued, ...formulaStatus,
 			action: started ? `Started ${workType} work for ${next.faction}` : "",
 			recommendation: started ? `Earn ${Math.ceil(next.repGap)} reputation for ${next.name}${eta}` : `Start ${workType} work for ${next.faction} manually` };
@@ -168,8 +198,13 @@ function handleNextAugmentation(ns, cfg, state, plan, next) {
 
     if (!cfg.purchase) return { state: "READY", phase: "PURCHASE", plan, queued,
         recommendation: `Buy ${next.name} from ${next.faction} for ${Math.ceil(next.price)}` };
+    const owned = ns.singularity.getOwnedAugmentations(true);
+    if (owned.includes(next.name) || !ns.singularity.getAugmentationPrereq(next.name).every(p => owned.includes(p)) ||
+        ns.singularity.getFactionRep(next.faction) < ns.singularity.getAugmentationRepReq(next.name))
+        return { state: "WAITING", phase: "PLAN", plan, queued, recommendation: "Ownership, prerequisites or reputation changed; replanning" };
+    next.price = ns.singularity.getAugmentationPrice(next.name);
     const cash = ns.getServerMoneyAvailable(HOME), savings = readSavings(ns, `augmentation:${next.name}`);
-    if (!spendableForAugmentation(cash, next.price, cfg.cashReserve, savings, next.name)) {
+    if (!spendableForAugmentation(cash, Math.max(next.price, next.chainCost || 0), cfg.cashReserve, savings, next.name)) {
         return { state: "WAITING", phase: "FUND", plan, queued,
             recommendation: `Save for ${next.name}: ${Math.ceil(cash)} / ${Math.ceil(next.price)} cash before reserve` };
     }
@@ -188,13 +223,14 @@ function queuedCount(ns) {
 }
 
 function affordableDonation(ns, cfg, next) {
-	if (!cfg.donate || typeof ns.getFavorToDonate !== "function") return 0;
+	if (!cfg.donate || next.donationPlanned === false || typeof ns.getFavorToDonate !== "function") return 0;
 	const favor = ns.singularity.getFactionFavor(next.faction);
-	if (favor < ns.getFavorToDonate()) return 0;
+	if (favor < ns.getFavorToDonate() || !ns.singularity.getFactionWorkTypes(next.faction).length) return 0;
 	const amount = formulaDonationForRep(ns, next.repGap, ns.getPlayer());
 	if (!(amount > 0) || !Number.isFinite(amount)) return 0;
     const cash = ns.getServerMoneyAvailable(HOME), savings = readSavings(ns);
-    const floor = Math.max(cash * cfg.cashReserve, Math.max(0, Number(savings.floor) || 0));
+    const matching = savings.owner === "supervisor" && savings.target === `augmentation:${next.name}`;
+    const floor = Math.max(cash * cfg.cashReserve, matching ? 0 : Math.max(0, Number(savings.floor) || 0));
     return cash - amount - next.price >= floor ? amount : 0;
 }
 
@@ -221,8 +257,8 @@ function formatDuration(ms) {
 
 function normalizeConfig(flags) {
     const cfg = {
-        port: Number(flags.port), interval: Math.max(1_000, Number(flags.interval) || 5_000),
-        route: bool(flags.route), focus: String(flags.focus), target: String(flags.target), cashReserve: fraction(flags["cash-reserve"]),
+        priceMultiplier: Number(flags["price-multiplier"] || 0), port: Number(flags.port), interval: Math.max(1_000, Number(flags.interval) || 5_000),
+        programCreation: bool(flags["program-creation"]), route: bool(flags.route), focus: String(flags.focus), target: String(flags.target), cashReserve: fraction(flags["cash-reserve"]),
         joinFactions: bool(flags["join-factions"]), cityFaction: String(flags["city-faction"]), work: bool(flags.work), donate: bool(flags.donate),
         purchase: bool(flags.purchase), focusWork: bool(flags["focus-work"]),
         minInstall: Number(flags["min-install"]),

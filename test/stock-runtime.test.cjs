@@ -301,3 +301,32 @@ test('stock trader reports net realized profit for closed short trades',async()=
   assert.equal(status.realized,status.lastTradePnl);
   assert.equal(status.realized,f.cash-startingCash);
 });
+
+test('liquidity sells only the required shares and does not reinvest them',async()=>{
+  const f=fixture({cash:1e6,stocks:{AAA:{forecast:.7,volatility:.04,ask:100,bid:99,maxShares:5e9,pos:[1e6,80,0,0]}}});
+  const goal={version:1,amount:20e6,label:'Pill',target:'augmentation:The Red Pill',owner:'supervisor',epoch:'1:undefined:undefined',updatedAt:Date.now(),producerPid:9,priority:100,liquidity:true};
+  f.ns.read=()=>JSON.stringify(goal);f.ns.ps=()=>[{pid:42,filename:'stock-trader.js'},{pid:9,filename:'supervisor.js'}];
+  f.ns.stock.getSaleGain=(symbol,shares,type)=>shares*f.stocks[symbol].bid-100000;
+  await api.main(f.ns);
+  assert.ok(f.cash>=20e6);assert.ok(f.stocks.AAA.pos[0]>0);assert.ok(f.calls.includes('sell:AAA'));
+  assert.ok(!f.calls.some(c=>c.startsWith('buy:')||c.startsWith('short:')));
+  assert.equal(f.status.peek().liquidity.target,goal.target);
+});
+
+test('unfundable, stale and unavailable-quote liquidity requests do not cause forced sales',async()=>{
+  for(const mode of ['unfundable','stale','unavailable']) {
+    const f=fixture({cash:1e6,stocks:{AAA:{forecast:.7,volatility:.04,ask:100,bid:99,maxShares:5e9,pos:[1e6,80,0,0]}}});
+    const goal={version:1,amount:mode==='unfundable'?1e12:20e6,label:'Pill',target:'augmentation:The Red Pill',owner:'supervisor',epoch:'1:undefined:undefined',updatedAt:Date.now()-(mode==='stale'?16000:0),producerPid:9,priority:100,liquidity:true};
+    f.ns.read=()=>JSON.stringify(goal);f.ns.ps=()=>[{pid:42,filename:'stock-trader.js'},{pid:9,filename:'supervisor.js'}];
+    if(mode!=='unavailable')f.ns.stock.getSaleGain=(symbol,shares)=>shares*f.stocks[symbol].bid-100000;
+    await api.main(f.ns);assert.ok(!f.calls.includes('sell:AAA'),mode);
+  }
+});
+
+test('partial realized trades retain proportional entry fees for the remaining position',()=>{
+  const session={entryFees:{'L:AAA':100},sells:0,realized:0,winningTrades:0,losingTrades:0};
+  api.recordRealized(session,'L','AAA',200,.25);
+  assert.equal(session.realized,175);assert.equal(session.entryFees['L:AAA'],75);
+  api.recordRealized(session,'L','AAA',400);
+  assert.equal(session.realized,500);assert.equal(session.entryFees['L:AAA'],undefined);
+});

@@ -48,7 +48,10 @@ hacking dashboard.
   port-opening programs. You can earn even when home cannot fit a worker beside
   the supervisor. In the planned BN4 runs, home RAM upgrades are automatic; elsewhere upgrade it
   manually. The supervisor clears its starter
-  pool and switches to the full hacking stack when enough home RAM is free.
+  pool when daemon, fleet, enabled progression and home-upgrade headroom fit,
+  then admits other enabled services in priority order.
+  Early progression services may run during bootstrap. Upgrade quotes are cached,
+  and home RAM can continue growing when enabled services/helpers are blocked.
 - **Full hacking stack:** a target may need preparation, followed by an initial
   warmup before the first Hack lands. A startup income gap is normal.
 - **Spare RAM:** JIT and preparation workers run only on rooted remote servers.
@@ -97,7 +100,9 @@ even when expensive upgrades remain. If an early faction offers fewer upgrades
 than the threshold, unlock another faction, install manually, or lower
 `--min-install`. In BN4, the route controller also installs completed smaller
 batches and batches that reach Daedalus's 30-augmentation requirement. It limits
-waiting on the next blocked purchase to 30 minutes since the last reset.
+waiting to 30 minutes of actual stalled progress, with a 60-minute absolute
+cap per selected objective. A valuable near-term purchase can delay the threshold
+by at most two minutes; measured recovery and favor unlocks can justify installing.
 
 Service toggles remain available, such as `--stocks false` or
 `--augmentation-actions false` (disables supervision of the augmentation service). The latter
@@ -155,8 +160,12 @@ a target. A **plan** hot swap does not reload changed JavaScript files.
 
 Hacking also adapts its objective when capabilities are available. Ordinary and
 fresh saves keep the existing money behavior. With healthy infrastructure,
-Formulas and usable XP under severe money penalties, the daemon can grind toward
-2500 hacking in a secondary pipeline using only RAM left over by money work.
+Formulas and usable XP under severe money penalties, the daemon can run a
+secondary XP pipeline. The augmentation manager supplies faction, Daedalus and
+live final-server hacking targets. When skill is the bottleneck and cash is
+covered, new money batches are spaced to leave more capacity for XP (40%, or
+70% after The Red Pill); existing work is preserved. Without a fresh objective,
+the conservative 2500-level capability policy remains the fallback.
 Money batches stay active, and XP releases its borrowed RAM when money needs it.
 XP uses a separate target and the best modeled hack/grow/weaken cycle. `HOSTILE`
 diagnoses poor hacking multipliers while retaining safe fallback work. See
@@ -270,7 +279,10 @@ The progression dashboard tracks installed augmentations, Daedalus eligibility,
 The Red Pill, and the final server. Before Singularity, record your installed
 augmentation count with `run progression-state.js --installed-count N` (replace
 `N` with your count; count NeuroFlux once). Update it after each reset. BN4 reads
-this information automatically through the augmentation planner.
+this information automatically through the augmentation manager. The standalone
+planner remains available for inspection and fallback. See
+[dynamic progression policy](docs/progression-planning.md) for decisions, tradeoffs,
+capability limits, and validation.
 
 The advisor reserves the $100b Daedalus invitation balance only once the
 augmentation and skill requirements are met. After joining, it switches to The

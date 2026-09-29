@@ -152,11 +152,11 @@ test('informational status channels never restart a live service for stale statu
 
 test('new dependent managers and daemon follow an adopted custom fleet port', () => {
     const api=loadScript('supervisor.js',new Clock());
-    const services=api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',8,'--cloud',false]}]},
+    const services=api.createManagedServices({ps:()=>[{filename:'fleet-manager.js',pid:9,args:['--port',7,'--cloud',false]}]},
         {contracts:true,progression:true},['--background-prep',false]);
     for(const name of ['daemon.js','contract-manager.js','progression-manager.js']) {
         const args=services.find(s=>s.name===name).args;
-        assert.equal(args[args.indexOf('--fleet-port')+1],8,name);
+        assert.equal(args[args.indexOf('--fleet-port')+1],7,name);
     }
 });
 
@@ -202,7 +202,7 @@ test('compact automation dashboard follows the service admission priority', () =
         actions:null,services:[],stockAccess:{ok:false,missing:[]},
     });
     const text=logs.join('\n');
-    const labels=['1 Money engine','2 Fleet','3 Progression','4 Contracts','5 Aug loop','6 Stocks',
+    const labels=['1 Money engine','2 Fleet','3 Progression','4 Aug loop','5 Contracts','6 Stocks',
         '7 IPvGO','8 Darknet','9 Diagnostics','10 Aug plan'];
     for(let index=1;index<labels.length;index++) assert.ok(text.indexOf(labels[index-1])<text.indexOf(labels[index]));
 });
@@ -217,7 +217,7 @@ test('supervisor manages exactly one Go bot on its informational status port', (
     assert.equal(go[0].port,12);
     assert.equal(go[0].heartbeatType,'go-status');
     assert.equal(go[0].heartbeatRequired,false);
-    assert.deepEqual(Array.from(go[0].args),['--port',12,'--takeover',true]);
+    assert.deepEqual(Array.from(go[0].args),['--port',12,'--takeover',true,'--opponent','auto']);
 	const manual=api.createManagedServices({ps:()=>[]},
 		{contracts:false,progression:false,stocks:false,go:true,goTakeover:false},[])
 		.find(s=>s.name==='go-bot.js');
@@ -291,7 +291,7 @@ test('missing market access blocks stock service without restart backoff', () =>
 test('an inconsistent existing daemon/fleet pair fails before starting dependents', () => {
     const api=loadScript('supervisor.js',new Clock());
     assert.throws(()=>api.createManagedServices({ps:()=>[
-        {filename:'fleet-manager.js',pid:9,args:['--port',8]},
+        {filename:'fleet-manager.js',pid:9,args:['--port',7]},
         {filename:'daemon.js',pid:10,args:[]},
     ]},{contracts:true,progression:true},[]),/different fleet ports/);
 });
@@ -417,4 +417,61 @@ test('priority admission holds RAM for important services and preempts exact low
 	supervisor.tickServicePriority(ns,services);
     assert.deepEqual(killed.map(pid=>launched.find(p=>p.pid===pid).filename),['low.js','medium.js']);
     assert.equal([...processes.values()].some(p=>p.filename==='high.js'),true);
+});
+
+test('persistent service admission leaves upgrade helper space and preserves the running daemon', () => {
+    const clock = new Clock(), api = loadScript('supervisor.js', clock), lifecycle = loadScript('lib/service-lifecycle.js', clock);
+    const processes = [{ filename: 'daemon.js', pid: 10, args: [], threads: 1 }], launched = [], killed = [];
+    const ns = { ps: () => processes, getServerMaxRam: () => 64, getServerUsedRam: () => 45,
+        getScriptRam: file => file === 'fleet-manager.js' ? 10.45 : 9, fileExists: () => true,
+        run: (filename) => { launched.push(filename); processes.push({filename, pid: 11, args: [], threads: 1}); return 11; },
+        kill: pid => { killed.push(pid); return false; } };
+    const services = ['daemon.js', 'fleet-manager.js'].map(name => lifecycle.createService(name));
+    assert.match(api.tickServicePriority(ns, services, '', 10), /upgrade reserve/);
+    assert.equal(services[1].state, 'WAITING_RAM'); assert.deepEqual(launched, []); assert.deepEqual(killed, []);
+    assert.equal(services[0].pid, 10);
+    api.tickServicePriority(ns, services, '', 7.25);
+    assert.deepEqual(launched, ['fleet-manager.js']);
+});
+
+test('blocked progression shows its state and the home upgrade blocker in Next up', () => {
+    const api = loadScript('supervisor.js', new Clock()), logs = [];
+    api.renderNextSteps({ print: value => logs.push(String(value)) }, { cfg: {homeUpgradeStatus:'Saving for home RAM'},
+        actions: {current:{state:'blocked',reason:'Waiting for a fresh plan from this reset'}} });
+    const text = logs.join('\n');
+    assert.match(text, /Blocked\s+Waiting for a fresh plan/);
+    assert.match(text, /Home upgrade\s+Saving for home RAM/);
+    assert.doesNotMatch(text, /In progress/);
+});
+
+test('augmentation loop starts before an oversized contract solver and can reclaim its RAM', () => {
+    for (const contractRunning of [false, true]) {
+        const clock = new Clock(), api = loadScript('supervisor.js', clock), catalog = loadScript('lib/service-catalog.js', clock);
+        const cfg = {progression:true,augmentationActions:true,contracts:true}, launched=[], killed=[];
+        const core = ['daemon.js','fleet-manager.js','progression-manager.js'];
+        const processes = core.map((filename,i)=>({filename,pid:i+1,args:[],threads:1}));
+        if (contractRunning) processes.push({filename:'contract-manager.js',pid:4,args:[],threads:1});
+        const costs = {'augmentation-manager.js':10,'contract-manager.js':24.15};
+        const ns = {ps:()=>processes,fileExists:()=>true,getPortHandle:()=>new Port(),getServerMaxRam:()=>64,
+            getScriptRam:file=>costs[file]||0,
+            getServerUsedRam:()=>(contractRunning?30:45)+processes.reduce((n,p)=>n+(costs[p.filename]||0),0),
+            run:(filename,threads,...args)=>{launched.push(filename);processes.push({filename,pid:10,args,threads});return 10;},
+            kill:pid=>{killed.push(pid);const index=processes.findIndex(p=>p.pid===pid);if(index<0)return false;processes.splice(index,1);return true;}};
+        const services=api.createManagedServices(ns,cfg,[]);
+        assert.deepEqual(Array.from(services,s=>s.name),Array.from(catalog.selectedServices(cfg),s=>s.name));
+        api.tickServicePriority(ns,services,'',8.05);
+        assert.deepEqual(launched,['augmentation-manager.js']);
+        assert.deepEqual(killed,contractRunning?[4]:[]);
+        assert.equal(services.find(s=>s.name==='contract-manager.js').state,'WAITING_RAM');
+        assert.equal(api.progressionRamBlocked(services),false,'contracts alone do not make RAM a critical goal');
+    }
+});
+
+test('RAM-blocked faction automation makes the home upgrade critical while locked automation does not', () => {
+    const api=loadScript('supervisor.js',new Clock());
+    for(const state of ['WAITING_RAM','WAITING_PRIORITY']) {
+        assert.equal(api.progressionRamBlocked([{name:'augmentation-manager.js',state}]),true);
+    }
+    assert.equal(api.progressionRamBlocked([{name:'augmentation-manager.js',state:'BLOCKED'}]),false);
+    assert.equal(api.progressionRamBlocked([{name:'contract-manager.js',state:'WAITING_RAM'}]),false);
 });

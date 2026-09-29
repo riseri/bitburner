@@ -3,7 +3,8 @@
 Finish BN5.1 through faction work and augmentations. The supervisor now protects
 cash for TOR and missing programs even without Singularity; buy them manually.
 Fleet purchases and new stock entries respect this floor. Existing stock positions
-are not forcibly liquidated. Manual goals from `savings.js` take priority.
+are liquidated only for an authenticated, urgent cash-only milestone when net
+portfolio value can cover it; ordinary program savings do not force sales. Manual goals from `savings.js` take priority.
 
 ## Milestone inputs in BN5
 
@@ -28,7 +29,8 @@ run progression-state.js --daedalus-rep 1000000 --red-pill-rep 2500000 --red-pil
 
 These numbers are examples, not assumed BN5 prices or reputation requirements.
 Update the quote after other purchases and the reputation as you work. The advisor
-protects the supplied price after program purchases are complete. For another
+compares the supplied milestone price against other investments; urgent Red Pill
+and Daedalus requirements take priority over ordinary programs. For another
 specific augmentation, use an ordinary manual goal:
 
 ```text
@@ -54,7 +56,11 @@ manager when progression actions are enabled. It is scoped to BN4.1, BN4.2 and
 BN4.3; it is not a strategy for every BitNode or every optional subsystem.
 
 - The starter pool earns money while a small helper upgrades home RAM until the
-  controller, hacking stack and required helpers fit. The helper runs on free
+  daemon, fleet, enabled progression and upgrade-helper headroom fit, then admits
+  other enabled services as RAM permits. A fresh 32 GB home stays in starter mode
+  when that core set needs the next RAM tier. Further home
+  upgrades fund blocked services/helpers after bootstrap. Quotes are cached so
+  unaffordable upgrades do not repeatedly interrupt starter workers. The helper runs on free
   rooted remote RAM and only reclaims workers owned by the starter pool. Manual
   savings goals remain protected. Your SF1 normally gives 32 GB on a new node;
   the bootstrap also supports the 8 GB fallback.
@@ -72,7 +78,9 @@ BN4.3; it is not a strategy for every BitNode or every optional subsystem.
   checks permit, and purchases automatically. Ordinary batches install at five,
   or sooner when the reachable batch is exhausted or installation reaches 30
   distinct augmentations. A nonempty batch also installs after at least 30
-  minutes since the last reset if its next item is still reputation/cash blocked.
+  minutes of no measurable progress toward the selected objective, with a
+  60-minute wait cap even when progress is slow. A valuable purchase with a known
+  ETA under two minutes can briefly defer the threshold.
   This is a bounded waiting policy, not a globally optimal reset calculation.
 - When faction reputation is not the immediate task, free Computer Science adds
   hacking experience while income workers continue. The controller tracks that
@@ -82,10 +90,12 @@ BN4.3; it is not a strategy for every BitNode or every optional subsystem.
   buys and immediately installs it, then trains toward the final server's live
   hacking requirement. The fleet roots the final server.
 
-The augmentation planner publishes installed counts, ownership and Daedalus
-quotes automatically; no `progression-state.js` inputs are needed in BN4. Fresh
-controller goals and quotes feed the shared savings policy. Program purchases
-retain priority, and manual goals are never silently replaced.
+The augmentation manager publishes one versioned progression snapshot containing
+installed/queued ownership, live requirements, its selected basket, capabilities,
+and savings request. Consumers reject stale, wrong-producer and wrong-reset data.
+The standalone planner is an inspection/fallback tool. Capital priorities follow
+the milestone, and manual goals are never silently replaced.
+See [dynamic planning details](progression-planning.md).
 
 The node transition helper checks ownership, the current reset, installed Red
 Pill, root access, hacking, player activity and restart files immediately before

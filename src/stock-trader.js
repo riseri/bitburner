@@ -1,3 +1,4 @@
+import { readLiquidityRequest, liquidationShares } from "lib/stock-liquidity.js";
 import { readSavings } from "lib/savings.js";
 import {
 	normalizeStockConfig,
@@ -178,6 +179,36 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 		}
 	}
 
+    const request=readLiquidityRequest(ns);
+    if(request) {
+        session.liquidityHoldUntil=Date.now()+30000;
+        session.liquidityTarget=request.target;
+        const liquidationRows=readMarket(ns,symbols);
+        const canFund=typeof ns.stock.getSaleGain === "function" && ns.getServerMoneyAvailable(HOME)+liquidationRows.reduce((n,row)=>n+
+            (row.longShares>0?Math.max(0,ns.stock.getSaleGain(row.symbol,row.longShares,"Long")):0)+
+            (session.canShort && row.shortShares>0?Math.max(0,ns.stock.getSaleGain(row.symbol,row.shortShares,"Short")):0),0)>=request.amount;
+        if(!canFund) session.liquidityNote="Awaiting enough net portfolio value to cover the milestone; avoiding premature liquidation";
+        for(const row of (canFund?liquidationRows:[]).sort((a,b)=>Math.abs(a.forecast-.5)-Math.abs(b.forecast-.5))) {
+            for(const direction of [LONG,SHORT]) {
+                if(direction===SHORT && !session.canShort) continue;
+                const live=readLiquidityRequest(ns);
+                if(!live || live.target!==request.target) break;
+                const needed=live.amount-ns.getServerMoneyAvailable(HOME);
+                if(needed<=0) break;
+                if(typeof ns.stock.getSaleGain!=="function") { session.liquidityNote="Sale-gain telemetry unavailable; automatic liquidation deferred"; break; }
+                const position=ns.stock.getPosition(row.symbol), available=direction===LONG?position[0]:position[2];
+                const shares=liquidationShares(available,needed,n=>ns.stock.getSaleGain(row.symbol,n,direction===LONG?"Long":"Short"));
+                if(!shares) continue;
+                if(cfg.dryRun) {actions.push("WOULD RELEASE liquidity for "+request.target); continue;}
+                const sold=direction===LONG?ns.stock.sellStock(row.symbol,shares):ns.stock.sellShort(row.symbol,shares);
+                if(sold>0) {
+                    session.fees+=commission;
+                    recordRealized(session,direction,row.symbol,shares*(direction===LONG?sold-position[1]:position[3]-sold)-commission, shares/available);
+                    actions.push("Released liquidity for "+request.target+" (commission included)");
+                }
+            }
+        }
+    }
 	if (!cfg.dryRun) rows = readMarket(ns, symbols);
 	let metrics = portfolioMetrics(ns.getServerMoneyAvailable(HOME), rows, commission);
 	let cash = metrics.cash;
@@ -191,6 +222,7 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 	let buysThisTick = 0;
 
 	for (const row of candidates) {
+        if(request || Date.now()<(session.liquidityHoldUntil||0)) break;
 		if (buysThisTick >= cfg.maxBuysPerTick) break;
 		const direction = row.direction;
 		const currentValue = positionValue(row, direction, commission);
@@ -219,6 +251,7 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 			continue;
 		}
 
+        if(ns.getServerMoneyAvailable(HOME)-cost<Math.max(cfg.cashFloor,equity*cfg.cashReserve,readSavings(ns).floor)) continue;
 		const boughtAt = direction === SHORT
 			? ns.stock.buyShort(row.symbol, shares)
 			: ns.stock.buyStock(row.symbol, shares);
@@ -245,16 +278,18 @@ async function tradeTick(ns, symbols, cfg, session, commission) {
 	return { rows, metrics };
 }
 
-function recordRealized(session, direction, symbol, grossAfterExitFee) {
+function recordRealized(session, direction, symbol, grossAfterExitFee, fractionClosed = 1) {
 	const key = feeKey(direction, symbol);
-	const entryFees = Number(session.entryFees[key]) || 0;
+	const totalEntryFees = Number(session.entryFees[key]) || 0;
+    const entryFees = totalEntryFees * Math.max(0, Math.min(1, fractionClosed));
 	const realized = grossAfterExitFee - entryFees;
 	session.sells++;
 	session.realized += realized;
 	session.lastTradePnl = realized;
 	if (realized >= 0) session.winningTrades++;
 	else session.losingTrades++;
-	delete session.entryFees[key];
+	if(fractionClosed >= 1) delete session.entryFees[key];
+    else session.entryFees[key] = totalEntryFees - entryFees;
 	return realized;
 }
 
@@ -376,6 +411,7 @@ function publishStatus(port, ns, market, cfg, session, commission, state, missin
 		equity: metrics.equity,
 		exposure: metrics.exposure,
 		reserveFloor,
+        liquidity: {target:session.liquidityTarget || "",holdUntil:session.liquidityHoldUntil || 0,note:session.liquidityNote || ""},
 		openPnl: metrics.openPnl,
 		realized: session.realized,
 		lastTradePnl: session.lastTradePnl,

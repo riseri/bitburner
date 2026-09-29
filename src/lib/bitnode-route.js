@@ -20,14 +20,19 @@ export function routeCities(factions, selected = "") {
     return factions.some(f => east.includes(f)) ? east : ["Sector-12", "Aevum"];
 }
 
-export function routeInstallation({ installed, pending, plan, money, minInstall, lastAugReset, now = Date.now() }) {
+export function routeInstallation({ installed, pending, plan, money, minInstall, lastAugReset, progress = null, recoveryMs = null, countRequired = 30, now = Date.now() }) {
     if (!pending.length) return "";
     if (pending.includes("The Red Pill")) return "The Red Pill is queued";
-    if (new Set(installed).size < 30 && new Set([...installed, ...pending]).size >= 30) return "Install to meet Daedalus's augmentation requirement";
-    if (pending.length >= minInstall) return "Batch threshold reached";
+    if (new Set(installed).size < countRequired && new Set([...installed, ...pending]).size >= countRequired) return "Install to meet Daedalus's augmentation requirement";
+    if(plan.next?.favorUnlockEtaMs>0 && plan.next?.etaMs>plan.next.favorUnlockEtaMs*1.5)
+        return "Install to unlock donations; measured recovery plus donation funding beats current work ETA";
+    const eta = plan.next?.etaMs;
+    const shortWait = Number.isFinite(eta) && eta >= 0 && eta <= Math.min(120000, recoveryMs || 120000) &&
+        (plan.next?.benefitAfterInstall > 0 || plan.next?.stats?.faction_rep > 1);
+    if (pending.length >= minInstall && (!shortWait || (progress?.waitingMs ?? 0) >= 120000)) return "Batch threshold reached";
     if (!plan.next && !plan.errors.length) return "Available augmentation batch is complete";
     // Bound waiting on an unaffordable or reputation-locked next item. No empty resets.
-    if (now - lastAugReset >= 30 * 60_000 && plan.next &&
-        (plan.next.repGap > 0 || plan.next.price > money * .9)) return "Install the current batch after 30 minutes instead of stalling";
+    if ((progress ? progress.stalledMs >= 30 * 60_000 || progress.waitingMs >= 60 * 60_000 : now - lastAugReset >= 30 * 60_000) && plan.next &&
+        (plan.next.repGap > 0 || plan.next.price > money * .9)) return "Install the current batch after 30 minutes stalled (or 60 minutes bounded waiting)";
     return "";
 }

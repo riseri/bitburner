@@ -298,7 +298,7 @@ export function xpPipelineStatus(ns, pool) {
 		xp: { target: state.choice?.name || "", action: state.wave?.action || state.choice?.action || "",
 			state: state.status, reason: state.reason, ram: [...state.jobs.values()].reduce((n, j) => n + j.ram, 0),
 			workers: state.jobs.size, estimatedXpPerSecond: state.choice?.score || null,
-			observedTotalXpPerSecond: rate, samples: state.samples.length, allocation: "spare" } };
+			observedTotalXpPerSecond: rate, samples: state.samples.length, allocation: pool.cfg.hackingPolicy?.xpAllocation ? "progression admission spacing" : "spare" } };
 }
 
 function publishFallbackStatus(ns, ctx, choice, running) {

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { Clock, loadScript } = require('./helpers.cjs');
+const { Clock, Port, loadScript } = require('./helpers.cjs');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -170,11 +170,40 @@ test('BN4 starter buys its own home RAM remotely and graduates without user upgr
         f.processes.delete(helper.pid);
     };
     await supervisor.runStarterMode(f.ns, { augmentationActions: true, progression: true, progressionActions: true });
-    assert.equal(f.hosts.home.ram, 256);
-    assert.equal(cycles, 5);
-    assert.ok(f.launches.filter(p => p.filename === 'home-upgrade.js').every(p => p.host !== 'home'));
+    assert.equal(f.hosts.home.ram, 64);
+    assert.equal(cycles, 3);
+    assert.notEqual(f.launches.find(p => p.filename === 'home-upgrade.js').host, 'home', 'initial 8 GB upgrade uses remote RAM');
     assert.equal(f.hosts.foodnstuff.foreign, 3);
     assert.equal(f.processes.size, 0);
+});
+
+test('fresh 32 GB BN4 keeps starter income until fleet, progression and upgrade headroom fit', async () => {
+    const f = fixture(), supervisor = loadScript('supervisor.js', f.clock), upgrade = loadScript('home-upgrade.js', f.clock);
+    Object.assign(f.costs, { 'supervisor.js': 12.75, 'daemon.js': 15.75, 'fleet-manager.js': 10.45,
+        'progression-manager.js': 6, 'augmentation-manager.js': 110, 'home-upgrade.js': 7.25 });
+    f.hosts.home.ram = 32; f.hosts.home.foreign = 12.75;
+    f.files.add('progression-manager.js');
+    const ports = new Map(), reset = { currentNode: 4, lastNodeReset: 1, lastAugReset: 2 };
+    f.ns.getPortHandle = n => { if (!ports.has(n)) ports.set(n, new Port()); return ports.get(n); };
+    f.ns.getResetInfo = () => reset; f.ns.read = () => ''; f.ns.getServerMoneyAvailable = () => 1e12;
+    f.ns.singularity = { getUpgradeHomeRamCost: () => 1e6, upgradeHomeRam: () => { f.hosts.home.ram *= 2; return true; } };
+    let cycles = 0;
+    f.ns.sleep = async () => {
+        assert.equal(++cycles, 1, 'must upgrade from 32 GB before handing off');
+        assert.ok(f.launches.some(p => p.filename === 'starter-worker.js' && p.host !== 'home'), 'remote income continues');
+        assert.ok(f.launches.some(p => p.filename === 'progression-manager.js'), 'progression starts when it fits');
+        assert.ok(!f.launches.some(p => p.filename === 'daemon.js'), 'no premature daemon-only handoff');
+        const helper = [...f.processes.values()].find(p => p.filename === 'home-upgrade.js');
+        assert.ok(helper, 'upgrade must have somewhere to run');
+        await upgrade.main({ ...f.ns, args: helper.args, getHostname: () => helper.host });
+        f.processes.delete(helper.pid); f.clock.now += 5000;
+    };
+    const cfg = { augmentationActions: true, progression: true, progressionActions: true, savingsMode: 'keep' };
+    await supervisor.runStarterMode(f.ns, cfg);
+    assert.equal(f.hosts.home.ram, 64); assert.equal(cycles, 1);
+    const free = 64 - f.ns.getServerUsedRam('home');
+    assert.ok(free >= f.costs['daemon.js'] + f.costs['fleet-manager.js'] + f.costs['home-upgrade.js']);
+    assert.equal(f.hosts.foodnstuff.foreign, 3, 'unrelated RAM untouched');
 });
 
 test('home upgrade helper rechecks its reset, cost, goal floor, and RAM target', async () => {

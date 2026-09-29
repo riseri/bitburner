@@ -1,3 +1,4 @@
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { chooseGoMove } from "lib/go-strategy.js";
 import { PORTS } from "lib/ports.js";
 import { dashboardTitle, dashboardSection, dashboardRow } from "lib/dashboard.js";
@@ -155,6 +156,7 @@ async function alignDaedalusRng(ns, snapshot, cfg) {
 }
 
 async function startGame(ns, cfg, previous) {
+    if(cfg.autoOpponent) cfg.opponent = progressionGoOpponent(readProgressionSnapshot(ns));
 	assertSameGo(ns, previous);
 	if (previous.game.currentPlayer !== "None" &&
 		(previous.history.length || previous.game.currentPlayer !== "Black" || previous.game.previousMove !== null ||
@@ -267,3 +269,9 @@ function publishGoStopped(port, ns, snapshot, session, error) {
 }
 
 
+
+export function progressionGoOpponent(objective) {
+    if(objective?.limitingResource === "hacking") return "Illuminati";
+    if(objective?.limitingResource === "cash" && objective.milestone !== "RED_PILL") return "The Black Hand";
+    return "Daedalus";
+}

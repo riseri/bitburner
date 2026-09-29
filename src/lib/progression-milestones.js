@@ -1,3 +1,4 @@
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { resetEpoch } from "lib/progression-protocol.js";
 
 export const PROGRESSION_INPUT = "data/progression-input.json";
@@ -11,6 +12,8 @@ export function readProgressionInput(ns) {
 }
 
 export function readProgressionObservation(ns, now = Date.now()) {
+    const shared = readProgressionSnapshot(ns, now);
+    if (shared) return { ...shared, redPillPrice: shared.selectedPlan?.next?.price, redPillRepRequired: shared.selectedPlan?.next?.repRequired, daedalusRep: shared.selectedPlan?.next ? shared.selectedPlan.next.repRequired - shared.selectedPlan.next.repGap : null };
     try {
         const report = JSON.parse(ns.read("data/augmentation-plan.json") || "null");
         if (report?.type === "augmentation-plan" && report.version === 1 &&

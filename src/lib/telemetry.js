@@ -1,3 +1,4 @@
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { PORTS } from "lib/ports.js";
 
 const TELEMETRY_FILE = "data/telemetry.json";
@@ -18,14 +19,16 @@ export function loadTelemetry(ns) {
 
 export function telemetrySnapshot(ns, fleetPort = PORTS.FLEET_STATUS, now = Date.now()) {
     const read = (port, type) => {
-        const value = ns.getPortHandle(port).peek();
+        const value = ns.getPortHandle(port)?.peek();
         return value?.type === type && Number.isFinite(value.generatedAt) && now >= value.generatedAt &&
             now - value.generatedAt <= 15000 && ns.isRunning(value.producerPid || value.pid) ? value : null;
     };
     const jit = read(PORTS.JIT_STATUS, "jit-status"), fleet = read(fleetPort, "fleet-status"), stock = read(PORTS.STOCK_STATUS, "stock-status");
-    const reset = ns.getResetInfo();
+    const reset = ns.getResetInfo(), objective = readProgressionSnapshot(ns), darknet = read(PORTS.DARKNET_STATUS,"darknet-status");
     return { at: now, epoch: `${reset.currentNode}:${reset.lastNodeReset}:${reset.lastAugReset}`,
         cash: ns.getServerMoneyAvailable("home"),
+        progression: objective ? { milestone:objective.milestone,limitingResource:objective.limitingResource,installedCount:objective.installedCount,queuedDistinct:objective.queuedDistinct.length,next:objective.selectedPlan?.next?.name,installDecision:objective.installDecision } : null,
+        darknet: darknet?.resetEpoch === [reset.currentNode,reset.lastNodeReset,reset.lastAugReset].join(":") ? darknet.value : null,
         jit: jit ? { pid: jit.pid, income: jit.income60, earned: jit.earned, usedRam: jit.usedRam, totalRam: jit.totalRam,
             lag: jit.loopLag, note: jit.note,
             targets: (jit.pipelines || []).map(p => ({ name: p.target, mode: p.mode, income: p.income60,

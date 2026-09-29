@@ -1,3 +1,4 @@
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { formulaGroup } from "lib/formulas.js";
 import { readSavings } from "lib/savings.js";
 import { progressionPrograms } from "lib/programs.js";
@@ -38,12 +39,22 @@ export function detectHackingCapabilities(ns) {
 		bitNodeMultipliers: Boolean(multipliers), multipliers };
 }
 
-export function evaluateHackingPolicy({ capabilities, level, bootstrap = [], options = HACKING_POLICY }) {
+export function evaluateHackingPolicy({ capabilities, level, bootstrap = [], objective = null, options = HACKING_POLICY }) {
 	const m = capabilities.multipliers;
 	const result = { mode: "NORMAL", operationalMode: "NORMAL", moneyViability: "UNKNOWN",
 		xpViability: "UNKNOWN", overallViability: "UNKNOWN", reason: "BitNode multipliers unavailable",
 		capabilities: { formulas: capabilities.formulas, bitNodeMultipliers: capabilities.bitNodeMultipliers },
 		currentNode: capabilities.currentNode, multipliers: m, level, targetLevel: options.xpTargetLevel, bootstrap };
+    result.targetLevel = Number.isFinite(objective?.requiredHacking) && objective.requiredHacking > 0 ? objective.requiredHacking : options.xpTargetLevel;
+    result.objective = objective?.milestone || "capability fallback";
+    result.xpAllocation = 0;
+    if (capabilities.formulas && objective?.limitingResource === "hacking" && objective.moneyCovered &&
+        level < result.targetLevel && !bootstrap.length && (!m || m.HackExpGain > 0)) {
+        result.mode = "XP"; result.operationalMode = "MONEY+XP";
+        result.xpAllocation = objective.redPill === "installed" ? .70 : .40;
+        result.reason = objective.milestone + ": hacking " + level + "/" + result.targetLevel + "; cash covered; reduce new money batches to leave XP capacity";
+        return result;
+    }
 	if (!m) return result;
 	// These categories describe explicit bottlenecks, not a synthetic throughput score.
 	const slow = m.HackingSpeedMultiplier <= options.severeSpeed;
@@ -61,29 +72,30 @@ export function evaluateHackingPolicy({ capabilities, level, bootstrap = [], opt
 		result.reason = `${evidence}; both hacking objectives impaired; NORMAL fallback`;
 	} else if (!capabilities.formulas) result.reason = `Formulas.exe unavailable; ${evidence}`;
 	else if (bootstrap.length) result.reason = `Bootstrap: ${bootstrap.join("; ")}`;
-	else if (weakMoney && !weakXp && level < options.xpTargetLevel) {
+	else if (weakMoney && !weakXp && level < result.targetLevel) {
 		result.mode = "XP"; result.operationalMode = "MONEY+XP";
-		result.reason = `${evidence}; spare-RAM XP below level ${options.xpTargetLevel}; money stays primary`;
+		result.reason = `${evidence}; spare-RAM XP below level ${result.targetLevel}; money stays primary`;
 	} else if (friendlyMoney) {
 		result.mode = result.operationalMode = "MONEY";
 		result.reason = `Favorable hacking economy; ${evidence}`;
-	} else result.reason = `${level >= options.xpTargetLevel ? "XP target reached" : "Preserving money batches"}; ${evidence}`;
+	} else result.reason = `${level >= result.targetLevel ? "XP target reached" : "Preserving money batches"}; ${evidence}`;
 	return result;
 }
 
-function bootstrapReasons(ns, network, cfg, options) {
+function bootstrapReasons(ns, network, cfg, options, objective = null) {
 	const reasons = [];
 	if (ns.getServerMaxRam("home") < options.minHomeRam) reasons.push(`home RAM below ${options.minHomeRam} GB`);
 	const remoteRam = network.hosts.filter(h => h.name !== "home").reduce((sum, h) => sum + h.maxRam, 0);
-	if (remoteRam < options.minWorkerRam) reasons.push(`worker RAM below ${options.minWorkerRam} GB`);
-	const missing = progressionPrograms({ darknet: false }).filter(p => !ns.fileExists(p.name, "home"));
-	if (missing.length) reasons.push(`programs missing: ${missing.map(p => p.name).join(", ")}`);
+	const requiredWorkerRam = objective ? 64 : options.minWorkerRam;
+	if (remoteRam < requiredWorkerRam) reasons.push(`worker RAM below ${requiredWorkerRam} GB`);
+	const missing = progressionPrograms({ darknet: false, formulas: false }).filter(p => !ns.fileExists(p.name, "home"));
+	if (missing.length && !objective) reasons.push(`programs missing: ${missing.map(p => p.name).join(", ")}`);
 	let stockFloor = 0;
 	const stocks = ns.getPortHandle(PORTS.STOCK_STATUS).peek();
 	if (stocks?.type === "stock-status" && stocks.access?.ok && !stocks.dryRun &&
 		Date.now() >= stocks.generatedAt && Date.now() - stocks.generatedAt < 30_000 &&
 		ns.isRunning(stocks.producerPid)) stockFloor = Math.max(0, Number(stocks.reserveFloor) || 0);
-	const floor = Math.max(options.minCash, readSavings(ns).floor, cfg.cloudState?.reserveFloor || 0, stockFloor);
+	const floor = Math.max(objective ? 0 : options.minCash, readSavings(ns).floor, cfg.cloudState?.reserveFloor || 0, stockFloor);
 	const required = floor * (cfg.hackingPolicy?.mode === "XP" ? 1 : options.cashEntryBuffer);
 	if (ns.getServerMoneyAvailable("home") < required) reasons.push(`cash below reserve/buffer ${required}`);
 	return reasons;
@@ -94,13 +106,15 @@ export function refreshHackingPolicy(ns, cfg, network, force = false) {
 	const now = Date.now(), options = cfg.policyOptions || HACKING_POLICY;
 	if (!force && now < (cfg.nextPolicyCheck || 0)) return cfg.hackingPolicy;
 	cfg.nextPolicyCheck = now + options.checkMs;
-	const level = ns.getHackingLevel();
-	const targetReached = cfg.hackingPolicy?.mode === "XP" && level >= options.xpTargetLevel;
+	const level = ns.getHackingLevel(), objective = readProgressionSnapshot(ns);
+    const signature = JSON.stringify([objective?.milestone, objective?.limitingResource, objective?.requiredHacking, objective?.moneyCovered]);
+    if (cfg.objectiveSignature !== signature) { force = true; cfg.objectiveSignature = signature; }
+	const targetReached = cfg.hackingPolicy?.mode === "XP" && level >= (cfg.hackingPolicy?.targetLevel ?? options.xpTargetLevel);
 	if (!force && !targetReached && now < (cfg.nextPolicyScore || 0)) return cfg.hackingPolicy;
 	cfg.nextPolicyScore = now + options.rescoreMs;
 	const capabilities = detectHackingCapabilities(ns);
-	const bootstrap = capabilities.formulas && capabilities.bitNodeMultipliers ? bootstrapReasons(ns, network, cfg, options) : [];
-	cfg.hackingPolicy = { ...evaluateHackingPolicy({ capabilities, level, bootstrap, options }), generatedAt: now };
+	const bootstrap = capabilities.formulas && (capabilities.bitNodeMultipliers || objective) ? bootstrapReasons(ns, network, cfg, options, objective) : [];
+	cfg.hackingPolicy = { ...evaluateHackingPolicy({ capabilities, level, bootstrap, objective, options }), generatedAt: now };
 	return cfg.hackingPolicy;
 }
 
@@ -133,7 +147,7 @@ export function renderHackingPolicy(ns, policy, details = false) {
 	if (policy.transition) dashboardRow(ns, "Policy transition", policy.transition);
 	if (policy.xp) {
 		const xp = policy.xp;
-		dashboardRow(ns, "XP pipeline", `${xp.target || "waiting"} | ${xp.action || "-"} | ${xp.state} | spare RAM only`);
+		dashboardRow(ns, "XP pipeline", `${xp.target || "waiting"} | ${xp.action || "-"} | ${xp.state} | unreserved RAM`);
 		if (xp.reason) dashboardRow(ns, "XP note", xp.reason);
 		if (xp.estimatedXpPerSecond > 0) dashboardRow(ns, "XP model", `${xp.estimatedXpPerSecond.toPrecision(3)}/s | ${xp.ram.toFixed(1)} GB`);
 	}

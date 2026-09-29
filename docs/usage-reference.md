@@ -1,5 +1,7 @@
 # Usage reference
 
+See [Dynamic progression policy](progression-planning.md) for shared objectives, automatic inflation, staged bootstrap, and the supervisor’s `--go-opponent auto` default. Port 8 is now reserved for home-upgrade quotes; choose another unreserved port for custom fleet status.
+
 Start with the [README](../README.md) for setup, automation settings, dashboard help, and restart instructions. This page keeps the full feature requirements and advanced options in one place.
 
 ## BitNode, Source-File, and API requirements
@@ -64,7 +66,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--augmentations` | `true` | Refresh advice about once a minute; requires BN4 or SF4 level 1+ |
 | `--augmentation-focus` | `hacking` | `hacking` or `all` |
 | `--augmentation-target` | empty | Plan for one named augmentation and its prerequisites |
-| `--augmentation-price-multiplier` | `1` | Assumed price growth per purchase; 1 gives a lower bound |
+| `--augmentation-price-multiplier` | `0` | Auto-detect standard inflation and SF11; values >= 1 explicitly override |
 | `--augmentation-actions` | `true` | Supervise faction work, purchases, and automatic augmentation installation |
 | `--augmentation-cash-reserve` | `0.10` | Cash fraction retained after an automatic augmentation purchase |
 | `--augmentation-city-faction` | empty | The only city faction the loop may auto-join; city invitations are skipped when empty |
@@ -75,6 +77,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--save-amount` | unset | Set a fixed manual goal instead of automatic savings; no Singularity required |
 | `--save-label` / `--save-target` | `Savings` / empty | Label and optional allowed program purchase for a fixed goal |
 | `--cloud-roi` / `--cloud-payback` | `true` / `1800` | Fleet investment policy for newly started fleet managers |
+| `--cloud-min-ram` | `8` | Smallest cloud server purchase in GB; power of two, at least 2; existing fleet arguments remain preserved |
 | `--telemetry` | `true` | Record history and show a rolling one-hour summary |
 | `--home-reserve` | `8` | Minimum home RAM kept out of sharing for utilities and service starts |
 | `--share` | `true` | Fill spare home and unreserved remote RAM with elastic faction-share workers |
@@ -198,6 +201,23 @@ arguments when adopted; see [changing settings](../README.md#changing-settings).
 
 ## Buy RAM when it can help
 
+Home RAM hosts the controllers; cloud RAM supplies hacking workers. Cloud purchases
+cannot resolve a home service-admission shortage, so essential home upgrades come
+first. New fleets default to an 8 GB minimum instead of 32 GB, reducing the first
+purchase threshold. The existing 25% per-action cash cap and 10% reserve remain.
+
+In automatic savings mode, the fleet publishes a current-reset capital request for
+its first small server, or for one expansion with estimated payback within five
+minutes. Expansion requests require fresh scheduler evidence, stable earning lanes,
+and RAM pressure. These requests have priority 79: above ordinary augmentation and
+program savings, below TOR/the first opener, critical home RAM, Daedalus and Red Pill.
+Manual goals remain protected. The funding target includes the per-action cap and
+cash floors; the transaction rechecks live cost, reserves and reset conditions.
+After a prioritized purchase, the fleet yields capital priority for three minutes
+so other progression goals can advance. Normal purchases from unprotected funds
+retain their existing policy. This short-payback threshold governs priority over
+other goals; it does not replace the ordinary `--cloud-payback` setting below.
+
 Fleet's `--cloud-roi true` default compares affordable new servers and upgrades
 by estimated payback. After bootstrapping the first cloud server, it requires a
 fresh live scheduler snapshot, productive lanes, and RAM pressure. It defers when
@@ -232,28 +252,32 @@ run augmentation-planner.js --target "BitWire" --save-goal
 ```
 
 **Requires BN4 or SF4 level 1+ (Singularity).** Looks at joined factions, removes owned/purchased items,
-expands prerequisite chains, selects the faction with the smallest reputation gap,
-and prefers reputation-ready purchases. Once The Red Pill is available, the plan
+expands prerequisite chains, compares seller acquisition ETA (work, cash, favor and
+donations), and builds an affordable basket. Unknown rates fall back to reputation
+gap and favor. Once The Red Pill is available, the plan
 focuses on it and its prerequisites; once purchased, the automatic basket is empty.
-Earlier, it prioritizes faction reputation upgrades and Neuroreceptor Management
-Implant, then expensive eligible purchases. Those progression/support upgrades are included in
+Earlier, it scores economy, faction reputation, skill/XP, and distinct-count progress
+against the shared bottleneck. Those progression/support upgrades are included in
 the default hacking focus; `--target` remains an explicit override. NeuroFlux is
 excluded from automatic purchasing. Missing prerequisites
 from unjoined factions are reported. This is a useful ordering heuristic, not a
 global optimization over every faction, donation, or unlock.
 
-Current quotes are live; the default basket total is a lower bound before future
-purchase inflation. `--price-multiplier N` projects a user-specified per-purchase
-multiplier. Re-run after purchases. The next purchase's cash target uses its live
-quote. `--save-goal` explicitly replaces the shared savings goal with that amount.
+Current quotes are live; the default basket total projects sequential standard
+inflation with the current SF11 adjustment. `--price-multiplier 0` selects automatic
+inflation; values at least 1 explicitly override it. Re-run after purchases. Cash
+targets cover prerequisite chains and reserves. The standalone `--save-goal`
+explicitly replaces the shared savings goal with the next item’s live price.
 The standalone planner never buys, works for a faction, donates, installs
 augmentations or resets. The separately gated augmentation loop can join invited
 non-city factions, perform faction work, donate when favor and `Formulas.exe` make
 the exact reputation cost available, and buy its next planned item. It never
 interrupts unrelated player activity. Outside the BN4 route, city factions require
 `--augmentation-city-faction`. The BN4 controller selects compatible city factions
-automatically unless explicitly configured. Installation is always automatic at the
-queued-augmentation threshold, or immediately with The Red Pill queued, subject
+automatically unless explicitly configured. Outside the BN4 route, installation retains the queued-augmentation threshold.
+Within BN4, the controller compares a bounded wait for the next valuable purchase
+with the current batch, favor access, and observed reset recovery. The Red Pill
+installs immediately, subject
 to manual-work and restart checks. An installed Red Pill stops further purchases
 and installations to preserve progress toward the final server. Donations retain
 enough cash for the planned purchase, the percentage reserve, and unrelated goals.

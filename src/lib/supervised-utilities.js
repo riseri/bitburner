@@ -1,3 +1,6 @@
+import { chooseInvestment } from "lib/investment-policy.js";
+import { readFleetCapitalRequest } from "lib/fleet-capital.js";
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
 import { progressionPrograms } from "lib/programs.js";
@@ -50,13 +53,15 @@ export function tickUtilityJob(ns, job, gate = "", now = Date.now()) {
 }
 
 export function currentAugmentationPlan(ns, job, now = Date.now()) {
+    const shared = readProgressionSnapshot(ns, now);
+    if (shared?.selectedPlan) return shared.selectedPlan;
     const report = job?.report;
     if (report?.state !== "READY" || report.type !== "augmentation-plan" || report.resetEpoch !== resetEpoch(ns.getResetInfo()) ||
         report.generatedAt > now || now - report.generatedAt > 120000) return null;
     return report.plan;
 }
 
-export async function updateSupervisorSavings(ns, cfg, plan, progression = null, augmentation = null) {
+export async function updateSupervisorSavings(ns, cfg, plan, progression = null, augmentation = null, fleet = null) {
     if (cfg.savingsMode === "keep" || cfg.savingsMode === "none" || cfg.savingsMode === "fixed") return;
     const current = readSavings(ns);
     if (current.error) { cfg.savingsStatus = current.error; return; }
@@ -70,35 +75,44 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
     const milestone = cfg.progression && progression?.type === "progression-status" &&
         progression.resetEpoch === resetEpoch(reset) && progression.generatedAt <= Date.now() &&
         Date.now() - progression.generatedAt <= 15000 ? progression.milestone : null;
-    if (cfg.savingsMode === "auto" || cfg.savingsMode === "programs") {
+    if (cfg.savingsMode === "auto") {
+        const shared=readProgressionSnapshot(ns), requests=[];
+        const program=progression?.objectives?.find(o=>["tor","program"].includes(o.kind));
+        if (milestone && cfg.progression && (!singularity || cfg.progressionActions) && program)
+            requests.push({amount:program.costEstimate/(1-(singularity ? cfg.progressionCashReserve : 0)), target:program.target,
+                label:program.label,priority:program.priority || (program.kind === "tor" ? 85 : 50),reason:program.reason || "Program unlock"});
+        // Old/manual observations still work if no authoritative manager is available.
+        if (!progression?.objectives && cfg.progression && (!singularity || cfg.progressionActions)) {
+            const p=!ns.hasTorRouter()?{name:"TOR",cost:200000}:progressionPrograms({darknet:cfg.darknet!==false,formulas:false}).find(p=>!ns.fileExists(p.name,"home"));
+            if(p) requests.push({amount:p.cost/(1-(singularity?cfg.progressionCashReserve:0)),target:p.name,label:"Buy "+p.name,priority:85,reason:singularity ? "Fallback program bootstrap" : "Fallback program bootstrap; purchase manually"});
+        }
+        const goal=controller?.savings || shared?.savings || milestone?.savings;
+        if(goal) requests.push({...goal,amount:goal.amount/(1-(goal.target.startsWith("augmentation:") ? cfg.augmentationCashReserve : 0)),
+            priority:goal.target.includes("The Red Pill") ? 100 : goal.target === "faction:Daedalus" ? 95 : 72,reason:controller?.recommendation || milestone?.label || "Progression requirement",
+            liquidity:shared?.limitingResource === "cash" || controller?.phase === "FUND"});
+        else if(plan?.next && cfg.augmentationActions && !plan.errors?.length) requests.push({amount:(plan.next.chainCost || plan.next.price)/(1-cfg.augmentationCashReserve),
+            target:"augmentation:"+plan.next.name,label:plan.next.name,priority:plan.next.name === "The Red Pill"?100:70,
+            liquidity:plan.next.repGap===0,reason:"Selected achievable augmentation chain"});
+        if(cfg.homeInvestment) requests.push(cfg.homeInvestment);
+        const cloud = readFleetCapitalRequest(ns, fleet);
+        if (cloud) requests.push(cloud);
+        const decision=chooseInvestment(requests,current.target); desired=decision.chosen;
+        cfg.savingsStatus=desired ? desired.reason + (decision.deferred.length ? "; deferred " + decision.deferred.join(", ") : "") : "No justified capital request";
+    } else if (cfg.savingsMode === "programs") {
         const program = !ns.hasTorRouter() ? { name: "TOR", cost: 200000 } : progressionPrograms({ darknet: cfg.darknet !== false }).find(p => !ns.fileExists(p.name, "home"));
         if (program && (!cfg.progression || (singularity && !cfg.progressionActions))) { cfg.savingsStatus = "Program savings waits for progression actions"; return; }
         if (program) {
             desired = { amount: program.cost / (1 - (singularity ? cfg.progressionCashReserve : 0)), label: `Buy ${program.name}`, target: program.name };
             cfg.savingsStatus = `Saving for ${program.name}${singularity ? "" : "; purchase manually"}`;
         }
-        else if (cfg.savingsMode === "auto" && controller?.savings) {
-            desired = controller.savings;
-            cfg.savingsStatus = controller.recommendation;
-        }
-        else if (cfg.savingsMode === "auto" && milestone?.savings) {
-            const goal = milestone.savings;
-            desired = { ...goal, amount: goal.amount / (1 - (singularity && goal.target.startsWith("augmentation:") ? cfg.augmentationCashReserve : 0)) };
-            cfg.savingsStatus = milestone.label;
-        }
-        else if (cfg.savingsMode === "auto" && singularity && cfg.augmentationActions) {
-            if (!plan || plan.errors?.length) { cfg.savingsStatus = "Programs complete; waiting for a fresh augmentation plan"; return; }
-            if (plan.next) desired = { amount: plan.next.price / (1 - cfg.augmentationCashReserve),
-                label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };
-            cfg.savingsStatus = plan.next ? `Programs complete; saving for ${plan.next.name}` : "Programs and planned augmentations complete";
-        } else cfg.savingsStatus = "All automatic program unlocks owned";
+        else cfg.savingsStatus = "All automatic program unlocks owned";
     } else if (cfg.savingsMode === "augmentations") {
         if (!plan || plan.errors?.length) { cfg.savingsStatus = "Waiting for a fresh, complete augmentation plan"; return; }
         if (plan.next) desired = { amount: plan.next.price, label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };
         cfg.savingsStatus = plan.next ? `Saving for ${plan.next.name}; purchase manually` : "No matching unowned augmentations";
     }
-    if (desired && (current.inactive || current.amount !== desired.amount || current.target !== desired.target || current.owner !== "supervisor")) {
-        await writeSavings(ns, desired.amount, desired.label, desired.target, "supervisor");
+    if (desired && (current.inactive || current.amount !== desired.amount || current.target !== desired.target || current.owner !== "supervisor" || desired.liquidity || current.liquidity)) {
+        await writeSavings(ns, desired.amount, desired.label, desired.target, "supervisor", { priority: desired.priority || 0, liquidity: Boolean(desired.liquidity && desired.priority >= 80), producerPid: ns.pid });
     } else if (!desired && current.owner === "supervisor" && current.amount > 0) {
         await writeSavings(ns, 0, "No pending automatic savings goal", "", "supervisor");
     }

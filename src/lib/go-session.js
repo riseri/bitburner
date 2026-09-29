@@ -56,7 +56,7 @@ export function findDaedalusDistractionWindow(totalPlaytime, maxWaitMs = 10_000)
 }
 
 export function goConfig(flags) {
-	const cfg = { opponent: String(flags.opponent), size: Number(flags.size), games: Number(flags.games),
+	const cfg = { autoOpponent: flags.opponent === "auto", opponent: flags.opponent === "auto" ? "Daedalus" : String(flags.opponent), size: Number(flags.size), games: Number(flags.games),
 		interval: Number(flags.interval), thinkMs: Number(flags["think-ms"]),
 		takeover: flags.takeover === true || flags.takeover === "true",
 		rngSnipe: flags["rng-snipe"] !== false && flags["rng-snipe"] !== "false",

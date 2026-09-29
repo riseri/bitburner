@@ -1,5 +1,7 @@
 # Adaptive hacking policy
 
+Current progression-driven behavior, capital priorities, and fallback rules are described in [Dynamic progression policy](progression-planning.md). Historical thresholds and examples below describe the conservative fallback unless a fresh shared objective overrides them.
+
 `daemon.js` remains the only full hacking controller. Its existing startup scanner,
 rooting/deployment pass, money scorer, prep, HWGW allocator, multi-target scheduler,
 generation swaps and recovery remain in use. `fleet-manager.js` still owns ongoing

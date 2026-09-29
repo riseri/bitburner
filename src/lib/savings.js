@@ -22,7 +22,8 @@ export function readSavings(ns, spendingTarget = "") {
         if ((goal.target === "TOR" && ns.hasTorRouter()) || (program && ns.fileExists(goal.target, "home"))) {
             return { ...goal, floor: 0, inactive: "Goal purchased" };
         }
-        const authorizedPurchase = (program || goal.target === "TOR") && spendingTarget === goal.target;
+        const fleet = goal.owner === "supervisor" && goal.target.startsWith("fleet:");
+        const authorizedPurchase = (program || goal.target === "TOR" || goal.target === "home:ram" || fleet) && spendingTarget === goal.target;
         return { ...goal, floor: authorizedPurchase ? 0 : goal.amount };
     } catch (error) {
         // Test/legacy hosts without file APIs have no configured goal.
@@ -31,9 +32,9 @@ export function readSavings(ns, spendingTarget = "") {
     }
 }
 
-export async function writeSavings(ns, amount, label, target = "", owner = "manual") {
+export async function writeSavings(ns, amount, label, target = "", owner = "manual", policy = {}) {
     if (!Number.isFinite(amount) || amount < 0) throw new Error("Savings amount must be a finite nonnegative number");
-    const goal = { version: 1, amount, label: String(label), target: String(target), owner, epoch: savingsEpoch(ns), updatedAt: Date.now() };
+    const goal = { version: 1, amount, label: String(label), target: String(target), owner, ...policy, epoch: savingsEpoch(ns), updatedAt: Date.now() };
     await ns.write(SAVINGS_FILE, JSON.stringify(goal), "w");
     return goal;
 }

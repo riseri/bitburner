@@ -1,3 +1,4 @@
+import { augmentationContext } from "lib/augmentation-context.js";
 import { bn4Route } from "lib/bitnode-route.js";
 import { writeUtilityReport } from "lib/utility-report.js";
 import { buildAugmentationPlan } from "lib/augmentation-plan.js";
@@ -6,7 +7,7 @@ import { writeSavings } from "lib/savings.js";
 /** Read-only purchasing advice; --save-goal only writes a cash reserve. @param {NS} ns */
 export async function main(ns) {
     if (ns.getHostname() !== "home") throw new Error("Run augmentation-planner.js on home");
-    const f = ns.flags([["focus", "hacking"], ["target", ""], ["route", true], ["price-multiplier", 1], ["save-goal", false], ["report", false]]);
+    const f = ns.flags([["focus", "hacking"], ["target", ""], ["route", true], ["price-multiplier", 0], ["save-goal", false], ["report", false]]);
     if (f.report) {
         let report;
         try {
@@ -14,7 +15,7 @@ export async function main(ns) {
             if (reset.currentNode !== 4 && !(Number(reset.ownedSF?.get(4)) > 0)) {
                 report = { state: "BLOCKED", summary: "Singularity is locked" };
             } else {
-                const plan = buildAugmentationPlan(ns, { ...f, route: ![false, "false", "0", "off", "no"].includes(f.route) && bn4Route(ns.getResetInfo()) });
+                const plan = buildAugmentationPlan(ns, { ...f, context: augmentationContext(ns), route: ![false, "false", "0", "off", "no"].includes(f.route) && bn4Route(ns.getResetInfo()) });
                 report = { state: plan.errors.length ? "BLOCKED" : "READY", plan, progression: progressionObservation(ns),
                     summary: plan.errors.length ? plan.errors.join("; ") : plan.next
                         ? `${plan.next.name} | ${plan.next.faction} | rep gap ${Math.ceil(plan.next.repGap)} | cash ${Math.ceil(plan.next.price)}`
@@ -28,7 +29,7 @@ export async function main(ns) {
     if (reset.currentNode !== 4 && !(Number(reset.ownedSF?.get(4)) > 0)) {
         ns.tprint("Augmentation planning needs Singularity (BN4 or SF4). No purchases or resets performed."); return;
     }
-    const plan = buildAugmentationPlan(ns, { ...f, route: ![false, "false", "0", "off", "no"].includes(f.route) && bn4Route(ns.getResetInfo()) }), multiplier = plan.multiplier;
+    const plan = buildAugmentationPlan(ns, { ...f, context: augmentationContext(ns), route: ![false, "false", "0", "off", "no"].includes(f.route) && bn4Route(ns.getResetInfo()) }), multiplier = plan.multiplier;
     ns.tprint(`AUGMENTATION PLAN | joined factions only | ${plan.order.length} purchases`);
     for (const [index, a] of plan.order.entries()) ns.tprint(`${index + 1}. ${a.name} from ${a.faction} | quote ${ns.format.number(a.price)} | projected ${ns.format.number(a.estimatedPrice)} | rep gap ${ns.format.number(a.repGap)} | prerequisites: ${a.prerequisites.join(", ") || "none"}`);
     for (const error of plan.errors) ns.tprint(`BLOCKED: ${error}`);

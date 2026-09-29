@@ -12,6 +12,7 @@ export async function main(ns) {
 			publishAction(ns, request, "succeeded", "already-owned"); return;
 		}
 		if (!tor && !ns.hasTorRouter()) { publishAction(ns, request, "blocked", "tor-required"); return; }
+		if(!tor && typeof ns.singularity.getDarkwebPrograms === "function" && !ns.singularity.getDarkwebPrograms().includes(request.target)) { publishAction(ns, request, "blocked", "program-unavailable"); return; }
 		const cost = tor ? 200_000 : ns.singularity.getDarkwebProgramCost(request.target);
 		if (!Number.isFinite(cost) || cost <= 0) { publishAction(ns, request, "blocked", "invalid-price"); return; }
 		const cash = ns.getServerMoneyAvailable("home");

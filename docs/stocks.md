@@ -1,5 +1,7 @@
 # 4S directional stock money printer
 
+Current progression-driven behavior, capital priorities, and fallback rules are described in [Dynamic progression policy](progression-planning.md). Historical thresholds and examples below describe the conservative fallback unless a fresh shared objective overrides them.
+
 `stock-trader.js` is a 4S directional stock trader for the World Stock Exchange. The
 normal deployment is supervisor-managed, while direct standalone runs remain
 supported for smoke tests and dry runs. It has its own status port and does not

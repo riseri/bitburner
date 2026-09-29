@@ -1,4 +1,5 @@
 export const PORTS = Object.freeze({
+	HOME_UPGRADE_STATUS: 8,
 	WORKER_EVENTS: 20,
 	FLEET_STATUS: 19,
 	CONTRACT_STATUS: 18,

@@ -1,7 +1,8 @@
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { readProgressionObservation, planMilestone } from "lib/progression-milestones.js";
 import { PORTS } from "lib/ports.js";
 import { progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
-import { progressionPrograms } from "lib/programs.js";
+import { progressionPrograms, rankPrograms } from "lib/programs.js";
 import { singularityRecommendation } from "lib/augmentation-loop.js";
 
 const HOME = "home";
@@ -85,10 +86,18 @@ function buildStatus(ns, fleetStatus, options = {}) {
 	);
 	const worldDaemon = analyzeNetworkRoute(ns, WORLD_DAEMON, discovered, parents);
 
-	const objectives = planObjectives({ torOwned, programs, backdoors, money });
+	    const objective = readProgressionSnapshot(ns);
+    const servers = [...discovered].flatMap(host => { try { return [ns.getServer(host)]; } catch { return []; } });
+    const ranked = rankPrograms(programs, { servers, money, homeRam: ns.getServerMaxRam("home"),
+        darknetRam: ns.getScriptRam("darknet-manager.js", "home") + ns.getScriptRam("darknet-agent.js", "home") + ns.getServerUsedRam("home"),
+        income: objective?.incomePerSecond, objective });
+    const objectives = planObjectives({ torOwned, programs: ranked, backdoors, money });
 	const milestone = planMilestone({ currentNode, player: ns.getPlayer(), money, worldDaemon,
 		observation: readProgressionObservation(ns) });
+    const shared = readProgressionSnapshot(ns);
+    if (shared) { milestone.stage = shared.milestone; milestone.label = shared.recommendation || `${shared.milestone}: ${shared.limitingResource}`; milestone.savings = shared.savings; }
 	return {
+        progression: shared,
 		type: "progression-status",
 		generatedAt: Date.now(),
 		plannedAt: Date.now(),
@@ -179,9 +188,9 @@ export function planObjectives({ torOwned, programs, backdoors, money }) {
 	const objectives = [];
 	if (!torOwned) objectives.push({ kind: "tor", target: "TOR", label: "Get a TOR router",
 		ready: true, costEstimate: 200_000, affordable: money >= 200_000, blocker: money >= 200_000 ? "" : "insufficient-cash" });
-	const missing = programs.find(program => !program.owned);
+	const missing = programs.find(program => !program.owned && program.useful !== false);
 	if (missing) objectives.push({ kind: "program", target: missing.name, program: missing.name,
-		label: `Acquire ${missing.name}`, ready: torOwned, costEstimate: missing.cost,
+		priority: missing.priority, reason: missing.reason, label: `Acquire ${missing.name}`, ready: torOwned, costEstimate: missing.cost,
 		affordable: money >= missing.cost, blocker: !torOwned ? "tor-required" : money >= missing.cost ? "" : "insufficient-cash" });
 	for (const target of backdoors) {
 		if (target.installed) continue;

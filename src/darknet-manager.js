@@ -1,3 +1,4 @@
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { PORTS } from "lib/ports.js";
 import { resetEpoch } from "lib/progression-protocol.js";
 import { LEASE_MS } from "lib/darknet-coordination.js";
@@ -33,7 +34,10 @@ export async function main(ns) {
 		const unlocked = ns.fileExists("DarkscapeNavigator.exe", "home") || Number(ns.getResetInfo()?.currentNode) === 15;
 		let homeAgent = { ok: false, reason: "Darknet locked" };
 		if (unlocked) {
-			homeAgent = ensureHomeAgent(ns, cfg);
+			const objective=readProgressionSnapshot(ns);
+            const budgeted=objective && ["hacking","reputation"].includes(objective.limitingResource)
+                ? { ...cfg, homeReserve: Math.max(cfg.homeReserve,ns.getServerMaxRam("home")*.75) } : cfg;
+            homeAgent = ensureHomeAgent(ns, budgeted);
 			if (Date.now() - lastRestore >= 30_000) { await restoreAnchors(ns, cfg, state); lastRestore = Date.now(); }
 		}
 		const now = Date.now();
@@ -41,7 +45,7 @@ export async function main(ns) {
 		const active = Object.values(state.agents).filter(a => ns.isRunning(a.pid) && now - a.at < 15_000).length;
 		const health = unlocked ? homeAgentHealth(ns, state, homeAgent, homeWatch, now) : { state: "LOCKED", blocker: "Darknet locked" };
 		statusPort.clear(); statusPort.write({ type: "darknet-status", version: 1, producerPid: ns.pid, generatedAt: now, heartbeatIntervalMs: cfg.interval,
-			...health, homeAgentPid: homeAgent.pid || 0, homeAgentRestarts: homeWatch.exits, unlocked, formulas: ns.fileExists("Formulas.exe", "home"), known: Object.keys(state.servers).length,
+			...health, resetEpoch: epoch, value: darknetValue(ns,state), homeAgentPid: homeAgent.pid || 0, homeAgentRestarts: homeWatch.exits, unlocked, formulas: ns.fileExists("Formulas.exe", "home"), known: Object.keys(state.servers).length,
 			credentials: Object.values(state.servers).filter(s => s.password != null).length, activeAgents: active,
 			cracking: Object.entries(state.cracking).map(([host, activity]) => ({ host, modelId: activity.modelId, since: activity.at, pid: activity.pid, expiresAt: activity.expiresAt })),
 			coordination: coordinationState(state), leaseRecoveries: state.stats.leaseRecoveries || 0, leaseContentions: state.stats.leaseContentions || 0,
@@ -135,7 +139,11 @@ export function applyEvent(state, event) {
 		if (event.kind === "blocked") { server.blocker = event.reason; server.freeRam = event.freeRam; server.requiredRam = event.requiredRam; state.stats.blocked++; }
 		if (["credential", "deployed"].includes(event.kind)) { delete server.blocker; delete server.freeRam; delete server.requiredRam; }
 	}
-	if (event.kind === "cache") state.stats.caches++;
+	if (event.kind === "cache") {
+        state.stats.caches++;
+        state.stats.rewardReports=(state.stats.rewardReports||0)+1;
+        state.stats.lastCacheResult=event.cacheResult || null;
+    }
 	if (event.kind === "deployed" && event.pid) state.stats.deployments++;
 	if (event.kind === "error") { state.stats.errors++; state.lastError = `${event.host || "agent"}: ${event.error || event.reason || "unknown error"}`; }
 }
@@ -256,3 +264,13 @@ async function saveState(ns, state) { await ns.write(STATE_FILE, JSON.stringify(
 function bool(value) { return value === true || String(value).toLowerCase() === "true"; }
 function agentVersion(process) { try { return Number(JSON.parse(String(process.args?.[0] || "{}")).version) || 0; } catch { return 0; } }
 function safe(fn, fallback) { try { return fn(); } catch { return fallback; } }
+
+export function darknetValue(ns,state) {
+    const agents=Object.values(state.agents).filter(a=>ns.isRunning(a.pid));
+    let ram=0,unknown=0;
+    for(const agent of agents) { try { const p=ns.getRunningScript(agent.pid); if(p) ram+=p.ramUsage*p.threads; else unknown++; } catch { unknown++; } }
+    return {ramGb:ram,ramComplete:false,crawlerRamComplete:unknown===0,cash:null,hackingXp:null,rewardKind:"unavailable aggregate",
+        cacheReports:state.stats.rewardReports||0,lastCacheResult:state.stats.lastCacheResult||null,
+        usefulUnlocks:Object.values(state.servers).filter(s=>s.password!=null).length,
+        note:"Crawler RAM lower bound; raw cache API results retained; cash/XP totals unavailable from current typed API"};
+}
