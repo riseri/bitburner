@@ -1,7 +1,10 @@
-# Controlled two-target JIT
+# Controlled multi-target JIT
 
 The money engine now runs a collection of independent target pipelines inside
-**one daemon**. The first rollout allows one or two earning targets, default two.
+**one daemon**. Automatic mode admits up to six earning targets, one trial at a
+time. Explicit limits 1 through 6 are supported; 1 and 2 retain their established
+admission behavior. See [elastic throughput](elastic-throughput.md) for global
+capacity, marginal-value and cloud-investment policy.
 This is concurrent hacking, not merely background preparation and not shotgun
 batching. Each phase still starts JIT, using the existing clean-security worker
 and `additionalMsec`. The defaults remain a 100 ms phase gap and a 600 ms launch
@@ -30,10 +33,10 @@ health and builds a **fresh** plan with real hack chance, thread requirements,
 timing and shared resource constraints. The scouting upper bound is never treated
 as an earning rate. Live tuning yields
 between small search steps rather than running the entire search in the hot loop.
-The peer keeps earning during tuning and initial warmup. Once both slots are
-occupied and both lanes are stable and productive, spare RAM can prepare a third
-candidate. A stronger ready candidate replaces the support lane after its owned
-work drains; at most two earning lanes remain active.
+Peers keep earning during tuning and initial warmup. Once the configured slots
+are occupied and all lanes are stable and productive, spare RAM can prepare a
+replacement candidate. A stronger ready candidate replaces the weakest lane
+after its owned work drains; unrelated lanes continue earning.
 
 A target that has stopped earning for ten minutes can also be replaced when its
 peer is validated and productive. Initial warmup is allowed to finish first.
@@ -206,7 +209,5 @@ RAM analysis, real API execution cost, Electron garbage collection, external
 scripts or suspended/offline time. Passing tests supports the tested ownership,
 resource and recovery invariants, not guaranteed dollars/second or universal
 stability. Monitor per-target income, combined income and recovery after the
-first live two-target warmup before considering higher concurrency or tighter
-timing. This rollout does not implement arbitrary target counts. Stable lanes can scout
-and prepare a third candidate for a controlled replacement; promotion waits for
-a safe handoff and drains the old support lane before admitting its replacement.
+first live multi-target warmup before considering tighter timing. The hard limit
+is six. Promotion waits for a safe handoff and drains only the replaced lane.

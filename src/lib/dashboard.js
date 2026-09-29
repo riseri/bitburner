@@ -14,6 +14,10 @@ export function renderSchedulerCapacity(ns, capacity, details = false) {
     dashboardRow(ns, "Workers", `${c.workers.committed} / ${c.workers.limit}`);
     dashboardRow(ns, "XP pressure", c.xp.constrained ? `${ram(c.xp.allocatedRam)} / ${ram(c.xp.desiredRam)} desired` : "none");
     if (c.targets.next) dashboardRow(ns, "Next candidate", c.targets.next.name);
+    if (c.admission) {
+        dashboardRow(ns, "Admission", `${c.admission.decision} | ${c.admission.candidate || c.admission.reason}`);
+        if (c.admission.marginalIncome > 0) dashboardRow(ns, "Marginal model", `+$${Math.round(c.admission.marginalIncome).toLocaleString()}/s | ${c.admission.expectedLanes} lanes`);
+    }
     if (details) for (const reason of c.reasons) dashboardRow(ns, "Constraint", reason);
 }
 

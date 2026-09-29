@@ -7,6 +7,7 @@ import { refreshHackingPolicy, renderHackingPolicy } from "lib/hacking-policy.js
 import { runHackingFallback, reclaimXpRam, xpPipelineStatus } from "lib/hacking-xp.js";
 import { readSharingDemand } from "lib/progression-objective.js";
 import { schedulerCapacity } from "lib/scheduler-capacity.js";
+import { targetLimit } from "lib/target-limit.js";
 
 const HOME = "home";
 
@@ -37,7 +38,7 @@ const SERVER_MAX_GROWTH_LOG = 0.00349388925425578;
 export async function main(ns) {
 	const flags = ns.flags([
 		["target", "auto"],
-		["max-targets", 2],
+		["max-targets", "auto"],
 		["max-batch-rate", 4],
 		["max-workers", 6_000],
 		["max-launches", 32],
@@ -66,7 +67,8 @@ export async function main(ns) {
 
 	const cfg = {
 		requestedTarget: String(flags.target ?? "auto"),
-		maxTargets: Number(flags["max-targets"]),
+		maxTargets: targetLimit(flags["max-targets"]).limit,
+		targetMode: targetLimit(flags["max-targets"]).mode,
 		maxBatchRate: Number(flags["max-batch-rate"]),
 		maxWorkers: Number(flags["max-workers"]),
 		maxLaunches: Number(flags["max-launches"]),
@@ -123,10 +125,10 @@ export async function main(ns) {
 	});
 	ns.atExit(() => cancelBackgroundPrep(ns, cfg.backgroundPrep, "daemon stopped"), "background-prep");
 	validateDaemonPorts(cfg);
-	if (![1, 2].includes(cfg.maxTargets) || !(cfg.maxBatchRate > 0 && cfg.maxBatchRate <= 8) ||
+	if (!(cfg.maxBatchRate > 0 && cfg.maxBatchRate <= 8) ||
 		!Number.isSafeInteger(cfg.maxWorkers) || cfg.maxWorkers < 16 ||
 		!Number.isSafeInteger(cfg.maxLaunches) || cfg.maxLaunches < 4 || cfg.maxLaunches > 128) {
-		throw new Error("Require max-targets 1 or 2, max-batch-rate (0,8], max-workers >=16, max-launches 4..128");
+		throw new Error("Require max-batch-rate (0,8], max-workers >=16, max-launches 4..128");
 	}
 	cfg.minimumPeriod = 1000 / cfg.maxBatchRate;
 	cfg.lead = Math.max(cfg.lead, cfg.gap * 6);

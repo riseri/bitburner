@@ -58,7 +58,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | Flag | Default | Behavior |
 | --- | --- | --- |
 | `--progression-actions` | `true` | Buy programs and install faction backdoors when Singularity is unlocked |
-| `--max-targets` | `2` | Maximum simultaneous earning targets: 1 or 2; does not guarantee both slots are occupied |
+| `--max-targets` | `auto` | Automatic admission up to 6; explicit integer 1..6 remains available. Capacity and marginal value determine actual lane count. |
 | `--background-prep` | `true` | Prepare promising targets while the current target earns, subject to health and resource gates |
 | `--dashboard-details` | `false` | Show detailed diagnostics; forwarded to a newly started daemon |
 | `--go-takeover` | `true` | Finish an existing ordinary IPvGO board on startup; set false when playing manually |

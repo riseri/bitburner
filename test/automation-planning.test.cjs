@@ -84,7 +84,7 @@ test('fleet chooses a better-value existing upgrade over a new server and honors
     assert.match(state.investment, /fresh/);
 });
 
-test('surplus unprotected cash expands the fleet when conservative ROI evidence is unavailable', async () => {
+test('surplus cash waits for live scheduler evidence after the first cloud server', async () => {
     const f=savingsFixture(),api=loadScript('fleet-manager.js',f.clock),ports=new Map([[17,new Port()],[13,new Port()]]);
     const actions=[];
     Object.assign(f.ns,{getPortHandle:p=>ports.get(p),isRunning:()=>false,getServerMoneyAvailable:()=>800e9,
@@ -96,9 +96,9 @@ test('surplus unprotected cash expands the fleet when conservative ROI evidence 
     const cfg={stockPort:13,cloud:{roi:true,payback:1800,minRam:32,maxAction:.25,cashFloor:0,cashReserve:.1,prefix:'cloud'}};
     const state={purchases:0,upgrades:0,spent:0};
     await api.manageOneCloudAction(f.ns,cfg,state);
-    assert.deepEqual(actions,[['buy','cloud-01',1024]]);
-    assert.match(state.investment,/Surplus cash override/);
-    assert.equal(state.purchases,1);
+    assert.deepEqual(actions,[]);
+    assert.match(state.investment,/fresh live scheduler evidence/);
+    assert.equal(state.purchases,0);
 });
 
 test('augmentation ordering includes prerequisites, avoids owned items and reports gaps', () => {
