@@ -1,11 +1,13 @@
 import { runTargetPipelines } from "lib/target-pipelines.js";
-import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets, renderSchedulerCapacity } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, backgroundPrepJobs, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary, recentPipelineIncome } from "lib/background-prep.js";
 import { hackingFormulasAvailable, preparedHackingModel } from "lib/formulas.js";
 import { refreshHackingPolicy, renderHackingPolicy } from "lib/hacking-policy.js";
 import { runHackingFallback, reclaimXpRam, xpPipelineStatus } from "lib/hacking-xp.js";
 import { readSharingDemand } from "lib/progression-objective.js";
+import { schedulerCapacity } from "lib/scheduler-capacity.js";
+import { targetLimit } from "lib/target-limit.js";
 
 const HOME = "home";
 
@@ -36,7 +38,7 @@ const SERVER_MAX_GROWTH_LOG = 0.00349388925425578;
 export async function main(ns) {
 	const flags = ns.flags([
 		["target", "auto"],
-		["max-targets", 2],
+		["max-targets", "auto"],
 		["max-batch-rate", 4],
 		["max-workers", 6_000],
 		["max-launches", 32],
@@ -65,7 +67,8 @@ export async function main(ns) {
 
 	const cfg = {
 		requestedTarget: String(flags.target ?? "auto"),
-		maxTargets: Number(flags["max-targets"]),
+		maxTargets: targetLimit(flags["max-targets"]).limit,
+		targetMode: targetLimit(flags["max-targets"]).mode,
 		maxBatchRate: Number(flags["max-batch-rate"]),
 		maxWorkers: Number(flags["max-workers"]),
 		maxLaunches: Number(flags["max-launches"]),
@@ -122,10 +125,10 @@ export async function main(ns) {
 	});
 	ns.atExit(() => cancelBackgroundPrep(ns, cfg.backgroundPrep, "daemon stopped"), "background-prep");
 	validateDaemonPorts(cfg);
-	if (![1, 2].includes(cfg.maxTargets) || !(cfg.maxBatchRate > 0 && cfg.maxBatchRate <= 8) ||
+	if (!(cfg.maxBatchRate > 0 && cfg.maxBatchRate <= 8) ||
 		!Number.isSafeInteger(cfg.maxWorkers) || cfg.maxWorkers < 16 ||
 		!Number.isSafeInteger(cfg.maxLaunches) || cfg.maxLaunches < 4 || cfg.maxLaunches > 128) {
-		throw new Error("Require max-targets 1 or 2, max-batch-rate (0,8], max-workers >=16, max-launches 4..128");
+		throw new Error("Require max-batch-rate (0,8], max-workers >=16, max-launches 4..128");
 	}
 	cfg.minimumPeriod = 1000 / cfg.maxBatchRate;
 	cfg.lead = Math.max(cfg.lead, cfg.gap * 6);
@@ -4005,6 +4008,7 @@ function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runnin
 		if (!pid && reclaimXpRam(ns, cfg.xpPipeline, chunk.host)) pid = launch();
 		if (!pid && reclaimPrepRam(ns, cfg, chunk.host)) pid = launch();
 		if (!pid) {
+			cfg.foreignFailureAt = Date.now();
 			recordPhaseMiss(stats, chunk.phase, true);
 			settleChunk(batch, chunk, { type: "miss", finishedAt: Date.now() }, stats);
 			batch.poisoned = true;
@@ -4503,6 +4507,7 @@ function renderSchedulerDashboard(ns, pool) {
 	const usedRam = totalRunningRam(pool.running) + prepRam + [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
 	const snapshot = {
 		type: "jit-status", version: 2, pid: ns.pid, generatedAt: now,
+		capacity: schedulerCapacity(pool, now),
 		policy: pool.cfg.hackingPolicy ? { ...pool.cfg.hackingPolicy, ...xpPipelineStatus(ns, pool),
 			bestMoney: pool.targetAnalysis?.[0] ? { name: pool.targetAnalysis[0].name, estimatedMoneyPerSecond: pool.targetAnalysis[0].steady } : null } : null,
 		mode: rows.length > 1 || pool.history.length || rows.some(p => !["LIVE", "WARMUP", "RECOVERING"].includes(p.mode)) ? "multi" : "running",
@@ -4536,6 +4541,7 @@ function renderSchedulerDashboard(ns, pool) {
 			p.drain, p.recovery, pool.foreign);
 		renderGenerationStatus(ns, rows[0], pool.cfg.dashboardDetails);
 		renderHackingPolicy(ns, snapshot.policy, pool.cfg.dashboardDetails);
+		renderSchedulerCapacity(ns, snapshot.capacity, pool.cfg.dashboardDetails);
 		const currentSlotPressure = Boolean(p.admissionReason);
 		const slotHistory = currentSlotPressure || p.stats.allocationFails || p.admissionSkips;
 		if (p.cfg.dashboardDetails) {
@@ -4555,6 +4561,7 @@ function renderSchedulerDashboard(ns, pool) {
 	renderHackingPolicy(ns, snapshot.policy, pool.cfg.dashboardDetails);
 
 	dashboardSection(ns, "Overview");
+	renderSchedulerCapacity(ns, snapshot.capacity, pool.cfg.dashboardDetails);
 	row("Target slots", `${rows.length}/${pool.cfg.maxTargets} | priority ${pool.anchor}`);
 	row("Income 60s", `${cash(snapshot.income60)}/s`);
 	row("Model", `${cash(snapshot.model)}/s estimate`);

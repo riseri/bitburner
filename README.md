@@ -138,7 +138,7 @@ can launch more work.
 | `Income 60s` | Measured hacking income over the recent window. Use this to judge actual earnings. |
 | `Model` | Estimated income from current plans. Warmup, Hack chance, rejected batches, and recovery can reduce actual income. |
 | `Potential` | An estimate for a candidate after preparation; it is not income being earned now. |
-| `Target slots 1/2` | One target is admitted, with room for **up to two**. The second needs to be worthwhile, prepared, and able to fit shared limits. Two slots are not guaranteed to stay occupied. |
+| `Targets 1 / AUTO (max 6)` | One useful lane is running. Automatic mode adds one trial at a time when global capacity and marginal income justify it. Explicit `--max-targets 1` or `2` remains supported. |
 | `LIVE` / `WARMUP` / `TRIAL` | Recent Hacks are completing / waiting for initial landings / evaluating a newly admitted second target. |
 | `waiting for two productive minutes` | Adds each safely completed batch's own plan period until it reaches 120 seconds, and requires a recent Hack. Generation swaps preserve earned progress; deferrals can make this take longer than two wall-clock minutes. |
 | `shared launch budget / fragmented batch` | A complete batch still exceeds the process-launch budget after retrying placement on fewer hosts. Free RAM does not remove this limit. |
@@ -149,10 +149,10 @@ can launch more work.
 | Rebuild or deferral counts | Cumulative history. Check the current reason and whether the counts are still increasing. |
 
 **Why might n00dles be the second target?** An empty slot seeks additional income.
-With the default threshold, its candidate model needs to reach 25% of the primary
-target's model; it does not have to beat the primary. Already-prepared targets can
-start sooner. Once both targets are stable, promotion can replace the weaker one
-with a better prepared target. See [target selection and hot swaps](docs/jit-hot-swap.md).
+With the default threshold, its candidate model needs to reach 25% of existing
+modeled income (the primary model in explicit two-target mode). Already-prepared
+targets can start sooner. Once all slots are occupied and stable, promotion can
+replace the weakest lane. See [elastic throughput](docs/elastic-throughput.md).
 
 Formula, skill, and fleet-capacity changes use background plan tuning. If a safe
 overlap cannot fit, the old plan continues earning. Safety faults can still pause

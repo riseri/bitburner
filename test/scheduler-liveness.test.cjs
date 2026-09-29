@@ -176,6 +176,8 @@ test('historical RAM deferrals do not remain a current capacity alert',()=>{
     f.p.mode='LIVE';f.peer.mode='LIVE';f.p.stats.allocationFails=51;f.p.admissionReason='';
     f.api.renderSchedulerDashboard({...f.ns,pid:1,getHackingLevel:()=>510,getPortHandle:()=>status,
         clearLog(){},print:text=>logs.push(text)},f.pool);
-    assert.equal(logs.some(line=>line.includes('SCHEDULER CAPACITY')),false);
+    assert.equal(logs.some(line=>line.includes('SCHEDULER CAPACITY')),true);
+    assert.equal(status.peek().capacity.constraints.includes('RAM'),false);
+    assert.equal(status.peek().capacity.reasons.some(reason=>/RAM|allocation/i.test(reason)),false);
     assert.equal(logs.some(line=>line.includes('RAM failures')),false);
 });

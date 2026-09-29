@@ -214,6 +214,8 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 	for (const [pid] of state.jobs) if (!ns.isRunning(pid)) state.release(pid);
 	state.income = state.income.filter(s => s.time >= now - 60_000);
 	const enabled = pool.cfg.hackingPolicy?.mode === "XP", excluded = xpExcludedTargets(pool);
+	state.desiredRam = enabled ? pool.network.hosts.reduce((n, h) => n + h.maxRam, 0) *
+		Math.min(.70, Math.max(0, pool.cfg.hackingPolicy?.xpAllocation || 0)) : 0;
 	if ([...state.jobs.values()].some(job => excluded.has(job.target)) ||
 		[...pool.pipelines.values()].some(p => p.mode !== "RUNNING" || p.recovery || p.drain || p.shadow)) {
 		reclaimXpRam(ns, state);
@@ -234,6 +236,7 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 	const hosts = xpCapacity(ns, pool.network, cfg).map(host => ({ ...host,
 		free: Math.min(host.free, pool.api.availableRam(ns, host, cfg, pool.running,
 			pool.reservations, now, Infinity, pool.foreign)) })).filter(h => h.free > 0);
+	state.ramConstrained = Boolean(state.choice) && hosts.reduce((n, h) => n + h.free, 0) + 1 < state.desiredRam;
 	if (!hosts.length) {
 		state.status = "WAITING_RAM"; state.reason = "no RAM left after money reservations";
 		state.samples.length = 0; state.cycle = null; return;
@@ -258,6 +261,7 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 		state.choice = selected; state.scan = null; state.nextScore = now + options.rescoreMs;
 	}
 	if (!state.choice) { state.status = "WAITING_TARGET"; state.reason = "no independent, usable XP target"; return; }
+	state.ramConstrained = hosts.reduce((n, h) => n + h.free, 0) + 1 < state.desiredRam;
 	let server;
 	try { server = ns.getServer(state.choice.name); } catch { server = null; }
 	if (!server || !validXpServer(server, ns.getHackingLevel())) {

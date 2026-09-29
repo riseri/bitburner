@@ -4,13 +4,14 @@ import { intelligenceSessionActive } from "lib/intelligence-session.js";
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { loadTelemetry, recordTelemetry, summarizeTelemetry } from "lib/telemetry.js";
-import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime, renderSchedulerCapacity } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
 import { pathFromHome, singularityAvailable, resetEpoch } from "lib/progression-protocol.js";
 import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget, selectedServices, darknetActivation } from "lib/service-catalog.js";
 import { starterHosts, starterWorkers, stopStarterPool, tickStarterPool } from "lib/starter-pool.js";
+import { targetLimit } from "lib/target-limit.js";
 
 const HOME = "home";
 const SUPERVISOR = "supervisor.js";
@@ -32,7 +33,7 @@ const CONTRACT_SELFTEST = "contract-selftest.js";
 export async function main(ns) {
 	const flags = ns.flags([
 		["background-prep", true],
-		["max-targets", 2],
+		["max-targets", "auto"],
 		["dashboard-details", false],
 		["contracts", true],
 		["progression", true],
@@ -168,9 +169,9 @@ export async function main(ns) {
 		await runOnce(ns, CONTRACT_SELFTEST);
 	}
 
-	if (![1, 2].includes(Number(flags["max-targets"]))) throw new Error("max-targets must be 1 or 2");
+	targetLimit(flags["max-targets"]);
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
-	if (Number(flags["max-targets"]) !== 2) daemonArgs.push("--max-targets", Number(flags["max-targets"]));
+	daemonArgs.push("--max-targets", flags["max-targets"]);
 	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
 	if (cfg.shareEnabled) daemonArgs.push("--fleet-share", true);
 	const budget = supervisorRamBudget(ns, cfg, supervisorCapabilities(ns));
@@ -655,6 +656,7 @@ function render(ns, state) {
 		dashboardRow(ns, "Savings", goal.error || `${goal.label}: ${cash(funds)} / ${cash(goal.floor)} | ${funds >= goal.floor ? "FUNDED" : eta === null ? "ETA unknown" : `~${Math.ceil(eta)}s at gross hack income`}`);
 	}
 	if (fleet?.cloud?.investment) dashboardRow(ns, "RAM investment", fleet.cloud.investment);
+	renderSchedulerCapacity(ns, daemon?.capacity, cfg.dashboardDetails);
 	if (cfg.telemetryError) dashboardRow(ns, "Telemetry", cfg.telemetryError);
 	else if (cfg.telemetrySummary) {
 		const report = cfg.telemetrySummary;

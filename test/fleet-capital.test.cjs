@@ -111,3 +111,53 @@ test('supervisor defaults to 8 GB cloud servers and retains explicit sizing',()=
         assert.equal(service.args[service.args.indexOf('--cloud-min-ram')+1],size??8);
     }
 });
+
+for(const limitingFactor of ['TARGET_SLOTS','BATCH_RATE','LAUNCH_RATE','WORKER_LIMIT','RECOVERY','NO_PROFITABLE_TARGET']) {
+    test(`cloud retains even surplus capital when ${limitingFactor} cannot be solved with RAM`,async()=>{
+        const f=fixture();f.world.names=['cloud-00'];f.world.cash=1e9;
+        f.scheduler({capacity:{limitingFactor,constraints:[limitingFactor]}});
+        await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+        assert.equal(f.actions.length,0);assert.equal(f.state.capitalRequest,null);
+        assert.match(f.state.investment,new RegExp(limitingFactor));
+    });
+}
+test('RAM telemetry allows a justified cloud investment',async()=>{
+    const f=fixture();f.world.names=['cloud-00'];f.world.limit=1;f.world.cash=20000;
+    f.scheduler({capacity:{limitingFactor:'RAM',constraints:['RAM']}});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);assert.equal(f.actions.length,1);
+});
+test('XP RAM pressure funds useful capacity under a cash recovery bound, without exact XP formulas',async()=>{
+    const f=fixture();f.world.names=['cloud-00'];f.world.limit=1;f.world.cash=20000;
+    f.objective({limitingResource:'hacking',moneyCovered:true});
+    const xp={target:'xp-target',desiredRam:128,allocatedRam:32,constrained:true};
+    f.scheduler({capacity:{limitingFactor:'XP_RAM',constraints:['XP_RAM'],xp}});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);assert.equal(f.actions.length,1);
+    assert.match(f.state.investment,/XP pipeline is RAM constrained/);
+    xp.allocatedRam=128;xp.constrained=false;f.clock.now+=180001;
+    f.objective({limitingResource:'hacking',moneyCovered:true});
+    f.scheduler({capacity:{limitingFactor:'NONE',constraints:[],xp}});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);assert.equal(f.actions.length,1);
+    assert.match(f.state.investment,/no usable XP RAM pressure/);
+});
+test('prepared capacity alone does not justify cloud RAM unless preparation is constrained',()=>{
+    const api=loadScript('lib/fleet-economics.js',new Clock());
+    assert.equal(api.fleetCapacityPolicy({capacity:{limitingFactor:'PREPARATION',preparation:{constrained:false}}}).ok,false);
+    assert.equal(api.fleetCapacityPolicy({capacity:{limitingFactor:'PREPARATION',preparation:{constrained:true}}}).ok,true);
+    assert.equal(api.fleetCapacityPolicy({capacity:{limitingFactor:'RAM',constraints:['RAM','TARGET_SLOTS']}}).ok,true,
+        'a target ceiling does not prevent RAM from helping existing RAM-starved lanes');
+    assert.equal(api.fleetCapacityPolicy({capacity:{limitingFactor:'RAM',constraints:['RAM','NO_PROFITABLE_TARGET']}}).ok,true,
+        'an existing lane can need RAM even without another profitable candidate');
+});
+test('purchase rechecks scheduler and installation after the live cost quote',async()=>{
+    for(const reset of [false,true]) {
+        const f=fixture();f.world.names=['cloud-00'];f.world.cash=20000;f.scheduler({capacity:{limitingFactor:'RAM'}});
+        const quote=f.ns.cloud.getServerUpgradeCost;
+        f.ns.cloud.getServerUpgradeCost=(...args)=>{
+            if(reset) f.objective({resetImminent:true});
+            else f.scheduler({capacity:{limitingFactor:'TARGET_SLOTS'}});
+            return quote(...args);
+        };
+        await f.fleet.executeInvestment(f.ns,f.cfg,f.state,{name:'cloud-00',ram:64,added:32,cost:3200});
+        assert.equal(f.actions.length,0);assert.match(f.state.investment,reset?/imminent/:/TARGET_SLOTS/);
+    }
+});

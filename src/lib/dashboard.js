@@ -3,6 +3,24 @@
 const DASHBOARD_WIDTH = 78;
 const LABEL_WIDTH = 14;
 
+export function renderSchedulerCapacity(ns, capacity, details = false) {
+    if (!capacity) return;
+    const c = capacity, ram = n => n >= 1048576 ? `${(n/1048576).toFixed(2)} PB` : n >= 1024 ? `${(n/1024).toFixed(2)} TB` : `${n.toFixed(2)} GB`;
+    dashboardSection(ns, "Scheduler capacity");
+    dashboardRow(ns, "Limit", c.limitingFactor);
+    dashboardRow(ns, "Targets", `${c.targets.active} / ${c.targets.mode === "auto" ? `AUTO (max ${c.targets.limit})` : c.targets.limit}`);
+    dashboardRow(ns, "Worker RAM", `${ram(c.ram.used)} / ${ram(c.ram.total)} (${(100*c.ram.utilization).toFixed(1)}%)`);
+    dashboardRow(ns, "Batch / launch", `${c.batchRate.used.toFixed(2)} / ${c.batchRate.limit.toFixed(2)} | ${c.launches.recent} / ${c.launches.limit}`);
+    dashboardRow(ns, "Workers", `${c.workers.committed} / ${c.workers.limit}`);
+    dashboardRow(ns, "XP pressure", c.xp.constrained ? `${ram(c.xp.allocatedRam)} / ${ram(c.xp.desiredRam)} desired` : "none");
+    if (c.targets.next) dashboardRow(ns, "Next candidate", c.targets.next.name);
+    if (c.admission) {
+        dashboardRow(ns, "Admission", `${c.admission.decision} | ${c.admission.candidate || c.admission.reason}`);
+        if (c.admission.marginalIncome > 0) dashboardRow(ns, "Marginal model", `+$${Math.round(c.admission.marginalIncome).toLocaleString()}/s | ${c.admission.expectedLanes} lanes`);
+    }
+    if (details) for (const reason of c.reasons) dashboardRow(ns, "Constraint", reason);
+}
+
 export function dashboardFit(value, width) {
 	const text = String(value ?? "n/a").replace(/\x1b\[[0-9;]*m/g, "");
 	return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 3))}...`;
