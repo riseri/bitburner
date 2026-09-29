@@ -86,6 +86,7 @@ function supervisorFixture(node) {
     const ns = { args: [], pid: 1, flags: pairs => Object.fromEntries(pairs.map(([name, value]) => [name, readArgument(ns.args, `--${name}`, value)])), getHostname: () => 'home',
         disableLog() {}, clearLog() {}, print: line => logs.push(String(line)), tprint() {}, scan: () => [], ps: () => [...processes.values()],
         ui: { openTail: id => uiCalls.push(['open', id]), windowSize: () => [1024, 768],
+            setTailFontSize: (...args) => uiCalls.push(['font', ...args]),
             moveTail: (...args) => uiCalls.push(['move', ...args]), resizeTail: (...args) => uiCalls.push(['resize', ...args]) },
         getResetInfo: () => reset, hasTorRouter: () => false, getServerMoneyAvailable: () => 1e6,
         fileExists: file => file === 'DarkscapeNavigator.exe' ? navigator : true,
@@ -236,7 +237,7 @@ test('supervisor tail opens in 8 GB starter mode before a daemon can fit', async
     assert.equal(f.launches.length, 0);
 });
 
-for (const failure of ['missing-ui', 'openTail', 'windowSize', 'resizeTail', 'moveTail']) {
+for (const failure of ['missing-ui', 'openTail', 'windowSize', 'setTailFontSize', 'resizeTail', 'moveTail']) {
     test(`UI failure (${failure}) neither interrupts services nor retries every tick`, async () => {
         const f = supervisorFixture(5);
         let attempts = 0;
@@ -260,6 +261,9 @@ test('dashboard initialization is idempotent and layout waits for mounting, then
     }
     assert.deepEqual(f.uiCalls, [['open', 1], ['open', 42]], 'layout is deferred');
     await f.clock.runUntil(f.clock.now + 50);
+    assert.equal(f.uiCalls.length, 2, 'no asynchronous UI callbacks');
+    f.api.finishDashboardLayout(f.ns, state);
+    f.api.finishDashboardLayout(f.ns, state);
     const sizes = f.uiCalls.filter(c => c[0] === 'resize');
     const positions = f.uiCalls.filter(c => c[0] === 'move');
     assert.equal(sizes.length, 2);
@@ -269,6 +273,50 @@ test('dashboard initialization is idempotent and layout waits for mounting, then
         assert.ok(positions[i][2] + sizes[i][2] + 40 <= 480);
     }
     assert.ok(positions[0][1] + sizes[0][1] <= positions[1][1]);
+});
+
+test('auto layout fits detailed text at readable desktop sizes without making tall panes', () => {
+    for (const [viewportWidth, viewportHeight] of [[1523, 1291], [1920, 1080], [1366, 768]]) {
+        const f = supervisorFixture(5);
+        f.ns.ui.windowSize = () => [viewportWidth, viewportHeight];
+        f.api.layoutDashboard(f.ns, 1, 0);
+        f.api.layoutDashboard(f.ns, 42, 1);
+        const sizes = f.uiCalls.filter(c => c[0] === 'resize');
+        const fonts = f.uiCalls.filter(c => c[0] === 'font');
+        const positions = f.uiCalls.filter(c => c[0] === 'move');
+        for (let i = 0; i < 2; i++) {
+            assert.ok(fonts[i][1] >= 12 && fonts[i][1] <= 14);
+            assert.ok(sizes[i][1] >= 78 * fonts[i][1] * 0.62 + 40, '78 columns plus scrollbar fit');
+            assert.ok(sizes[i][2] <= 560 && sizes[i][2] <= viewportHeight * 0.7);
+            assert.ok(positions[i][1] + sizes[i][1] <= viewportWidth);
+        }
+        assert.ok(positions[0][1] + sizes[0][1] <= positions[1][1]);
+    }
+});
+
+test('dashboard layout never calls Netscript while the supervisor is sleeping', async () => {
+    const f = supervisorFixture(5), violations = [];
+    let sleeping = false, ticks = 0;
+    // Like the game, record death before throwing: catching the error cannot undo it.
+    for (const [name, fn] of Object.entries(f.ns.ui)) {
+        f.ns.ui[name] = (...args) => {
+            if (sleeping) {
+                violations.push(name);
+                throw new Error('Concurrent calls to Netscript functions are not allowed');
+            }
+            return fn(...args);
+        };
+    }
+    f.ns.sleep = async ms => {
+        sleeping = true;
+        await f.clock.runUntil(f.clock.now + ms);
+        sleeping = false;
+        if (++ticks === 3) throw new Error('end fixture');
+    };
+    await assert.rejects(f.api.main(f.ns), /end fixture/);
+    assert.deepEqual(violations, []);
+    assert.equal(f.uiCalls.filter(c => c[0] === 'resize').length, 2);
+    assert.deepEqual(f.killed, []);
 });
 
 for (const args of [[], ['--open-dashboards', false, '--dashboard-details', false, '--dashboard-layout', 'none']]) {

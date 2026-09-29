@@ -74,20 +74,25 @@ attempts: closing or moving a log yourself is respected on later ticks. A daemon
 replacement opens once under its new PID and receives its initial layout.
 
 `--dashboard-layout auto` (default) sizes the logs to the viewport through
-`ns.ui.windowSize()`, capped at 780 by 720 pixels each. Small displays get smaller
-panes; exceptionally narrow displays may overlap to keep title bars reachable.
+`ns.ui.windowSize()`. Width fits the 78-column dashboard with room for the scrollbar,
+using an estimated monospace character width. Auto layout sets a 14-pixel tail font
+(down to 12 on smaller displays) and caps height at 560 pixels or 70% of the viewport,
+whichever is smaller. Details remain scrollable; the full report cannot fit in a
+short pane all at once. Small displays get smaller panes and may wrap text;
+exceptionally narrow displays may overlap to keep title bars reachable.
 If viewport information is unavailable, layout assumes 1024 by 768 pixels.
-Layout runs once after a short cosmetic delay to let each tail mount.
+Layout runs once after the supervisor's next normal awaited sleep (including in
+starter mode), letting each tail mount without concurrent Netscript calls.
 
-Use `--dashboard-layout none` to open logs without moving or resizing them.
+Use `--dashboard-layout none` to open logs without changing position, size, or font.
 `--open-dashboards false` disables both opening and layout. Unsupported UI APIs,
 disappearing processes, and positioning errors are silently ignored; automation
 continues with no retries or warning spam. These options and explicit detail
 opt-outs survive the existing version-2 bootstrap argument persistence. Older
 saved arguments without these flags receive the current defaults.
 
-Only `ns.ui.openTail`, `ns.ui.windowSize`, `ns.ui.resizeTail`, and `ns.ui.moveTail`
-are new Netscript API references in the supervisor dependency tree. All four are
+The layout uses `ns.ui.openTail`, `ns.ui.windowSize`, `ns.ui.resizeTail`,
+`ns.ui.moveTail`, and `ns.ui.setTailFontSize`. All five are
 zero-RAM in the [official RAM cost table](https://github.com/bitburner-official/bitburner-src/blob/stable/src/Netscript/RamCostGenerator.ts).
 Expected added RAM is 0 GB; no worker APIs or advanced capabilities are added.
 The installed game's RAM calculator and live window appearance have not been

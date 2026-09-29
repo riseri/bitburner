@@ -62,7 +62,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--background-prep` | `true` | Prepare promising targets while the current target earns, subject to health and resource gates |
 | `--dashboard-details` | `true` | Show detailed diagnostics; forwarded to a newly started daemon; adopted daemons keep their arguments |
 | `--open-dashboards` | `true` | Open only the supervisor and active daemon logs once per PID; `false` also disables layout |
-| `--dashboard-layout` | `auto` | Fit the two logs side by side; `none` opens them without moving or resizing |
+| `--dashboard-layout` | `auto` | Fit the two logs side by side with readable text and bounded height; `none` preserves position, size, and font |
 | `--go-takeover` | `true` | Finish an existing ordinary IPvGO board on startup; set false when playing manually |
 | `--diagnostics` | `true` | Run `doctor.js` once at startup; show warnings |
 | `--augmentations` | `true` | Refresh advice about once a minute; requires BN4 or SF4 level 1+ |

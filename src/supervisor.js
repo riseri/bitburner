@@ -169,7 +169,7 @@ export async function main(ns) {
 
     if (cfg.savingsMode === "fixed") await writeSavings(ns, Number(flags["save-amount"]), flags["save-label"], flags["save-target"]);
     else if (cfg.savingsMode === "none") await writeSavings(ns, 0, "No savings goal");
-	await runStarterMode(ns, cfg);
+	await runStarterMode(ns, cfg, dashboardUi);
 
 	if (cfg.contractSelftest && ns.fileExists(CONTRACT_SELFTEST, HOME)) {
 		await runOnce(ns, CONTRACT_SELFTEST);
@@ -267,6 +267,7 @@ export async function main(ns) {
 		if (telemetry) cfg.telemetrySummary = summarizeTelemetry(telemetry.samples, Date.now() - 3600000);
 		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, darknetStatus, stockAccess: stockGate });
 		await ns.sleep(cfg.interval);
+		finishDashboardLayout(ns, dashboardUi);
 	}
 }
 
@@ -394,7 +395,7 @@ function preemptLowerPriorityServices(ns, owner, lowerServices, shortfall) {
 }
 
 // Borrow free network RAM while home cannot yet hold the full money engine.
-async function runStarterMode(ns, cfg = {}) {
+async function runStarterMode(ns, cfg = {}, dashboardUi = null) {
 	const autoHome = cfg.augmentationActions && cfg.progression && cfg.progressionActions && bn4Route(ns.getResetInfo());
     const coreFiles = [DAEMON, FLEET, ...(cfg.progression ? [PROGRESSION] : [])];
     const helperRam = autoHome ? ns.getScriptRam("home-upgrade.js", HOME) : 0;
@@ -433,6 +434,7 @@ async function runStarterMode(ns, cfg = {}) {
         if (cfg.homeUpgradeStatus) dashboardRow(ns, "Home upgrade", cfg.homeUpgradeStatus);
 		dashboardRow(ns, "Next", autoHome ? "Saving for automatic home RAM upgrades; remote starter workers keep earning" : "Upgrade home RAM manually; full automation starts when enough RAM is free");
 		await ns.sleep(5_000);
+		finishDashboardLayout(ns, dashboardUi);
 	}
 }
 
@@ -1463,9 +1465,15 @@ function openDashboard(ns, cfg, state, pid, column) {
 	try {
 		ns.ui.openTail(pid);
 		if (cfg.dashboardLayout !== "auto") return;
-		// Let the tail mount before sizing it; never delay the automation loop for UI.
-		setTimeout(() => layoutDashboard(ns, pid, column), 50);
+		// The regular awaited sleep lets tails mount. Never call Netscript from a
+		// timer while sleep is pending: the game kills the script even if caught.
+		(state.pending ??= []).push({ pid, column });
 	} catch { /* Missing UI APIs or a disappearing process cannot stop automation. */ }
+}
+
+function finishDashboardLayout(ns, state) {
+	const pending = state?.pending?.splice(0) || [];
+	for (const { pid, column } of pending) layoutDashboard(ns, pid, column);
 }
 
 function layoutDashboard(ns, pid, column) {
@@ -1477,10 +1485,16 @@ function layoutDashboard(ns, pid, column) {
 		}
 	} catch { /* Conservative defaults for versions without viewport information. */ }
 	const margin = 8, gap = 8;
-	const width = Math.max(150, Math.min(780, Math.floor((viewportWidth - 2 * margin - gap) / 2)));
-	const height = Math.max(30, Math.min(720, viewportHeight - 2 * margin - 40));
+	const availableWidth = Math.floor((viewportWidth - 2 * margin - gap) / 2);
+	// Fit the shared 78-column text plus padding/scrollbar at a readable font size.
+	// Font metrics vary, so allow a little more than the usual 0.6-em monospace cell.
+	const fontSize = Math.max(12, Math.min(14, Math.floor((availableWidth - 40) / (78 * 0.62))));
+	const width = Math.max(150, Math.min(Math.ceil(78 * 0.62 * fontSize) + 40, availableWidth));
+	// Details scroll inside a bounded pane instead of consuming the whole display.
+	const height = Math.max(33, Math.min(560, Math.floor(viewportHeight * 0.7), viewportHeight - 2 * margin - 40));
 	// On very narrow screens allow overlap while keeping both title bars reachable.
 	const x = Math.max(0, Math.min(margin + column * (width + gap), viewportWidth - width - margin));
+	try { ns.ui.setTailFontSize(fontSize, pid); } catch { /* Cosmetic only. */ }
 	try { ns.ui.resizeTail(width, height, pid); } catch { /* Cosmetic only. */ }
 	try { ns.ui.moveTail(x, margin, pid); } catch { /* Cosmetic only. */ }
 }
