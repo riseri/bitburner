@@ -19,6 +19,20 @@ export function renderSchedulerCapacity(ns, capacity, details = false) {
         if (c.admission.marginalIncome > 0) dashboardRow(ns, "Marginal model", `+$${Math.round(c.admission.marginalIncome).toLocaleString()}/s | ${c.admission.expectedLanes} lanes`);
     }
     if (details) for (const reason of c.reasons) dashboardRow(ns, "Constraint", reason);
+    if (details && c.homeGw) {
+        const h = c.homeGw;
+        dashboardSection(ns, "Home G/W");
+        dashboardRow(ns, "State", `${h.state} | ${h.reason}`);
+        if (h.enabled) {
+            dashboardRow(ns, "Cores", `${h.cores} / ${h.maxCores} | ${h.coreBonus.toFixed(3)}x`);
+            dashboardRow(ns, "G/W RAM", `${ram(h.runningRam)} active | ${ram(h.safeRam)} safe free`);
+            dashboardRow(ns, "Protected", `${ram(h.unrelatedRam)} services/other | ${ram(h.protectedRam)} reserve`);
+            dashboardRow(ns, "Share", `${ram(h.reclaimableShareRam)} reclaimable`);
+            dashboardRow(ns, "Held", `${ram(h.temporalRam)} temporal reservations`);
+            dashboardRow(ns, "Usage", `${((h.recentUsage?.batchFraction || 0)*100).toFixed(1)}% recent active batches | ${(h.recentUsage?.ramSeconds || 0).toFixed(0)} GB-seconds`);
+            dashboardRow(ns, "Effect", `${(h.threadsSaved || 0).toFixed(1)} equivalent remote threads saved`);
+        }
+    }
 }
 
 export function dashboardFit(value, width) {

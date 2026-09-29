@@ -1,3 +1,4 @@
+import { gwHosts, homeLaunchFits, homeProtectedRam, observeHomeCapacity, prepareHomeLaunch } from "lib/home-capacity.js";
 import { formulaGroup } from "lib/formulas.js";
 import { HACKING_POLICY, refreshHackingPolicy, hackingXpProgress, renderHackingPolicy } from "lib/hacking-policy.js";
 import { PORTS } from "lib/ports.js";
@@ -9,12 +10,13 @@ import { MILESTONE_BALANCE, boundedXpAllocation, milestoneKey, observeMilestoneR
 export const XP_WORKERS = Object.freeze({ H: "jit-hack.js", G: "background-grow.js", W: "background-weaken.js" });
 
 export function xpCapacity(ns, network, cfg, running = new Map()) {
-	return network.hosts.filter(h => h.name !== "home").map(host => {
+	observeHomeCapacity(ns, cfg, running);
+	return gwHosts(network.hosts, cfg).map(host => {
 		try {
 			const owned = [...running.values()].filter(job => job.host === host.name).reduce((n, job) => n + job.ram, 0);
-			const shareRam = cfg.fleetShare ? ns.ps(host.name).filter(p => p.filename === "share-worker.js")
+			const shareRam = (cfg.fleetShare || host.name === "home") ? ns.ps(host.name).filter(p => p.filename === "share-worker.js")
 				.reduce((sum, p) => sum + p.threads * ns.getScriptRam(p.filename, host.name), 0) : 0;
-			const free = Math.max(0, Math.min(host.maxRam, host.maxRam - ns.getServerUsedRam(host.name) + owned + shareRam));
+			const free = Math.max(0, Math.min(host.maxRam, host.maxRam - ns.getServerUsedRam(host.name) + owned + shareRam - (host.name === "home" ? homeProtectedRam(cfg) : 0)));
 			const ram = Object.fromEntries(Object.entries(XP_WORKERS).map(([action, file]) => [action, ns.getScriptRam(file, host.name)]));
 			return { ...host, free, ram };
 		} catch { return null; } // Fleet removal can race the last published network.
@@ -23,6 +25,7 @@ export function xpCapacity(ns, network, cfg, running = new Map()) {
 }
 
 function slots(host, action) {
+	if (action === "H" && (host.name === "home" || host.allowHack === false)) return 0;
 	return Number.isFinite(host.ram[action]) && host.ram[action] > 0 ? Math.floor(host.free / host.ram[action]) : 0;
 }
 
@@ -142,9 +145,10 @@ function launchXpWave(ns, ctx, choice, hosts, running, serial, fallback, options
 		const id = `bgprep-xp-${ns.pid}-${serial}-${host.name}`, now = Date.now();
 		const args = action === "H" ? [choice.name, now + duration + options.tickMs, id, cfg.port, "PREP-H", id,
 			cfg.gap, 0, duration, now, 0, threads] : [choice.name, ns.pid, id];
-		ctx.reclaimShare?.(host.name);
+		if (host.name !== "home") ctx.reclaimShare?.(host.name);
 		let pid = 0;
-		try { pid = ns.exec(XP_WORKERS[action], host.name, threads, ...args); }
+		if (host.name === "home") prepareHomeLaunch(ns, cfg, threads * host.ram[action]);
+		try { pid = host.name === "home" && (action === "H" || !homeLaunchFits(ns, cfg, threads * host.ram[action])) ? 0 : ns.exec(XP_WORKERS[action], host.name, threads, ...args); }
 		catch { /* A removed worker host does not cancel work already launched elsewhere. */ }
 		if (pid) {
 			const job = { id, host: host.name, ram: threads * host.ram[action], target: choice.name, action, threads };
@@ -348,7 +352,7 @@ function publishFallbackStatus(ns, ctx, choice, running) {
 	const snapshot = { type: "jit-status", version: 2, pid: ns.pid, generatedAt: Date.now(), mode: "fallback",
 		policy, income60: 0, target: choice?.name || "",
 		earned: ctx.earned || 0, model: 0, pipelines: [],
-		usedRam: [...running.values()].reduce((n, job) => n + job.ram, 0),
+		usedRam: [...running.values()].filter(j => j.host !== "home").reduce((n, job) => n + job.ram, 0),
 		totalRam: ctx.network.hosts.reduce((n, h) => n + h.maxRam, 0), note: policy.reason };
 	const port = ns.getPortHandle(PORTS.JIT_STATUS); port.clear(); port.tryWrite(snapshot);
 	ns.clearLog(); dashboardTitle(ns, `JIT DAEMON :: FALLBACK :: hacking ${ns.getHackingLevel()}`);

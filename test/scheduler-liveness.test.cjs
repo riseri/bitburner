@@ -137,7 +137,7 @@ test('compact fallback cannot bypass peer launch reservations and rolls back bot
 });
 
 test('yielding tuner can choose a smaller genuinely admissible plan and rejects all-impossible cases',()=>{
-    const f=fixture();const host={name:'home',maxRam:131072,cores:6};
+    const f=fixture();const host={name:'remote',maxRam:131072,cores:6};
     const ns={getServerUsedRam:()=>0,weakenAnalyze:(t,c=1)=>t*.05*(1+(c-1)/16),
         hackAnalyzeSecurity:t=>t*.002,growthAnalyzeSecurity:t=>t*.004};
     const model={maxMoney:50e6,chance:1,hackPercent:.001,times:{H:1000,G:3200,W:4000},growthAnalyze:m=>Math.log(m)*100};

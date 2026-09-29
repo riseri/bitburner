@@ -234,7 +234,7 @@ function planFleetCapital(ns, cfg, state, names, limit, ramLimit, objective) {
         if (current > 0 && ram <= ramLimit) candidates.push({name, ram, added:current, cost:ns.cloud.getServerUpgradeCost(name, ram)});
     }
     const available = candidates.filter(c => Number.isFinite(c.cost) && c.cost > 0).sort((a,b) => a.cost-b.cost);
-    let selected = null, reason = "";
+    let selected = null, reason = "", economics = null;
     if (!names.length && !objective?.queuedDistinct?.length) {
         selected = available[0]; reason = "Bootstrap the first small cloud server";
     } else {
@@ -243,7 +243,7 @@ function planFleetCapital(ns, cfg, state, names, limit, ramLimit, objective) {
             now-snapshot.generatedAt > 15000 || !ns.isRunning(snapshot.pid)) return null;
         for (const candidate of available) {
             const evidence = evaluateFleetInvestment(snapshot,candidate.added,candidate.cost,Math.min(cfg.cloud.payback || 1800,300),objective);
-            if (evidence.ok) { selected=candidate; reason=`Productive cloud expansion: ${evidence.reason}`; break; }
+            if (evidence.ok && (!selected || evidence.payback < economics.payback)) { selected=candidate; economics={...evidence, resource:"cloud-ram", confidence:"conservative"}; reason=`Productive cloud expansion: ${evidence.reason}`; }
         }
     }
     if (!selected) return null;
@@ -255,7 +255,7 @@ function planFleetCapital(ns, cfg, state, names, limit, ramLimit, objective) {
     if (!epoch || !Number.isFinite(amount)) return null;
     return {version:1, producerPid:ns.pid, resetEpoch:epoch, generatedAt:Date.now(),
         target:fleetInvestmentTarget(selected), amount, priority:79, liquidity:false,
-        label:`Cloud RAM: ${formatRam(selected.added)}`, reason, candidate:selected};
+        label:`Cloud RAM: ${formatRam(selected.added)}`, reason, economics, candidate:selected};
 }
 
 function largestAffordablePurchaseRam(ns, minRam, ramLimit, budget) {

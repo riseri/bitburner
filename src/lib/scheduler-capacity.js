@@ -1,3 +1,4 @@
+import { homeCapacityStatus } from "lib/home-capacity.js";
 import { backgroundPrepJobs, backgroundPrepRam } from "lib/background-prep.js";
 
 // Pure projection of the scheduler's ledgers. No fleet scan or expensive APIs.
@@ -7,8 +8,8 @@ export function schedulerCapacity(pool, now = Date.now()) {
     const physical = pool.network.hosts.reduce((n, h) => n + h.maxRam, 0);
     const foreign = [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
     const total = Math.max(0, physical - foreign);
-    const running = [...pool.running.values()].reduce((n, c) => n + (c.ram || 0), 0);
-    const used = running + backgroundPrepRam(prepStates);
+    const running = [...pool.running.values()].filter(j => j.host !== "home").reduce((n, c) => n + (c.ram || 0), 0);
+    const used = running + backgroundPrepRam(prepStates) - backgroundPrepRam(prepStates, "home");
     const queued = lanes.reduce((n, p) => n + p.queue.length, 0);
     const prepWorkers = prepStates.reduce((n, s) => n + backgroundPrepJobs(s).length, 0);
     const committed = pool.running.size + queued + prepWorkers;
@@ -38,13 +39,14 @@ export function schedulerCapacity(pool, now = Date.now()) {
     if (!candidates.size && pool.nextReadyScan > now && !prep?.active && !pool.readyScan && rate < cfg.maxBatchRate)
         add("NO_PROFITABLE_TARGET", "latest ready-target scan found no additional profitable candidate");
     return { version: 1, limitingFactor: constraints[0] || "NONE", constraints, reasons, admission: pool.admission || null,
+        homeGw: homeCapacityStatus(pool),
         ram: { used, total, physical, foreign, utilization: total > 0 ? used / total : 0 },
         targets: { active: lanes.length, limit: cfg.maxTargets, mode: cfg.targetMode || "explicit", profitableInactive: candidates.size,
             next: next ? { name: next[0], expected: next[1] } : null },
         batchRate: { used: rate, limit: cfg.maxBatchRate, remaining: Math.max(0, cfg.maxBatchRate - rate) },
         launches: { recent, limit: cfg.maxLaunches },
         workers: { committed, running: pool.running.size, queued, preparation: prepWorkers, limit: cfg.maxWorkers },
-        xp: { desiredRam: desired, allocatedRam: allocated, constrained: xpConstrained, target: pool.xp?.choice?.name || "" },
+        xp: { action: pool.xp?.choice?.action || "", desiredRam: desired, allocatedRam: allocated, constrained: xpConstrained, target: pool.xp?.choice?.name || "" },
         preparation: { state: prep?.status || "DISABLED", ram: backgroundPrepRam(prep),
             constrained: prep?.status === "WAITING_RAM" || /RAM/.test(prep?.reason || "") },
         recovery: { lanes: lanes.filter(p => p.recovery || p.drain).length, ram: backgroundPrepRam(prepStates) - backgroundPrepRam(prep) },

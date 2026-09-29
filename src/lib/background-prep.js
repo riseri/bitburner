@@ -1,3 +1,4 @@
+import { gwHosts, homeLaunchFits, homeFreeNow, prepareHomeLaunch } from "lib/home-capacity.js";
 // Background preparation owns a distributed G/W wave, never a second JIT
 // controller. Per-PID RAM holds protect both current and future batches.
 import { formulaGrowThreads, formulaWeakenEffect, preparedHackingModel } from "lib/formulas.js";
@@ -237,11 +238,10 @@ export function* planBackgroundWave(ns, ctx, h) {
 		return value;
 	};
 	const hosts = [];
-	for (const host of ctx.network.hosts) {
-		if (host.name === "home") continue;
+	for (const host of gwHosts(ctx.network.hosts, ctx.cfg)) {
 		const logical = Math.max(0, ctx.spareRam(host));
-		if (logical >= perThread) ctx.reclaimShare?.(host.name);
-		const free = Math.max(0, ns.getServerMaxRam(host.name) - ns.getServerUsedRam(host.name));
+		if (host.name !== "home" && logical >= perThread) ctx.reclaimShare?.(host.name);
+		const free = host.name === "home" ? homeFreeNow(ns, ctx.cfg, true) : Math.max(0, ns.getServerMaxRam(host.name) - ns.getServerUsedRam(host.name));
 		hosts.push({ host, free, spare: Math.min(logical, free), need: need(host.cores || 1) });
 		// Capacity queries can walk many future reservations. Return control
 		// between hosts so planning, as well as exec, respects due money work.
@@ -280,18 +280,19 @@ function launchPrepWave(ns, ctx) {
 		// chunks resume on a later tick, without waiting a whole grow duration.
 		if (ctx.canLaunch && !ctx.canLaunch()) break;
 		const chunk = wave.pending.shift();
-		const host = ctx.network.hosts.find(h => h.name === chunk.host);
+		const host = gwHosts(ctx.network.hosts, ctx.cfg).find(h => h.name === chunk.host);
 		if (!host) continue;
 		const logical = ctx.spareRam(host);
-		if (logical >= wave.perThread) ctx.reclaimShare?.(host.name);
-		const free = Math.max(0, ns.getServerMaxRam(host.name) - ns.getServerUsedRam(host.name));
+		if (host.name !== "home" && logical >= wave.perThread) ctx.reclaimShare?.(host.name);
+		const free = host.name === "home" ? homeFreeNow(ns, ctx.cfg, true) : Math.max(0, ns.getServerMaxRam(host.name) - ns.getServerUsedRam(host.name));
 		const threads = Math.min(chunk.threads, Math.floor(Math.min(logical, free) / wave.perThread));
 		if (threads < chunk.threads) state.diagnostics.reasonForPartialAllocation = "capacity changed";
 		if (!(threads > 0)) continue;
 		const now = Date.now();
 		const duration = wave.phase === "W" ? ns.getWeakenTime(state.target) : ns.getGrowTime(state.target);
 		if (!(duration > 0) || !Number.isFinite(duration)) throw new Error("invalid prep action duration");
-		const pid = ns.exec(wave.script, host.name, threads, state.target, ns.pid, wave.id);
+		if (host.name === "home") prepareHomeLaunch(ns, ctx.cfg, threads * wave.perThread);
+		const pid = host.name === "home" && !homeLaunchFits(ns, ctx.cfg, threads * wave.perThread) ? 0 : ns.exec(wave.script, host.name, threads, state.target, ns.pid, wave.id);
 		if (!pid) {
 			state.failures++; state.diagnostics.reasonForPartialAllocation = "exec declined";
 			continue;

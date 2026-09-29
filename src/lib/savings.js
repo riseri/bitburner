@@ -23,7 +23,8 @@ export function readSavings(ns, spendingTarget = "") {
             return { ...goal, floor: 0, inactive: "Goal purchased" };
         }
         const fleet = goal.owner === "supervisor" && goal.target.startsWith("fleet:");
-        const authorizedPurchase = (program || goal.target === "TOR" || goal.target === "home:ram" || fleet) && spendingTarget === goal.target;
+        const homePerformance = goal.owner === "supervisor" && ["home:cores", "home:performance-ram"].includes(goal.target);
+        const authorizedPurchase = (program || goal.target === "TOR" || goal.target === "home:ram" || homePerformance || fleet) && spendingTarget === goal.target;
         return { ...goal, floor: authorizedPurchase ? 0 : goal.amount };
     } catch (error) {
         // Test/legacy hosts without file APIs have no configured goal.

@@ -399,8 +399,10 @@ function dashboardFixture() {
             candidate: { potential: 3_120_000_000, upperBound: true, prepMs: 2_700_000 },
             horizon: 7_200_000, active: { host: 'cloud-1', ram: 3080, finishAt: clock.now + 2_650_000 },
             failures: 0, preemptions: 0 } };
+    cfg.homeGw = { host: { name: 'home', cores: 8, maxRam: 32_768 }, cores: 8, unrelatedRam: 0 };
+    ns.getServerMaxRam = host => host === 'home' ? 32_768 : 26_214_400;
     const network = { rooted: 53, servers: Array(95).fill('server'),
-        hosts: [{ name: 'home', cores: 8, maxRam: 32_768 }, { name: 'cloud-1', cores: 1, maxRam: 26_214_400 }] };
+        hosts: [{ name: 'cloud-1', cores: 1, maxRam: 26_214_400 }] };
     const runtime = { capacity: 26_247_168, averageCoreBonus: 1.000017, plan: {
         expected: 580_340_000, batchRate: 1000 / 441, period: 441, steal: 0.4973, chance: 0.903,
         H: 147, estimatedG: 587, estimatedW1: 6, estimatedW2: 47, gEffective: 587,
@@ -502,7 +504,7 @@ test('background prep becomes the actionable next-target view instead of a ranki
     assert.equal(status.background, 'the-hub | WEAKEN | ETA 44m 10s');
     assert.match(status.prepHealth, /security \+88\.000/);
     assert.match(status.security, /^\+0\.278 \| 7\.278 \/ 7\.000/);
-    assert.match(status.ramOnline, /^207\.84 TB \/ 25\.03 PB/);
+    assert.match(status.ramOnline, /^207\.84 TB \/ 25\.00 PB/);
     assert.match(text, /Potential\s+\$3\.12b\/s upper bound/);
     assert.doesNotMatch(text, /AUTO TARGET RANKING/);
 

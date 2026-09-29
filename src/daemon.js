@@ -1,3 +1,5 @@
+import { gwHosts, observeHomeCapacity, homeLaunchFits, homeProtectedRam, prepareHomeLaunch } from "lib/home-capacity.js";
+import { homeCoreBonus } from "lib/home-mechanics.js";
 import { runTargetPipelines } from "lib/target-pipelines.js";
 import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets, renderSchedulerCapacity } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
@@ -118,6 +120,8 @@ export async function main(ns) {
 		},
 	};
 
+	cfg.homeGw = {};
+	observeHomeCapacity(ns, cfg);
 	cfg.backgroundPrep = createBackgroundPrep({
 		enabled: asBoolean(flags["background-prep"]),
 		maxRam: flags["prep-max-ram"], fraction: flags["prep-ram-fraction"],
@@ -1584,8 +1588,9 @@ async function launchPrepWave(
 			const chunk =
 				pending.shift();
 
+			if (chunk.host === HOME) prepareHomeLaunch(ns, cfg, chunk.ram);
 			const pid =
-				ns.exec(
+				chunk.host === HOME && (chunk.script === HACK || !homeLaunchFits(ns, cfg, chunk.ram)) ? 0 : ns.exec(
 					chunk.script,
 					chunk.host,
 					chunk.threads,
@@ -1686,7 +1691,12 @@ function* tuneTargetSteps(
 			running
 		);
 
-	profile.capacity = Math.min(profile.capacity, cfg.ramBudget ?? Infinity);
+	// Separate H ceiling; the shared allocator proves asymmetric feasibility.
+	const hackCapacity = profile.capacity;
+	const homeCapacity = cfg.homeGw?.host ? baseHostCapacity(ns, cfg.homeGw.host, cfg, running) : 0;
+	profile.averageCoreBonus = (profile.capacity * profile.averageCoreBonus + homeCapacity * coreBonus(cfg.homeGw?.cores || 1)) / Math.max(1, profile.capacity + homeCapacity);
+	profile.capacity += homeCapacity;
+	profile.capacity = Math.min(profile.capacity, (cfg.ramBudget ?? Infinity) + homeCapacity);
 	if (
 		profile.capacity <= 0
 	) {
@@ -1906,7 +1916,7 @@ function* tuneTargetSteps(
 		// so tiny fleets can still run a batch larger than that allowance.
 		const batchRam = H * cfg.ram.H + estimatedG * cfg.ram.G +
 			(estimatedW1 + estimatedW2) * cfg.ram.W;
-		if (batchRam >= profile.capacity) continue;
+		if (H * cfg.ram.H > hackCapacity || batchRam >= profile.capacity) continue;
 		const headroom = Math.min(2 * batchRam, profile.capacity * 0.5);
 		const ramLimitedPeriod = ramTime / (profile.capacity - headroom);
 
@@ -1976,7 +1986,8 @@ function* tuneTargetSteps(
 
 				ramTime,
 			};
-			if (!acceptPlan || acceptPlan(candidate)) best = candidate;
+			const fits = !cfg.homeGw?.host || reserveBatch(ns, target, "home-probe", Date.now() + Math.max(...Object.values(times)) + cfg.lead, candidate, hosts, cfg, [], running);
+			if (fits && (!acceptPlan || acceptPlan(candidate))) best = candidate;
 		}
 	}
 
@@ -2375,7 +2386,7 @@ function allocateHack(
 	const chunks = [];
 
 	const candidates =
-		hosts
+		hosts.filter(h => h.name !== HOME && h.allowHack !== false)
 			.map(
 				host => ({
 					host,
@@ -2566,7 +2577,7 @@ function allocateGrow(
 	let actualThreads = 0;
 
 	const candidates =
-		hosts
+		gwHosts(hosts, cfg)
 			.map(
 				host => {
 					const start =
@@ -2726,7 +2737,7 @@ function allocateWeaken(
 	let delivered = 0;
 
 	const candidates =
-		hosts
+		gwHosts(hosts, cfg)
 			.map(
 				host => {
 					const start =
@@ -3227,6 +3238,13 @@ function baseHostCapacity(
 	foreignUsedByHost = null
 ) {
 	const prepRam = backgroundPrepRam(cfg.prepStates || cfg.backgroundPrep, host.name);
+	if (host.name === HOME) {
+		const state = cfg.homeGw;
+		if (!state?.host) return 0;
+		const used = ns.getServerUsedRam(HOME);
+		const unrelated = Math.max(state.unrelatedRam || 0, used - runningRamForHost(running, HOME) - prepRam - (state.reclaimableShareRam || 0));
+		return Math.max(0, ns.getServerMaxRam(HOME) - homeProtectedRam(cfg) - unrelated - prepRam);
+	}
 	const ownRunning = runningRamForHost(running, host.name) + prepRam;
 
 	const staticUsed =
@@ -3455,7 +3473,7 @@ function workerFleetCapacity(
 	hosts,
 	cfg
 ) {
-	return hosts.reduce(
+	return hosts.filter(host => host.name !== HOME).reduce(
 		(sum, host) =>
 			sum +
 			Math.max(
@@ -3523,7 +3541,7 @@ function poolProfile(
 
 	for (
 		const host
-		of hosts
+		of hosts.filter(host => host.name !== HOME)
 	) {
 		const available =
 			baseHostCapacity(
@@ -3554,21 +3572,7 @@ function poolProfile(
 	};
 }
 
-function coreBonus(
-	cores
-) {
-	return (
-		1 +
-		(
-			Math.max(
-				1,
-				cores
-			) -
-			1
-		) /
-		16
-	);
-}
+function coreBonus(cores) { return homeCoreBonus(cores); }
 
 /* =========================================================
 	 WORKER EVENTS / SAFETY
@@ -3999,11 +4003,12 @@ function launchDueChunks(ns, queue, target, cfg, batches, stats, running, runnin
 			continue;
 		}
 		chunk.launchIssued = true;
-		const launch = () => ns.exec(chunk.script, chunk.host, chunk.threads,
+		const launch = () => (chunk.host === HOME && (chunk.script === HACK || !homeLaunchFits(ns, cfg, chunk.ram))) ? 0 : ns.exec(chunk.script, chunk.host, chunk.threads,
 			target, chunk.landAt, chunk.batchId, cfg.port, chunk.phase, chunk.chunkId,
 			Math.max(20, (batch.cfg || cfg).gap), cfg.controlPort, chunk.duration, chunk.launchAt,
 			chunk.stealBudget ?? 0, chunk.threads, chunk.epoch || "", chunk.generation ?? 0);
-		reclaimFleetShare(ns, chunk.host);
+		if (chunk.host === HOME) prepareHomeLaunch(ns, cfg, chunk.ram);
+		else reclaimFleetShare(ns, chunk.host);
 		let pid = launch();
 		if (!pid && reclaimXpRam(ns, cfg.xpPipeline, chunk.host)) pid = launch();
 		if (!pid && reclaimPrepRam(ns, cfg, chunk.host)) pid = launch();
@@ -4428,7 +4433,7 @@ function renderDashboard(
 		dashboardSection(ns, "Fleet diagnostics");
 		row("Network", `${network.rooted}/${network.servers.length} rooted | ${network.hosts.length} worker hosts`);
 		row("Cloud", `${cloudState.count}/${cloudState.limit} servers | ${formatRam(cloudState.totalRam)}${cloudState.nextAction === "fleet maxed" ? " | MAXED" : ""}`);
-		const home = network.hosts.find(host => host.name === HOME);
+		const home = cfg.homeGw?.host;
 		row("Core bonus", `${home ? `home ${home.cores} (${coreBonus(home.cores).toFixed(3)}x)` : "home n/a"} | fleet ${runtime.averageCoreBonus.toFixed(3)}x RAM-weighted`);
 		row("Cloud RAM", `${formatRam(cloudState.minRam)} min | ${formatRam(cloudState.maxRam)} max | ${formatRam(cloudState.ramLimit)} cap`);
 		row("Cloud spend", `${cash(cloudState.spent)} | ${cloudState.purchases} buys | ${cloudState.upgrades} upgrades | ${(cfg.cloud.cashReserve * 100).toFixed(0)}% reserve`);
@@ -4504,7 +4509,7 @@ function renderSchedulerDashboard(ns, pool) {
 	const backgroundRam = backgroundPrepRam(background);
 	const repairRam = Math.max(0, prepRam - backgroundRam);
 	const backgroundEta = background?.active ? Math.max(0, background.active.finishAt - now) : 0;
-	const usedRam = totalRunningRam(pool.running) + prepRam + [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
+	const usedRam = [...pool.running.values()].filter(j => j.host !== HOME).reduce((n,j) => n + j.ram, 0) + prepRam - backgroundPrepRam(pool.cfg.prepStates || pool.cfg.backgroundPrep, HOME) + [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
 	const snapshot = {
 		type: "jit-status", version: 2, pid: ns.pid, generatedAt: now,
 		capacity: schedulerCapacity(pool, now),
@@ -4619,7 +4624,7 @@ function renderSchedulerDashboard(ns, pool) {
 		dashboardSection(ns, "Fleet diagnostics");
 		row("Network", `${pool.network.rooted}/${pool.network.servers.length} rooted | ${pool.network.hosts.length} worker hosts`);
 		row("Cloud", `${pool.cloudState.count}/${pool.cloudState.limit} servers | ${formatRam(pool.cloudState.totalRam)}`);
-		const homeCores = pool.network.hosts.find(host => host.name === HOME)?.cores || 1;
+		const homeCores = pool.cfg.homeGw?.cores || 1;
 		row("Home cores", `${homeCores} (${coreBonus(homeCores).toFixed(3)}x growth/weaken bonus)`);
 		row("Budget", `${pool.cfg.maxBatchRate} batches/s | ${pool.cfg.maxLaunches} planned launches/s | ${pool.cfg.maxWorkers} worker slots`);
 		row("Loop lag", `max ${pool.lagMax.toFixed(1)}ms session`);

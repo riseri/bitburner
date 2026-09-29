@@ -1,6 +1,6 @@
 # Usage reference
 
-See [Dynamic progression policy](progression-planning.md) for shared objectives, automatic inflation, staged bootstrap, and the supervisor’s `--go-opponent auto` default. Port 8 is now reserved for home-upgrade quotes; choose another unreserved port for custom fleet status.
+See [Dynamic progression policy](progression-planning.md) for shared objectives, automatic inflation, staged bootstrap, and the supervisor’s `--go-opponent auto` default. Ports 6 and 8 are reserved for home capacity policy and home-upgrade quotes; choose another unreserved port for custom fleet status. [Home G/W and capital](home-gw.md) explains opportunistic execution and evidence-based RAM/core purchases.
 
 Start with the [README](../README.md) for setup, automation settings, dashboard help, and restart instructions. This page keeps the full feature requirements and advanced options in one place.
 

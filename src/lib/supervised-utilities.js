@@ -94,6 +94,8 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
             target:"augmentation:"+plan.next.name,label:plan.next.name,priority:plan.next.name === "The Red Pill"?100:70,
             liquidity:plan.next.repGap===0,reason:"Selected achievable augmentation chain"});
         if(cfg.homeInvestment) requests.push(cfg.homeInvestment);
+        // Service admission is evaluated before performance candidates exist.
+        if(!cfg.homeInvestment) requests.push(...(cfg.homePerformanceInvestments || []));
         const cloud = readFleetCapitalRequest(ns, fleet);
         if (cloud) requests.push(cloud);
         const decision=chooseInvestment(requests,current.target); desired=decision.chosen;

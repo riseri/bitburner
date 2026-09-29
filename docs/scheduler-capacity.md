@@ -1,5 +1,9 @@
 # Scheduler capacity and deadlines (PR2)
 
+Home G/W is now reported separately in `capacity.homeGw`; it is never included
+in generic fleet RAM. See [home execution and capital](home-gw.md) for protection,
+rolling usage evidence, asymmetric planning and infrastructure arbitration.
+
 The JIT status has a versioned `capacity` projection of existing ledgers: usable,
 occupied and foreign worker RAM; active/available lanes and modeled candidates;
 aggregate batch rate; recent launch buckets; running, queued and prep commitments;

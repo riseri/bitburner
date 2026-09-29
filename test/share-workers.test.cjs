@@ -3,13 +3,17 @@ const assert = require('node:assert/strict');
 const { Clock, loadScript } = require('./helpers.cjs');
 const { NetscriptSimulation } = require('./simulator.cjs');
 
-test('home is never admitted to the JIT worker fleet', async () => {
+test('home stays outside the JIT worker fleet and lends only protected G/W capacity', async () => {
 	const sim = new NetscriptSimulation({ hostCount: 3, flags: { 'max-targets': 1 } });
 	sim.run();
 	await sim.clock.runUntil(sim.start + 180_000);
 	assert.deepEqual(sim.errors.map(String), []);
 	assert.ok(sim.launches.length > 0);
-	assert.ok(sim.launches.every(launch => launch.host !== 'home'));
+	const home = sim.launches.filter(launch => launch.host === 'home');
+	assert.ok(home.length > 0, 'safe home slack should do useful G/W work');
+	assert.ok(home.every(launch => /^(G|W|PREP-[GW]|background-(grow|weaken))/.test(launch.phase)));
+	assert.ok(sim.launches.filter(launch => launch.phase === 'H').every(launch => launch.host !== 'home'));
+	assert.ok(sim.peakRam.get('home') <= 128 - 8, 'home safety reserve remains free');
 	const network = sim.daemon.networkFromFleetStatus({ network: {
 		servers: ['home', 'cloud-0'], rooted: 2,
 		hosts: [{ name: 'home', maxRam: 1024, cores: 8 }, { name: 'cloud-0', maxRam: 64, cores: 1 }],

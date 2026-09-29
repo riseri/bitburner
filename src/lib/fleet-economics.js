@@ -23,7 +23,11 @@ export function evaluateFleetInvestment(snapshot, addedRam, cost, maxPayback = 1
     if (utilization < 0.8 && !ramPressure) return { ok: false, reason: `RAM utilization ${(utilization * 100).toFixed(0)}%; waiting for RAM pressure` };
     if (!(snapshot.income60 > 0 && snapshot.usedRam > 0 && addedRam > 0 && cost > 0)) return { ok: false, reason: "Insufficient income evidence" };
     const headroom = snapshot.maxBatchRate > 0 && batchRate > 0 ? Math.max(0, snapshot.maxBatchRate / batchRate - 1) : 1;
-    const gain = snapshot.income60 * Math.min(addedRam / snapshot.usedRam, headroom, 1) * 0.5;
+    // Home remains absent from generic RAM telemetry. Count only its measured
+    // productive contribution in the ROI denominator, shared with home quotes.
+    const home = snapshot.capacity?.homeGw;
+    const homeWork = Math.max(0, home?.recentUsage?.averageRam || 0) * (home?.coreBonus || 1);
+    const gain = snapshot.income60 * Math.min(addedRam / (snapshot.usedRam + homeWork), headroom, 1) * 0.5;
     const payback = gain > 0 ? cost / gain : Infinity;
     return { ok: Number.isFinite(payback) && payback <= maxPayback, gain, payback,
         reason: `Estimated +${Math.round(gain)}/s, ${Math.ceil(payback)}s payback (50% discount)` };

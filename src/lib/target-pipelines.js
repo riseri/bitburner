@@ -1,3 +1,4 @@
+import { observeHomeCapacity, sampleHomeUsage } from "lib/home-capacity.js";
 import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, backgroundPrepJobs, emptySlotIncomeFloor, recentPipelineIncome } from "lib/background-prep.js";
 import { createXpPipeline, tickXpPipeline, consumeXpEvent, claimXpTarget, reclaimXpRam, refreshMilestoneEvidence } from "lib/hacking-xp.js";
 import { schedulerCapacity } from "lib/scheduler-capacity.js";
@@ -83,6 +84,7 @@ function activatePipeline(ns, pool, pipeline, runtime, rebuilt) {
 	pipeline.tuner = null;
 	pipeline.tunedLevel = ns.getHackingLevel();
 	pipeline.tunedCapacity = api.workerFleetCapacity(pool.network.hosts, pipeline.cfg);
+	pipeline.tunedHome = `${pool.cfg.homeGw?.maxRam || 0}:${pool.cfg.homeGw?.cores || 1}`;
 	pipeline.lastCapacityRetune = Date.now();
 	// Activation follows reconciled ownership (initialization or safety recovery).
 	pipeline.generations.clear(); pipeline.shadow = null; pipeline.swap = null;
@@ -190,6 +192,15 @@ export function observeForeignRam(ns, pool, now = Date.now()) {
 	if (failure > (pool.lastForeignFailure || 0)) {
 		pool.lastForeignFailure = failure; pool.foreignFastUntil = now + 2000; pool.nextForeign = 0;
 	}
+	const homeDue = pool.cfg.homeGw && now >= (pool.cfg.homeGw.nextObservation || 0);
+	observeHomeCapacity(ns, pool.cfg, pool.running, homeDue ? (pool.cfg.prepStates || []).flatMap(s => backgroundPrepJobs(s)) : [], now);
+	const home = pool.cfg.homeGw;
+	if (homeDue && home.runningRam > Math.max(0, home.maxRam - home.unrelatedRam - home.protectedRam)) {
+		reclaimXpRam(ns, pool.xp, "home");
+		if (backgroundPrepJobs(pool.cfg.backgroundPrep).some(j => j.host === "home"))
+			cancelBackgroundPrep(ns, pool.cfg.backgroundPrep, "Critical home capacity takes priority");
+	}
+	sampleHomeUsage(pool, now);
 	if (now < (pool.nextForeign || 0)) return;
 	const hosts = pool.network.hosts;
 	const host = hosts[(pool.foreignCursor || 0) % Math.max(1, hosts.length)];
@@ -667,6 +678,7 @@ function planningInputs(ns, pool, p) {
 		capacity: pool.api.workerFleetCapacity(pool.network.hosts, p.cfg),
 		gap: p.cfg.gap, lead: p.cfg.lead,
 		fleet: pool.network.hosts.map(h => `${h.name}:${h.maxRam}:${h.cores}`).join("|"),
+		homeGw: pool.cfg.homeGw?.host ? `${pool.cfg.homeGw.maxRam}:${pool.cfg.homeGw.cores}:${pool.cfg.homeGw.protectedRam}` : "",
 		peerRate: [...pool.pipelines.values()].filter(q => q !== p).reduce((n, q) => n + (q.runtime?.plan.batchRate || 0), 0) };
 }
 
@@ -697,7 +709,8 @@ function serviceShadowTuneStep(ns, pool, p) {
 	const now = Date.now(), inputs = planningInputs(ns, pool, p), fingerprint = JSON.stringify(inputs);
 	const trigger = inputs.formulas !== Boolean(p.runtime.formulas) ? "formulas" :
 		inputs.level >= Math.max(p.tunedLevel + 10, Math.ceil(p.tunedLevel * 1.10)) ? "skill" :
-		inputs.capacity >= Math.max(1, p.tunedCapacity) * 1.25 ? "capacity" : "";
+		inputs.capacity >= Math.max(1, p.tunedCapacity) * 1.25 ? "capacity" :
+		p.tunedHome && p.tunedHome !== `${pool.cfg.homeGw?.maxRam || 0}:${pool.cfg.homeGw?.cores || 1}` ? "home G/W" : "";
 	if (p.shadow && p.shadow.fingerprint !== fingerprint) {
 		p.shadow.state = "ABORTED"; p.hotSwaps.aborted++; p.shadow = null;
 	}
@@ -788,6 +801,7 @@ export function preflightHotSwap(ns, pool, p) {
 		finalOldW2, firstH, boundary: firstH, overlapRam: transitionPeakRam(pool, now), reason: "" };
 	p.generation = generation.number; p.runtime = generation.runtime; p.cfg = generation.cfg;
 	p.tunedLevel = s.inputs.level; p.tunedCapacity = s.inputs.capacity; p.lastCapacityRetune = now;
+	p.tunedHome = `${pool.cfg.homeGw?.maxRam || 0}:${pool.cfg.homeGw?.cores || 1}`;
 	p.shadow = null; p.serial += batches.length;
 	for (const b of batches) commitGenerationBatch(pool, p, b.id, b.chunks, generation);
 	p.nextLanding = firstH + batches.length * plan.period;

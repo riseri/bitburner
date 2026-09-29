@@ -1,3 +1,5 @@
+import { tickHomeInvestment } from "lib/home-investment.js";
+import { homeShareRam } from "lib/home-share.js";
 import { readProgressionSnapshot, readSharingDemand } from "lib/progression-objective.js";
 import { bn4Route } from "lib/bitnode-route.js";
 import { intelligenceSessionActive } from "lib/intelligence-session.js";
@@ -259,6 +261,17 @@ export async function main(ns) {
             if (target > ns.getServerMaxRam(HOME)) await tickStarterHomeUpgrade(ns, starterHosts(ns), target, cfg);
             else { cfg.homeInvestment = null; cfg.homeUpgradeStatus = ""; }
         }
+        const performanceAllowed = capabilities.singularity && cfg.augmentationActions && cfg.progression && cfg.progressionActions &&
+            !serviceBlocker && !cfg.homeInvestment && !readProgressionSnapshot(ns)?.resetImminent;
+        const homePolicyPort = ns.getPortHandle(PORTS.HOME_CAPACITY);
+        const missingRam = admittedServices.filter(s => !findProcess(ns, s.name)).reduce((n,s) => n + ns.getScriptRam(s.name, HOME), 0);
+        const capitalRam = performanceAllowed ? ns.getScriptRam("home-capital.js", HOME) : 0;
+        const reserve = Math.max(cfg.homeReserve, cfg.shareReserve, capitalRam + 8, missingRam + cfg.shareReserve);
+        cfg.sharingDemand = readSharingDemand(ns);
+        homePolicyPort.clear(); homePolicyPort.write({ type: "home-capacity-policy", generatedAt: Date.now(), producerPid: ns.pid,
+            resetEpoch: resetEpoch(ns.getResetInfo()), reserve, performanceAllowed,
+            requiredShareRam: cfg.sharingDemand === "AGGRESSIVE" ? homeShareRam(ns) : 0 });
+        tickHomeInvestment(ns, cfg, performanceAllowed);
 		tickProgressionActions(ns, actions, progressionStatus, cfg);
 		cfg.sharingDemand = readSharingDemand(ns);
 		reconcileHomeShare(ns, cfg.shareEnabled && cfg.sharingDemand !== "OFF", cfg.shareReserve);
@@ -322,6 +335,11 @@ function yieldHomeShare(ns) {
 }
 
 function reconcileHomeShare(ns, enabled, reserve = 0) {
+    try {
+        const jit = ns.getPortHandle(PORTS.JIT_STATUS).peek(), h = jit?.capacity?.homeGw;
+        if (h?.enabled && Date.now() >= jit.generatedAt && Date.now() - jit.generatedAt < 15000 && ns.isRunning(jit.pid))
+            reserve = Math.max(reserve, h.protectedRam - (h.requiredShareRam || 0) + (h.pendingRam || 0));
+    } catch {}
 	const processes = ns.ps(HOME).filter(process => process.filename === SHARE_WORKER);
 	const ramPerThread = ns.getScriptRam(SHARE_WORKER, HOME);
 	if (!enabled || !(ramPerThread > 0)) {
@@ -825,6 +843,10 @@ function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) 
 	const entries = [];
 	if (actions?.current) entries.push([actions.current.state === "blocked" ? "Blocked" : "In progress", actions.current.reason]);
     if (cfg.homeUpgradeStatus) entries.push(["Home upgrade", cfg.homeUpgradeStatus]);
+    if (cfg.dashboardDetails && cfg.homeCapital) {
+        const h = cfg.homeCapital;
+        entries.push(["Home capital", `${h.decision} | ${h.best || "no justified candidate"}`], ["Home ROI", `${h.cost || 0} cost | +${Math.round(h.gain || 0)}/s | ${Math.ceil(h.payback || 0)}s payback`], ["Capital reason", h.reason]);
+    }
 	const progressionAdvice = [progression?.nextObjective?.label, ...(progression?.recommendations || [])]
 		.filter((value, index, all) => value && all.indexOf(value) === index && value !== actions?.current?.reason)
 		.slice(0, cfg.dashboardDetails ? 4 : 2);
