@@ -3,7 +3,8 @@ import { formulaGroup } from "lib/formulas.js";
 import { readSavings } from "lib/savings.js";
 import { progressionPrograms } from "lib/programs.js";
 import { PORTS } from "lib/ports.js";
-import { dashboardRow, dashboardTime } from "lib/dashboard.js";
+import { dashboardRow, dashboardTime, dashboardSection } from "lib/dashboard.js";
+import { MILESTONE_BALANCE, balanceMilestone, milestoneKey } from "lib/milestone-balance.js";
 
 // Hacking objectives only. No progression service is started/stopped here.
 export const HACKING_POLICY = Object.freeze({
@@ -51,7 +52,7 @@ export function evaluateHackingPolicy({ capabilities, level, bootstrap = [], obj
     if (capabilities.formulas && objective?.limitingResource === "hacking" && objective.moneyCovered &&
         level < result.targetLevel && !bootstrap.length && (!m || m.HackExpGain > 0)) {
         result.mode = "XP"; result.operationalMode = "MONEY+XP";
-        result.xpAllocation = objective.redPill === "installed" ? .70 : .40;
+        result.xpAllocation = objective.requiredCash === 0 || objective.redPill === "installed" ? MILESTONE_BALANCE.hackingOnlyFallback : MILESTONE_BALANCE.fallback;
         result.reason = objective.milestone + ": hacking " + level + "/" + result.targetLevel + "; cash covered; reduce new money batches to leave XP capacity";
         return result;
     }
@@ -95,7 +96,7 @@ function bootstrapReasons(ns, network, cfg, options, objective = null) {
 	if (stocks?.type === "stock-status" && stocks.access?.ok && !stocks.dryRun &&
 		Date.now() >= stocks.generatedAt && Date.now() - stocks.generatedAt < 30_000 &&
 		ns.isRunning(stocks.producerPid)) stockFloor = Math.max(0, Number(stocks.reserveFloor) || 0);
-	const floor = Math.max(objective ? 0 : options.minCash, readSavings(ns).floor, cfg.cloudState?.reserveFloor || 0, stockFloor);
+	const floor = Math.max(options.minCash, readSavings(ns).floor, cfg.cloudState?.reserveFloor || 0, stockFloor);
 	const required = floor * (cfg.hackingPolicy?.mode === "XP" ? 1 : options.cashEntryBuffer);
 	if (ns.getServerMoneyAvailable("home") < required) reasons.push(`cash below reserve/buffer ${required}`);
 	return reasons;
@@ -107,7 +108,8 @@ export function refreshHackingPolicy(ns, cfg, network, force = false) {
 	if (!force && now < (cfg.nextPolicyCheck || 0)) return cfg.hackingPolicy;
 	cfg.nextPolicyCheck = now + options.checkMs;
 	const level = ns.getHackingLevel(), objective = readProgressionSnapshot(ns);
-    const signature = JSON.stringify([objective?.milestone, objective?.limitingResource, objective?.requiredHacking, objective?.moneyCovered]);
+    cfg.progressionObjective = objective;
+    const signature = JSON.stringify([milestoneKey(objective), objective?.limitingResource, objective?.moneyCovered, objective?.resetImminent]);
     if (cfg.objectiveSignature !== signature) { force = true; cfg.objectiveSignature = signature; }
 	const targetReached = cfg.hackingPolicy?.mode === "XP" && level >= (cfg.hackingPolicy?.targetLevel ?? options.xpTargetLevel);
 	if (!force && !targetReached && now < (cfg.nextPolicyScore || 0)) return cfg.hackingPolicy;
@@ -115,6 +117,27 @@ export function refreshHackingPolicy(ns, cfg, network, force = false) {
 	const capabilities = detectHackingCapabilities(ns);
 	const bootstrap = capabilities.formulas && (capabilities.bitNodeMultipliers || objective) ? bootstrapReasons(ns, network, cfg, options, objective) : [];
 	cfg.hackingPolicy = { ...evaluateHackingPolicy({ capabilities, level, bootstrap, objective, options }), generatedAt: now };
+	if (objective && cfg.milestoneEvidence) {
+		const policy = cfg.hackingPolicy, evidence = cfg.milestoneEvidence;
+		const fresh = evidence.key === milestoneKey(objective) && now >= evidence.generatedAt && now - evidence.generatedAt <= MILESTONE_BALANCE.staleMs;
+		const progress = hackingXpProgress(ns, policy, null, options);
+		const balance = balanceMilestone(cfg.milestoneController ||= {}, { objective, level,
+			remainingXp: progress?.remaining ?? null, cash: fresh ? evidence.cash : null, xp: fresh ? evidence.xp : null,
+			scriptXpRate: fresh ? evidence.scriptXpRate : null, baseline: policy.xpAllocation,
+			safe: !bootstrap.length && fresh && evidence.safe,
+			enabled: capabilities.formulas && (!capabilities.multipliers || capabilities.multipliers.HackExpGain > 0),
+			now });
+		policy.balance = balance;
+		policy.xpAllocation = balance.xpAllocation;
+		if (balance.xpAllocation > 0) {
+			policy.mode = "XP"; policy.operationalMode = "MONEY+XP";
+			policy.reason = `${objective.milestone}: ${balance.reason}`;
+		}
+	} else if (!objective) cfg.milestoneController = null;
+	if (objective?.resetImminent || objective?.redPill === "queued") {
+		cfg.hackingPolicy.mode = cfg.hackingPolicy.operationalMode = "NORMAL";
+		cfg.hackingPolicy.xpAllocation = 0;
+	}
 	return cfg.hackingPolicy;
 }
 
@@ -145,6 +168,7 @@ export function renderHackingPolicy(ns, policy, details = false) {
 	dashboardRow(ns, "Hacking policy", `${policy.mode} | operational ${policy.operationalMode}`);
 	dashboardRow(ns, "Policy reason", policy.reason);
 	if (policy.transition) dashboardRow(ns, "Policy transition", policy.transition);
+	if (policy.balance) renderMilestoneBalance(ns, policy.balance, details);
 	if (policy.xp) {
 		const xp = policy.xp;
 		dashboardRow(ns, "XP pipeline", `${xp.target || "waiting"} | ${xp.action || "-"} | ${xp.state} | unreserved RAM`);
@@ -163,4 +187,17 @@ export function renderHackingPolicy(ns, policy, details = false) {
 		dashboardRow(ns, "XP progress", `${p.current.toPrecision(3)} / ${p.required.toPrecision(3)} | remaining ${p.remaining.toPrecision(3)}`);
 		dashboardRow(ns, "XP ETA", p.etaReason || (Number.isFinite(p.etaMs) ? `~${dashboardTime(p.etaMs)} at recent rate` : "unavailable"));
 	}
+}
+
+export function renderMilestoneBalance(ns, balance, details = false) {
+	const eta = value => Number.isFinite(value) ? `~${dashboardTime(value)}` : "UNKNOWN";
+	const amount = value => Number.isFinite(value) ? value.toPrecision(3) : "UNKNOWN";
+	dashboardRow(ns, "Milestone ETA", `${balance.milestone} | cash ${eta(balance.cashEtaMs)} | hack ${eta(balance.hackingEtaMs)} | XP ${(balance.xpAllocation * 100).toFixed(0)}%`);
+	if (!details) return;
+	dashboardSection(ns, "Milestone balance");
+	dashboardRow(ns, "Cash goal", `$${amount(balance.currentCash)} / $${amount(balance.requiredCash)} | remaining $${amount(balance.remainingCash)}`);
+	dashboardRow(ns, "Hacking goal", `${balance.currentHacking} / ${balance.requiredHacking} | XP remaining ${amount(balance.remainingXp)}`);
+	dashboardRow(ns, "Milestone rates", `$${amount(balance.cashRate)}/s | total XP ${amount(balance.xpRate)}/s | script model ${amount(balance.scriptXpRate)}/s`);
+	dashboardRow(ns, "XP allocation", `${(balance.previousXpAllocation * 100).toFixed(0)}% -> ${(balance.xpAllocation * 100).toFixed(0)}% | ${balance.reason}`);
+	dashboardRow(ns, "ETA evidence", `${balance.confidence} | cash ${balance.cashSource} | XP ${balance.xpSource}`);
 }

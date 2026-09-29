@@ -2,6 +2,7 @@ import { formulaGroup } from "lib/formulas.js";
 import { HACKING_POLICY, refreshHackingPolicy, hackingXpProgress, renderHackingPolicy } from "lib/hacking-policy.js";
 import { PORTS } from "lib/ports.js";
 import { dashboardTitle, dashboardRow } from "lib/dashboard.js";
+import { MILESTONE_BALANCE, boundedXpAllocation, milestoneKey, observeMilestoneRates, milestoneRate } from "lib/milestone-balance.js";
 
 // Reuse deployed executors. H uses the existing one-shot PREP protocol; G/W
 // already have cheaper one-shot workers with owner-tagged orphan cleanup.
@@ -207,6 +208,42 @@ function xpExcludedTargets(pool) {
 		...(pool.cfg.prepStates || []).map(p => p?.target)].filter(Boolean));
 }
 
+// Observe total player XP independently of XP waves: university and money-lane
+// gains improve the milestone ETA, but never become a RAM throughput estimate.
+export function refreshMilestoneEvidence(ns, pool) {
+	const now = Date.now(), cfg = pool.cfg, objective = cfg.progressionObjective;
+	if (!objective) { cfg.milestoneSamples = null; cfg.milestoneEvidence = null; return; }
+	if (now < (cfg.nextMilestoneSample || 0)) return;
+	cfg.nextMilestoneSample = now + 1000;
+	const lanes = [...pool.pipelines.values()], key = milestoneKey(objective);
+	if (pool.xp && pool.xp.objectiveKey !== key) {
+		pool.xp.objectiveKey = key; pool.xp.samples.length = 0; pool.xp.cycle = null;
+	}
+	const safe = lanes.length > 0 && lanes.every(p => p.mode === "RUNNING" && !p.recovery && !p.drain && !p.shadow && !p.swap &&
+		p.stats?.pipeline?.completed > 0 && now - p.stats.lastHackAt < Math.max(120_000, (p.runtime?.plan.times.W || 0) * 2)) &&
+		!(cfg.prepStates || []).some(p => p?.active);
+	const layout = JSON.stringify(lanes.map(p => [p.name, p.generation, p.mode]));
+	const sampleKey = key + layout;
+	const samples = cfg.milestoneSamples ||= {};
+	if (!safe) { samples.key = null; }
+	const money = (pool.earned || 0) + (pool.xp?.earned || 0) + [...lanes, ...(pool.history || [])].reduce((sum, p) => sum + (p.stats?.money || 0), 0);
+	// Longer actions need longer bins: observing a long weaken as zero followed
+	// by a spike would otherwise make a perfectly healthy XP lane look unstable.
+	const sampleMs = Math.max(MILESTONE_BALANCE.sampleMs, (pool.xp?.wave?.duration || 0) * 2,
+		...lanes.map(p => (p.runtime?.plan.times.W || 0) * 2));
+	try { observeMilestoneRates(samples, { key: sampleKey, now, xp: ns.getPlayer().exp.hacking, money, sampleMs }); }
+	catch { cfg.milestoneSamples = null; }
+	const allocation = boundedXpAllocation(cfg.hackingPolicy?.xpAllocation);
+	const moneyModel = safe ? lanes.reduce((sum, p) => sum + (p.runtime?.plan.expected || 0), 0) * (1 - allocation) : null;
+	const state = pool.xp, ram = [...(state?.jobs.values() || [])].reduce((sum, job) => sum + job.ram, 0);
+	// Model only actual script work. Never use total player XP for fleet ROI.
+	const scriptXpRate = safe && state?.status === "RUNNING" && state.choice?.ram > 0 ?
+		state.choice.score * Math.min(1, ram / state.choice.ram) : null;
+	cfg.milestoneEvidence = { key, generatedAt: now, safe,
+		cash: milestoneRate(safe ? samples.money : [], moneyModel),
+		xp: milestoneRate(safe ? samples.xp : [], scriptXpRate), scriptXpRate };
+}
+
 export function tickXpPipeline(ns, pool, launchBudget) {
 	const state = pool.xp, now = Date.now(), options = pool.cfg.policyOptions || HACKING_POLICY;
 	if (!state || now < state.nextTick) return;
@@ -215,7 +252,7 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 	state.income = state.income.filter(s => s.time >= now - 60_000);
 	const enabled = pool.cfg.hackingPolicy?.mode === "XP", excluded = xpExcludedTargets(pool);
 	state.desiredRam = enabled ? pool.network.hosts.reduce((n, h) => n + h.maxRam, 0) *
-		Math.min(.70, Math.max(0, pool.cfg.hackingPolicy?.xpAllocation || 0)) : 0;
+		boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation) : 0;
 	if ([...state.jobs.values()].some(job => excluded.has(job.target)) ||
 		[...pool.pipelines.values()].some(p => p.mode !== "RUNNING" || p.recovery || p.drain || p.shadow)) {
 		reclaimXpRam(ns, state);
@@ -236,7 +273,7 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 	const hosts = xpCapacity(ns, pool.network, cfg).map(host => ({ ...host,
 		free: Math.min(host.free, pool.api.availableRam(ns, host, cfg, pool.running,
 			pool.reservations, now, Infinity, pool.foreign)) })).filter(h => h.free > 0);
-	state.ramConstrained = Boolean(state.choice) && hosts.reduce((n, h) => n + h.free, 0) + 1 < state.desiredRam;
+	state.ramConstrained = hosts.reduce((n, h) => n + h.free, 0) + 1 < state.desiredRam;
 	if (!hosts.length) {
 		state.status = "WAITING_RAM"; state.reason = "no RAM left after money reservations";
 		state.samples.length = 0; state.cycle = null; return;

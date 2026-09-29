@@ -63,6 +63,9 @@ export function progressionObjective({ currentNode, installed = [], owned = [], 
         installed: distinctAugmentations(installed), owned: distinctAugmentations(owned), installedCount, ownedCount,
         queuedDistinct: distinctAugmentations(owned).filter(name => !installed.includes(name)), countRequired, redPill,
         milestone, limitingResource, requiredHacking, requiredReputation, requiredCash, moneyCovered: money >= requiredCash,
+        // These are bank-balance goals. Protected savings are part of that bank
+        // balance, not a second deduction; spender-specific reserves still gate XP.
+        currentCash: money, availableProgressionCash: money, remainingCash: Math.max(0, requiredCash - money), currentHacking: level,
         selectedPlan: plan, savings, benefits: "Queued upgrades take effect only after installation" };
 }
 

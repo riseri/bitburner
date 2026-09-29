@@ -80,28 +80,31 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		state.current = { state: "blocked", reason: "Installation takes priority over progression purchases" }; return;
 	}
 	const objectives = Array.isArray(plan.objectives) ? plan.objectives : [];
-	let blockedReason = "No runnable progression objectives";
+	state.diagnostics = [];
+	const blocked = (objective, reason, waiting = false) => {
+		state.diagnostics.push({ target: objective.target, state: waiting ? "waiting" : "blocked", reason });
+	};
 	for (const objective of objectives) {
 		// An adopted planner can still carry its previous feature flags.
 		if (objective.kind === "program" && !progressionPrograms({ darknet: cfg.darknet !== false }).some(program => program.name === objective.target)) continue;
-		if (!objective.ready) { blockedReason = `${objective.target}: ${objective.blocker}`; continue; }
+		if (!objective.ready) { blocked(objective, `${objective.target}: ${objective.blocker}`); continue; }
 		const key = actionKey(objective), cached = state.blocked.get(key);
 		if (cached && now < cached.until && !(cached.reason === "insufficient-cash" && cash >= cached.requiredCash)) {
-			blockedReason = `${objective.target}: ${cached.reason} (retry cooling down)`; continue;
+			blocked(objective, `${objective.target}: ${cached.reason} (retry cooling down)`); continue;
 		}
 		const estimate = objective.costEstimate || 0;
 		if (estimate > 0 && (cash * (1 - reserve) < estimate || cash - estimate < readSavings(ns, objective.target).floor)) {
-			blockedReason = `${objective.target}: waiting for cash reserve`; continue;
+			blocked(objective, `saving for ${objective.target} (cash reserve)`, true); continue;
 		}
 		const request = { ...createRequest(ns, plan, objective, reserve, ++state.sequence, now),
 			fleetPort: cfg.fleetStatusPort ?? PORTS.FLEET_STATUS };
-		if (validateRequest(request, reset, now)) { blockedReason = "Invalid objective in plan"; continue; }
+		if (validateRequest(request, reset, now)) { blocked(objective, "Invalid objective in plan"); continue; }
 		const script = objective.kind === "backdoor" ? BACKDOOR : PURCHASE;
 		const ram = ns.getScriptRam(script, "home");
 		if (ram > 0) reclaimHomeShare(ns, ram);
 		const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
 		if (!Number.isFinite(ram) || ram <= 0 || !Number.isFinite(free) || ram > free) {
-			blockedReason = `${objective.target}: WAITING_RAM (need ${ram > 0 ? ram.toFixed(2) : "valid script"} GB)`;
+			blocked(objective, `${objective.target}: WAITING_RAM (need ${ram > 0 ? ram.toFixed(2) : "valid script"} GB)`, true);
 			state.blocked.set(key, { until: now + 30_000, reason: "WAITING_RAM" }); continue;
 		}
 		const pending = { type: "progression-action", request, actorPid: 0, state: "pending", reason: `Starting ${objective.target}`, updatedAt: now };
@@ -122,5 +125,6 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		state.current = { state: "running", reason: `Executing ${objective.target}`, request };
 		return;
 	}
-	state.current = { state: "blocked", reason: blockedReason };
+	state.current = state.diagnostics.find(item => item.target === plan.nextObjective?.target) ||
+		state.diagnostics[0] || { state: "blocked", reason: "No runnable progression objectives" };
 }

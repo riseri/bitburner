@@ -1093,6 +1093,7 @@ function renderProgression(ns, progression, cfg, actions = null) {
 	if (bitRunners?.path?.length) row("BitRunners", bitRunners.path.join(" -> "));
 	if (progression.worldDaemon?.path?.length) row("World daemon", progression.worldDaemon.path.join(" -> "));
 	if (cfg.dashboardDetails) {
+		for (const diagnostic of actions?.diagnostics || []) row("Objective blocker", `${diagnostic.state.toUpperCase()}: ${diagnostic.reason}`);
 		row("BitNode", `BN${Number(progression.currentNode) || "?"}`);
 		row("Singularity", progression.singularity?.available ? `Available (${progression.singularity.source})` : "Locked; requires BN4 or Source-File 4");
 		row("Source Files", formatSourceFiles(progression.sourceFiles));

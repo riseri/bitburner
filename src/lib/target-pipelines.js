@@ -1,6 +1,7 @@
 import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, backgroundPrepJobs, emptySlotIncomeFloor, recentPipelineIncome } from "lib/background-prep.js";
-import { createXpPipeline, tickXpPipeline, consumeXpEvent, claimXpTarget, reclaimXpRam } from "lib/hacking-xp.js";
+import { createXpPipeline, tickXpPipeline, consumeXpEvent, claimXpTarget, reclaimXpRam, refreshMilestoneEvidence } from "lib/hacking-xp.js";
 import { schedulerCapacity } from "lib/scheduler-capacity.js";
+import { boundedXpAllocation } from "lib/milestone-balance.js";
 
 // One event loop, one allocation ledger. A pipeline never owns the global ports,
 // process map, or reservation array. Changing its epoch cannot erase a peer.
@@ -228,6 +229,7 @@ export function schedulerSleep(pool, now = Date.now()) {
 }
 
 export function serviceHackingPolicy(ns, pool) {
+	refreshMilestoneEvidence(ns, pool);
 	pool.api.refreshHackingPolicy?.(ns, pool.cfg, pool.network);
 }
 
@@ -513,7 +515,7 @@ export function planPipelineBatch(ns, pool) {
 		}
         // Change only future admission spacing. Existing reservations, HWGW timing,
         // ownership, repairs and hot swaps retain their safety rules.
-        const xpAllocation = Math.min(.70, Math.max(0, pool.cfg.hackingPolicy?.xpAllocation || 0));
+        const xpAllocation = boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation);
         p.nextLanding += plan.period / (1 - xpAllocation);
 		return; // exactly one batch admission attempt per controller tick
 	}

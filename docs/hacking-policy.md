@@ -2,6 +2,92 @@
 
 Current progression-driven behavior, capital priorities, and fallback rules are described in [Dynamic progression policy](progression-planning.md). Historical thresholds and examples below describe the conservative fallback unless a fresh shared objective overrides them.
 
+## Milestone ETA balancing
+
+`lib/milestone-balance.js` balances MONEY against HACKING_XP for authenticated
+progression objectives with a remaining hacking requirement. The progression
+producer supplies `requiredCash`, `currentCash`, `availableProgressionCash`,
+`remainingCash`, and `requiredHacking`; the daemon contains no faction strategy.
+Current cash objectives are bank-balance thresholds. Savings already in the bank
+count once toward that threshold, rather than being deducted and saved again.
+Cash ETA is `remainingCash / recent money-engine income`; XP ETA reuses
+`hackingXpProgress()` for the target's remaining experience.
+
+The previous progression branch waited for `moneyCovered` and then used 40% XP,
+or 70% with The Red Pill installed. Those allocations remain conservative initial
+values when cash is covered (70% also applies to generic hacking-only goals).
+With known ETAs, an uncovered cash goal can now open a small XP lane and increase
+it while hacking is behind. Cash-dominated goals retain money priority. With no
+cash remaining, XP can rise beyond the old 70% fallback, up to 85%.
+
+The controller samples cumulative money earned by the scheduler and total player
+hacking XP in non-overlapping bins. Each bin lasts at least 20 seconds and twice
+the longest current money weaken or XP action duration. Three positive samples
+within 25% are required for a measured rate. Long actions therefore do not look
+like a succession of zero income followed by a spike. Samples reject stale polls,
+decreasing counters, objective changes, reset epochs, and money-lane transitions.
+During warmup, the existing money plan (adjusted for admission spacing) and an
+actually running XP lane's sustainable model may supply rates. Mature noisy or
+zero samples produce UNKNOWN instead of being hidden behind a positive model.
+If no XP lane is running, total XP from money scripts or university work can
+establish evidence before XP admission starts.
+
+Total player XP is used only for milestone timing. `scriptXpRate` is separately
+modeled from XP work actually occupying RAM. University XP is never attributed
+to fleet RAM. Existing XP target scoring and fleet capital logic remain intact.
+
+All control tuning lives in `MILESTONE_BALANCE`:
+
+| Setting | Value |
+| --- | --- |
+| Covered-cash / hacking-only fallback | 40% / 70% |
+| Active dynamic floor / ceiling | 10% / 85% |
+| Maximum adjustment | 10 percentage points |
+| ETA deadband | ratio 0.8–1.25 |
+| Ratio smoothing | 35% new evidence |
+| Sustained direction / adjustment cooldown | 60 seconds / 120 seconds |
+| Minimum sample bin / sample count | 20 seconds / 3 |
+| Rate tolerance / stale polling threshold | 25% / 45 seconds |
+
+For an illustrative Daedalus-style goal already allocating 40%, after observation
+and cooldown:
+
+| Cash ETA | Hacking ETA | Next allocation |
+| --- | --- | --- |
+| 18 minutes | 47 minutes | 50% |
+| 35 minutes | 8 minutes | 30% |
+| 18 minutes | 18 minutes | 40% (hold) |
+
+A goal starting with uncovered cash starts at 0%; sustained hacking lag first
+opens 10%, then increases by bounded steps. These are feedback decisions, not a
+guarantee of a specific completion time: throughput is remeasured after changes.
+Unknown evidence retains the initial fallback or gradually approaches the current
+safe fixed allocation. No Formulas or missing XP requirements leaves baseline
+capability behavior functional. A temporary prep/recovery suspends application
+and resets the observation timer without treating that interruption as a new ETA
+imbalance. Completion, installation and reset transitions clear the controller.
+
+Home must still have 64 GB and an authenticated progression fleet at least 64 GB;
+the ordinary capability fallback retains its 1024 GB worker requirement. Basic
+cash, shared savings, fleet and active stock reserve checks precede allocation.
+Money lanes must have completed batches and remain healthy. The controller changes
+only **future admission spacing**. Money batches, mandatory prep, recovery,
+services and temporal reservations retain their existing priority. Desired XP
+RAM beyond safe capacity continues to publish `XP_RAM` pressure.
+
+The JIT dashboard adds a compact milestone/cash ETA/hacking ETA/allocation row.
+Detailed mode adds remaining requirements, measured/model rate sources, script
+versus total XP rates, previous allocation, decision reason and confidence.
+Progression dispatch preserves the selected objective's primary blocker; other
+blocked objectives appear in the supervisor's detailed diagnostics without
+changing dispatch priority or preventing independent runnable backdoors.
+
+There are no new processes, ports, costly APIs or worker changes. The starter
+path is unchanged, as are manual progression, no-Singularity/no-SF5 fallback,
+Darknet/stock feature switches, and explicit or automatic money-target counts.
+Exact resident RAM should still be checked with the game's analyzer after sync;
+the implementation adds JavaScript logic using APIs already in the daemon.
+
 `daemon.js` remains the only full hacking controller. Its existing startup scanner,
 rooting/deployment pass, money scorer, prep, HWGW allocator, multi-target scheduler,
 generation swaps and recovery remain in use. `fleet-manager.js` still owns ongoing

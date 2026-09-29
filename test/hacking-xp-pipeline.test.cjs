@@ -53,6 +53,22 @@ test('XP borrows only RAM outside future money reservations and keeps the shared
     assert.equal(f.xp.xpPipelineStatus(f.ns, f.pool).operationalMode, 'MONEY+XP');
 });
 
+test('dynamic XP ceiling still preserves tiny-fleet money reservations and publishes unmet RAM demand', () => {
+    const f = fixture(); f.cfg.hackingPolicy.xpAllocation = .85;
+    f.api.reserveChunk(f.pool.reservations, { host: 'remote', ram: 60, launchAt: f.clock.now + 5000,
+        landAt: f.clock.now + 10000, status: 'queued', phase: 'G' });
+    f.tick();
+    assert.equal(f.launches[0].threads, 2);
+    assert.equal(f.pool.xp.desiredRam, 64 * .85);
+    assert.equal(f.pool.xp.ramConstrained, true);
+    const lane = f.pool.pipelines.get('money');
+    lane.stats = { pipeline: { driftMax: 0 } };
+    f.cfg.maxBatchRate = 4; f.cfg.maxTargets = 1;
+    const capacity = loadScript('lib/scheduler-capacity.js', f.clock).schedulerCapacity(f.pool, f.clock.now);
+    assert.ok(capacity.constraints.includes('XP_RAM'));
+    assert.equal(capacity.xp.allocatedRam, 4);
+});
+
 test('money admission reclaims XP RAM and reserves the same batch without touching other processes', () => {
     const f = fixture(); f.tick(); assert.equal(f.available(), 0);
     const xpPid = f.launches[0].pid;

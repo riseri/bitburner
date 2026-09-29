@@ -48,6 +48,30 @@ test('shared savings defers an unrelated purchase but still allows an independen
     assert.equal(f.launched[0].filename,'progression-backdoor.js');
 });
 
+test('selected Navigator owns the primary waiting reason while later backdoor blockers remain diagnostic', () => {
+    const f = fixture(), state = f.dispatch.createActionState();
+    f.world.cash = 1e6;
+    const selected = { kind: 'program', target: 'DarkscapeNavigator.exe', ready: true, costEstimate: 50e6 };
+    f.plan.objectives = [selected, { kind: 'backdoor', target: 'run4theh111z', ready: false, blocker: 'root-required' }];
+    f.plan.nextObjective = selected;
+    f.dispatch.tickProgressionActions(f.ns, state, f.plan, f.cfg);
+    assert.equal(state.current.state, 'waiting'); assert.match(state.current.reason, /saving for DarkscapeNavigator/);
+    assert.equal(state.diagnostics.length, 2); assert.match(state.diagnostics[1].reason, /root-required/);
+    const lines = [];
+    loadScript('supervisor.js', f.clock).renderProgression({ ...f.ns, print: s => lines.push(s) },
+        { ...f.plan, backdoors: [] }, { ...f.cfg, dashboardDetails: true }, state);
+    assert.match(lines.join('\n'), /run4theh111z: root-required/);
+});
+
+test('a planner-selected actionable objective retains its own RAM blocker', () => {
+    const f = fixture(), state = f.dispatch.createActionState();
+    f.world.cash = 1e6; f.world.ram = 1;
+    f.plan.nextObjective = f.plan.objectives[1];
+    f.dispatch.tickProgressionActions(f.ns, state, f.plan, f.cfg);
+    assert.equal(state.current.target, f.plan.nextObjective.target);
+    assert.match(state.current.reason, /WAITING_RAM/);
+});
+
 test('purchase actor rechecks changed savings and allows the goal purchase itself', async () => {
     for (const target of ['', 'SQLInject.exe']) {
         const f=fixture();

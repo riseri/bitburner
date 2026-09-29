@@ -57,9 +57,13 @@ automatic augmentation reset occurs after it is installed.
 
 Live backdoor requirements guide faction skill targets. Daedalus uses 2500 hacking
 (or existing eligible combat stats); the final server uses its actual requirement,
-including values above 2500. With Formulas, a cash-covered skill bottleneck spaces
-new money batches to request 40% XP capacity, or 70% after Red Pill. These are
-admission heuristics, not hard RAM guarantees. Existing reservations, worker/launch
+including values above 2500. With Formulas, a measured milestone controller spaces
+new money batches to balance cash and hacking ETAs, including before cash is fully
+covered when hacking is behind. The 40% / 70% covered-cash and hacking-only values
+remain conservative fallbacks; dynamic allocation uses bounded steps, a deadband
+and cooldown within 10%–85%. See [Milestone ETA balancing](hacking-policy.md#milestone-eta-balancing)
+for evidence rules and tuning. These are admission heuristics, not hard RAM
+guarantees. Existing reservations, worker/launch
 accounting, target separation, repairs and hot swaps remain unchanged. Money
 continues; without Formulas the existing money/fallback behavior remains. Missing
 BitNode multipliers do not suppress a valid progression target, but prevent an
