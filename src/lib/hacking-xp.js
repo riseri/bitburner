@@ -261,6 +261,7 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 		state.choice = selected; state.scan = null; state.nextScore = now + options.rescoreMs;
 	}
 	if (!state.choice) { state.status = "WAITING_TARGET"; state.reason = "no independent, usable XP target"; return; }
+	state.ramConstrained = hosts.reduce((n, h) => n + h.free, 0) + 1 < state.desiredRam;
 	let server;
 	try { server = ns.getServer(state.choice.name); } catch { server = null; }
 	if (!server || !validXpServer(server, ns.getHackingLevel())) {

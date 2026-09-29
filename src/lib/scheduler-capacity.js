@@ -37,7 +37,7 @@ export function schedulerCapacity(pool, now = Date.now()) {
     if (lanes.some(p => p.mode === "PREPARING") || prep?.active) add("PREPARATION", "target preparation is in progress");
     if (!candidates.size && pool.nextReadyScan > now && !prep?.active && !pool.readyScan && rate < cfg.maxBatchRate)
         add("NO_PROFITABLE_TARGET", "latest ready-target scan found no additional profitable candidate");
-    return { version: 1, limitingFactor: constraints[0] || "NONE", constraints, reasons,
+    return { version: 1, limitingFactor: constraints[0] || "NONE", constraints, reasons, admission: pool.admission || null,
         ram: { used, total, physical, foreign, utilization: total > 0 ? used / total : 0 },
         targets: { active: lanes.length, limit: cfg.maxTargets, mode: cfg.targetMode || "explicit", profitableInactive: candidates.size,
             next: next ? { name: next[0], expected: next[1] } : null },
