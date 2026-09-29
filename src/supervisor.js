@@ -4,7 +4,7 @@ import { intelligenceSessionActive } from "lib/intelligence-session.js";
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { loadTelemetry, recordTelemetry, summarizeTelemetry } from "lib/telemetry.js";
-import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime, renderSchedulerCapacity } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
@@ -655,6 +655,7 @@ function render(ns, state) {
 		dashboardRow(ns, "Savings", goal.error || `${goal.label}: ${cash(funds)} / ${cash(goal.floor)} | ${funds >= goal.floor ? "FUNDED" : eta === null ? "ETA unknown" : `~${Math.ceil(eta)}s at gross hack income`}`);
 	}
 	if (fleet?.cloud?.investment) dashboardRow(ns, "RAM investment", fleet.cloud.investment);
+	renderSchedulerCapacity(ns, daemon?.capacity, cfg.dashboardDetails);
 	if (cfg.telemetryError) dashboardRow(ns, "Telemetry", cfg.telemetryError);
 	else if (cfg.telemetrySummary) {
 		const report = cfg.telemetrySummary;

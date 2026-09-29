@@ -58,6 +58,7 @@ export function createPipelinePool(ns, setup, api) {
 		lastUi: 0, lastNetwork: Date.now(), lastReconcile: 0, lastCleanup: 0, lastMonitor: 0,
 		lastLoop: Date.now(), lagMax: 0, slowTicks: [], lastFleetAt: 0,
 		shareCursor: 0, lastShare: 0,
+		nextForeign: 0, foreignFastUntil: 0, foreignObservations: 0, wakeups: 0, wakeAt: Date.now(), launchDriftMax: 0,
 		anchor: setup.target, trialGuard: null, note: "Waiting for productive runtime before admission",
 		lastAdmission: 0, nextAdmission: 0, readyScan: null, nextReadyScan: 0,
 		nextAdmissionService: 0, pendingAdmission: "", pendingAdmissionFloor: 0,
@@ -117,7 +118,8 @@ export async function runTargetPipelines(ns, setup, api) {
 	}, "target-pipelines");
 	while (true) {
 		const now = Date.now();
-		const lag = Math.max(0, now - pool.lastLoop - 5);
+		const lag = Math.max(0, now - pool.wakeAt);
+		pool.wakeups++;
 		pool.lastLoop = now;
 		pool.lagMax = Math.max(pool.lagMax, lag);
 		if (lag > pool.cfg.gap * 0.6) pool.slowTicks.push(now);
@@ -126,8 +128,7 @@ export async function runTargetPipelines(ns, setup, api) {
 			p.stats.loopLagMax = Math.max(p.stats.loopLagMax, lag);
 			p.stats.pipeline.loopLagMax = Math.max(p.stats.pipeline.loopLagMax, lag);
 		}
-		pool.foreignCursor = api.refreshOneForeignUsage(ns, pool.network.hosts,
-			pool.running, pool.foreign, pool.foreignCursor, pool.cfg.prepStates);
+		observeForeignRam(ns, pool, now);
 		dispatchPipelineEvents(ns, pool);
 		for (const p of pool.pipelines.values()) servicePipelineSafety(ns, pool, p, now);
 		if (pool.port.empty()) launchPipelineChunks(ns, pool);
@@ -176,8 +177,53 @@ export async function runTargetPipelines(ns, setup, api) {
 			}
 			api.renderSchedulerDashboard(ns, pool);
 		}
-		await ns.sleep(Math.max(1, Math.min(5, nextPipelineLaunch(pool) - Date.now())));
+		const delay = schedulerSleep(pool);
+		pool.wakeAt = Date.now() + delay;
+		await ns.sleep(delay);
 	}
+}
+
+export function observeForeignRam(ns, pool, now = Date.now()) {
+	const failure = Math.max(0, ...[...pool.pipelines.values()].map(p => p.cfg.foreignFailureAt || 0));
+	if (failure > (pool.lastForeignFailure || 0)) {
+		pool.lastForeignFailure = failure; pool.foreignFastUntil = now + 2000; pool.nextForeign = 0;
+	}
+	if (now < (pool.nextForeign || 0)) return;
+	const hosts = pool.network.hosts;
+	const host = hosts[(pool.foreignCursor || 0) % Math.max(1, hosts.length)];
+	const before = host ? pool.foreign.get(host.name) : 0;
+	pool.foreignCursor = pool.api.refreshOneForeignUsage(ns, hosts, pool.running, pool.foreign, pool.foreignCursor, pool.cfg.prepStates);
+	pool.foreignObservations = (pool.foreignObservations || 0) + 1;
+	if (host && before !== pool.foreign.get(host.name)) pool.foreignFastUntil = now + 2000;
+	const urgent = now < (pool.foreignFastUntil || 0) || [...pool.pipelines.values()].some(p => p.recovery || p.drain);
+	pool.nextForeign = now + (urgent ? 25 : 200);
+}
+
+// Events have a bounded polling deadline; only committed launches use the guard
+// window. Optional maintenance can be late without forcing a permanent 1ms spin.
+export function schedulerSleep(pool, now = Date.now()) {
+	if (!pool.port.empty()) return 1;
+	const launch = nextPipelineLaunch(pool), lanes = [...pool.pipelines.values()];
+	const eventCadence = pool.running.size ? Math.max(1, Math.min(25, pool.cfg.gap / 4)) : 100;
+	let wake = now + eventCadence;
+	const due = time => { if (Number.isFinite(time)) wake = Math.min(wake, time > now ? time : now + 20); };
+	due(launch - 2);
+	if (launch - now <= 2) return Math.max(1, launch - now);
+	for (const [last, interval] of [[pool.lastNetwork,10000],[pool.lastReconcile,30000],[pool.lastCleanup,500],
+		[pool.lastMonitor,1000],[pool.lastShare,1000],[pool.lastUi,UI_MS]]) due(last + interval);
+	due(pool.nextForeign); due(pool.nextAdmissionService); due(pool.xp?.nextTick); due(pool.cfg.backgroundPrep?.nextTick);
+	for (const p of lanes) {
+		if (p.mode === "RUNNING") due(p.nextHealth);
+		due(p.recovery?.checkAt); due(p.recovery?.deadline);
+		if (p.mode === "TUNING") due(Math.max(now + 5, p.nextRetry || 0));
+		if (p.shadow?.tuner) due(Math.max(now + 5, p.shadow.retryAt || 0));
+		if (p.mode === "RUNNING" && !p.recovery && !p.drain && !p.swap?.restoring && launch - now > 20) {
+			const plan = p.runtime.plan;
+			const planningAt = p.nextLanding - plan.times.W - Math.max(2000, p.cfg.lead + 250 + plan.period * 2);
+			wake = Math.min(wake, Math.max(now + 1, planningAt));
+		}
+	}
+	return Math.max(1, wake - now);
 }
 
 export function serviceHackingPolicy(ns, pool) {
@@ -354,6 +400,7 @@ function launchPipelineChunks(ns, pool) {
 				(!next || p.queue[0].launchAt < next.queue[0].launchAt)) next = p;
 		}
 		if (!next) return;
+		pool.launchDriftMax = Math.max(pool.launchDriftMax || 0, Date.now() - next.queue[0].launchAt);
 		const r = pool.api.launchDueChunks(ns, next.queue, next.name, next.cfg, next.batches,
 			next.stats, pool.running, pool.runningByChunk, next.drain, 1);
 		next.queue = r.queue; next.drain = r.drain;
@@ -413,6 +460,7 @@ function reserveBudgetedBatch(ns, pool, p, id, landing, plan, cfg, priorChunks =
 		const result = reserve(ns, p.name, id, landing, plan, pool.network.hosts,
 			placement, pool.reservations, pool.running, pool.foreign);
 		if (!result) {
+			pool.foreignFastUntil = Date.now() + 2000; pool.nextForeign = 0;
 			api.rollbackReservations(pool.reservations, mark);
 			if (!reason) { reason = "no whole HWGW batch fits host RAM reservations"; ramFailure = true; }
 			break;
@@ -482,6 +530,9 @@ function refreshPipelineNetwork(ns, pool, now) {
 	const next = new Map(network.hosts.map(h => [h.name, h.maxRam]));
 	const lost = new Set([...old].filter(([name, ram]) => (next.get(name) || 0) < ram).map(([name]) => name));
 	pool.network = network;
+	if (old.size !== next.size || [...old].some(([name, ram]) => next.get(name) !== ram)) {
+		pool.foreignFastUntil = now + 2000; pool.nextForeign = 0;
+	}
 	pool.api.syncForeignUsageHosts(network.hosts, pool.foreign);
 	if (!lost.size) return;
 	for (const p of pool.pipelines.values()) {
