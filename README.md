@@ -37,9 +37,11 @@ run supervisor.js
 ```
 
 Run only one supervisor. It starts and monitors the other services, so you do not
-need to launch `daemon.js` or the individual managers yourself. Open the
-supervisor's script log for the overall dashboard; the daemon's log shows the
-hacking dashboard.
+need to launch `daemon.js` or the individual managers yourself. The supervisor
+opens its detailed dashboard and the daemon's log automatically, arranged side
+by side. Use `--dashboard-layout none` to keep your own window positions, or
+`--open-dashboards false` to manage the log windows yourself. No other service
+logs open automatically.
 
 ### 3. Let it get established
 
@@ -231,13 +233,16 @@ their original arguments.
 2. Stop the supervisor first, then the manager(s) whose settings you are changing.
 3. Start one supervisor with your desired flags.
 
-For example, detailed hacking diagnostics require a newly started daemon. After
-stopping the supervisor and daemon, restart with your usual flags plus
-`--dashboard-details true`:
+Detailed dashboards are enabled by default. To start with compact dashboards,
+use your usual flags plus `--dashboard-details false`:
 
 ```text
-run supervisor.js --dashboard-details true
+run supervisor.js --dashboard-details false
 ```
+
+An adopted daemon keeps its existing display mode and arguments. The supervisor
+opens that daemon's existing log without restarting it for a UI preference.
+These settings survive the usual reset/bootstrap through saved supervisor arguments.
 
 See the
 [full option reference](docs/usage-reference.md#supervisor-controls) for defaults

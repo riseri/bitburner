@@ -60,7 +60,9 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--progression-actions` | `true` | Buy programs and install faction backdoors when Singularity is unlocked |
 | `--max-targets` | `auto` | Automatic admission up to 6; explicit integer 1..6 remains available. Capacity and marginal value determine actual lane count. |
 | `--background-prep` | `true` | Prepare promising targets while the current target earns, subject to health and resource gates |
-| `--dashboard-details` | `false` | Show detailed diagnostics; forwarded to a newly started daemon |
+| `--dashboard-details` | `true` | Show detailed diagnostics; forwarded to a newly started daemon; adopted daemons keep their arguments |
+| `--open-dashboards` | `true` | Open only the supervisor and active daemon logs once per PID; `false` also disables layout |
+| `--dashboard-layout` | `auto` | Fit the two logs side by side; `none` opens them without moving or resizing |
 | `--go-takeover` | `true` | Finish an existing ordinary IPvGO board on startup; set false when playing manually |
 | `--diagnostics` | `true` | Run `doctor.js` once at startup; show warnings |
 | `--augmentations` | `true` | Refresh advice about once a minute; requires BN4 or SF4 level 1+ |

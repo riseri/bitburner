@@ -1,8 +1,9 @@
 # Dashboard layout
 
-Both the daemon and supervisor use a plain-text, 78-column layout. There is no
-HTML overlay, log-window resizing, animation, new status port or faster refresh
-loop. Live income appears before forecasts or target rankings.
+Both the daemon and supervisor use a plain-text, 78-column layout. The supervisor
+opens and arranges the two log windows using supported Netscript UI APIs.
+There is no HTML overlay, animation, new status port or faster refresh loop.
+Live income appears before forecasts or target rankings.
 
 The shared layout uses a strong title band, separated section bands, whitespace,
 and a boxed target-ranking table. Labels remain fixed-width and wrapped values
@@ -11,7 +12,12 @@ losing long warnings or recovery reasons.
 
 ## Default view
 
-The daemon is also summary-first now. Its normal view shows the current target, live state, measured/model income, target health, pipeline size, RAM use, and the background/next target. Low-level recovery counters, timing, thread sizing, fleet internals, and the full auto-target ranking are hidden unless `--dashboard-details true` is enabled. The supervisor remains the broader human-facing overview across hacking, stocks, contracts, progression, IPvGO, and managed services.
+`run supervisor.js` uses detailed mode and forwards it to newly launched daemons.
+The supervisor remains the overview across hacking, stocks, contracts, progression,
+IPvGO, and managed services. An adopted daemon retains its actual arguments and
+display mode. A daemon launched directly still defaults to a compact view with
+the current target, live state, measured/model income, target health, pipeline
+size, RAM use, and the background/next target.
 
 Current pipeline misses, drift and recovery are separate from session restart
 counts. Historical event text is labeled as history, not an active alarm. A
@@ -25,7 +31,7 @@ observation progress or the incumbent they are waiting on. During tuning,
 preparation or draining, saved plan generations are labeled `RETAINED`; they do
 not imply that the target is currently earning.
 
-The default daemon no longer prints the old four-row `TARGETS / NEXT 10M / PLANNING SNAPSHOT` table. When background preparation is active, that target is shown directly as the actionable next target with ETA, health, potential and held RAM. When background prep is disabled or has no candidate, the daemon shows only the best alternative candidate. The full ranking remains available in details as `AUTO TARGET RANKING / DETAILS`, where the next-ten-minute and steady-state rates are explicitly labeled.
+The compact daemon view omits the old four-row `TARGETS / NEXT 10M / PLANNING SNAPSHOT` table. When background preparation is active, that target is shown directly as the actionable next target with ETA, health, potential and held RAM. When background prep is disabled or has no candidate, the daemon shows only the best alternative candidate. The full ranking remains available in details as `AUTO TARGET RANKING / DETAILS`, where the next-ten-minute and steady-state rates are explicitly labeled.
 
 Long reasons and action descriptions wrap instead of running off the right edge.
 Table names are shortened to fit their columns; scheduling still uses full names.
@@ -40,15 +46,15 @@ The normal startup command is unchanged:
 run supervisor.js
 ```
 
-To include detailed diagnostics on the next startup:
+To use compact rendering on the next startup:
 
 ```text
-run supervisor.js --dashboard-details true
+run supervisor.js --dashboard-details false
 ```
 
 The flag is forwarded to a newly started daemon. As with other supervisor flags,
-it does not change arguments on a daemon that is already running. Stop the
-existing supervisor/daemon first, using PIDs from `ps` when they have arguments.
+it does not change arguments on a daemon that is already running. A healthy
+adopted daemon is never restarted merely to change dashboard details.
 The daemon can also accept `--dashboard-details true` when run on its own; do not
 start it beside an already-supervised daemon.
 
@@ -59,10 +65,33 @@ reservations, cloud/fleet internals, background-prep diagnostics, and the full
 auto-target ranking. This is a presentation setting only: no scheduling or
 recovery policy changes with the view.
 
-After merging, sync all of `src`, including `lib/dashboard.js`, before the usual
-one-time supervisor/daemon restart. Dashboard helpers are used by the supervisor,
-daemon and human-facing standalone/service panels; remote HGW and background workers
-are unchanged.
+## Automatic dashboard workspace
+
+The supervisor opens its own tail before entering starter mode, then opens the
+managed or adopted daemon's exact PID after service reconciliation. Other managers
+and actors do not open automatically. Each PID is attempted once, including failed
+attempts: closing or moving a log yourself is respected on later ticks. A daemon
+replacement opens once under its new PID and receives its initial layout.
+
+`--dashboard-layout auto` (default) sizes the logs to the viewport through
+`ns.ui.windowSize()`, capped at 780 by 720 pixels each. Small displays get smaller
+panes; exceptionally narrow displays may overlap to keep title bars reachable.
+If viewport information is unavailable, layout assumes 1024 by 768 pixels.
+Layout runs once after a short cosmetic delay to let each tail mount.
+
+Use `--dashboard-layout none` to open logs without moving or resizing them.
+`--open-dashboards false` disables both opening and layout. Unsupported UI APIs,
+disappearing processes, and positioning errors are silently ignored; automation
+continues with no retries or warning spam. These options and explicit detail
+opt-outs survive the existing version-2 bootstrap argument persistence. Older
+saved arguments without these flags receive the current defaults.
+
+Only `ns.ui.openTail`, `ns.ui.windowSize`, `ns.ui.resizeTail`, and `ns.ui.moveTail`
+are new Netscript API references in the supervisor dependency tree. All four are
+zero-RAM in the [official RAM cost table](https://github.com/bitburner-official/bitburner-src/blob/stable/src/Netscript/RamCostGenerator.ts).
+Expected added RAM is 0 GB; no worker APIs or advanced capabilities are added.
+The installed game's RAM calculator and live window appearance have not been
+measured by the automated tests.
 
 ## Tests
 
