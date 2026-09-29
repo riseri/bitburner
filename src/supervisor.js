@@ -34,7 +34,9 @@ export async function main(ns) {
 	const flags = ns.flags([
 		["background-prep", true],
 		["max-targets", "auto"],
-		["dashboard-details", false],
+		["dashboard-details", true],
+		["open-dashboards", true],
+		["dashboard-layout", "auto"],
 		["contracts", true],
 		["progression", true],
 		["progression-actions", ACTION_DEFAULTS["progression-actions"]],
@@ -100,6 +102,8 @@ export async function main(ns) {
 
 	const cfg = {
 		dashboardDetails: asBoolean(flags["dashboard-details"]),
+		openDashboards: asBoolean(flags["open-dashboards"]),
+		dashboardLayout: String(flags["dashboard-layout"]),
 		telemetry: asBoolean(flags.telemetry),
 		diagnostics: asBoolean(flags.diagnostics),
 		augmentations: asBoolean(flags.augmentations),
@@ -152,6 +156,8 @@ export async function main(ns) {
 
 	validateSupervisorOptions(flags, cfg);
 	await saveSupervisorBootstrap(ns);
+	const dashboardUi = { opened: new Set() };
+	openDashboard(ns, cfg, dashboardUi, ns.pid, 0);
 	const required = supervisorFiles(cfg, supervisorCapabilities(ns));
 
 	for (const script of required) {
@@ -172,7 +178,7 @@ export async function main(ns) {
 	targetLimit(flags["max-targets"]);
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
 	daemonArgs.push("--max-targets", flags["max-targets"]);
-	if (cfg.dashboardDetails) daemonArgs.push("--dashboard-details", true);
+	daemonArgs.push("--dashboard-details", cfg.dashboardDetails);
 	if (cfg.shareEnabled) daemonArgs.push("--fleet-share", true);
 	const budget = supervisorRamBudget(ns, cfg, supervisorCapabilities(ns));
 	daemonArgs.push("--home-reserve", Math.max(cfg.homeReserve, budget.optionalRam + budget.utilityRam + 8));
@@ -222,6 +228,8 @@ export async function main(ns) {
             ? ns.getScriptRam("home-upgrade.js", HOME) : 0;
         cfg.shareReserve = Math.max(cfg.shareReserve, upgradeReserve);
 		const serviceBlocker = tickServicePriority(ns, reserveRouteHelper(ns, services, admittedServices), "", upgradeReserve);
+		const managedDaemon = coreServices.find(service => service.name === DAEMON);
+		if (managedDaemon.state !== "CONFLICT") openDashboard(ns, cfg, dashboardUi, managedDaemon.pid, 1);
 
 		// Short-lived helpers are lower priority than every enabled persistent service.
 		for (const job of jobs) {
@@ -1447,7 +1455,38 @@ function createSupervisorUtilities(cfg) {
 	return jobs;
 }
 
+// Cosmetic setup only: remember attempts, including failures and manually closed tails.
+// Each replacement daemon gets its own attempt without changing service ownership.
+function openDashboard(ns, cfg, state, pid, column) {
+	if (!cfg.openDashboards || !pid || state.opened.has(pid)) return;
+	state.opened.add(pid);
+	try {
+		ns.ui.openTail(pid);
+		if (cfg.dashboardLayout !== "auto") return;
+		// Let the tail mount before sizing it; never delay the automation loop for UI.
+		setTimeout(() => layoutDashboard(ns, pid, column), 50);
+	} catch { /* Missing UI APIs or a disappearing process cannot stop automation. */ }
+}
+
+function layoutDashboard(ns, pid, column) {
+	let viewportWidth = 1024, viewportHeight = 768;
+	try {
+		const size = ns.ui.windowSize();
+		if (Number.isFinite(size[0]) && size[0] > 0 && Number.isFinite(size[1]) && size[1] > 0) {
+			[viewportWidth, viewportHeight] = size;
+		}
+	} catch { /* Conservative defaults for versions without viewport information. */ }
+	const margin = 8, gap = 8;
+	const width = Math.max(150, Math.min(780, Math.floor((viewportWidth - 2 * margin - gap) / 2)));
+	const height = Math.max(30, Math.min(720, viewportHeight - 2 * margin - 40));
+	// On very narrow screens allow overlap while keeping both title bars reachable.
+	const x = Math.max(0, Math.min(margin + column * (width + gap), viewportWidth - width - margin));
+	try { ns.ui.resizeTail(width, height, pid); } catch { /* Cosmetic only. */ }
+	try { ns.ui.moveTail(x, margin, pid); } catch { /* Cosmetic only. */ }
+}
+
 function validateSupervisorOptions(flags, cfg) {
+	if (cfg.dashboardLayout !== undefined && !["auto", "none"].includes(cfg.dashboardLayout)) throw new Error("dashboard-layout must be auto or none");
 	if (!["auto", "keep", "programs", "augmentations", "none"].includes(String(flags.savings))) throw new Error("savings must be auto, keep, programs, augmentations, or none");
 	const amount = Number(flags["save-amount"]);
 	if (!Number.isFinite(amount) || amount < -1 || (amount < 0 && amount !== -1)) throw new Error("save-amount must be nonnegative or -1 (unset)");

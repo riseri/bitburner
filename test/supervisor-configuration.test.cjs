@@ -80,20 +80,23 @@ test('an adopted augmentation manager restarts without obsolete installation arg
 
 function supervisorFixture(node) {
     const clock = new Clock(), api = loadScript('supervisor.js', clock), processes = new Map(), ports = new Map();
-    const files = new Map(), launches = [], reads = [], reset = { currentNode: node, lastNodeReset: 1, lastAugReset: 2, ownedSF: new Map() };
+    const files = new Map(), launches = [], reads = [], logs = [], killed = [], uiCalls = [], reset = { currentNode: node, lastNodeReset: 1, lastAugReset: 2, ownedSF: new Map() };
+    const { readArgument } = loadScript('lib/service-lifecycle.js', clock);
     let pid = 10, navigator = false;
-    const ns = { args: [], pid: 1, flags: pairs => Object.fromEntries(pairs), getHostname: () => 'home',
-        disableLog() {}, clearLog() {}, print() {}, tprint() {}, scan: () => [], ps: () => [...processes.values()],
+    const ns = { args: [], pid: 1, flags: pairs => Object.fromEntries(pairs.map(([name, value]) => [name, readArgument(ns.args, `--${name}`, value)])), getHostname: () => 'home',
+        disableLog() {}, clearLog() {}, print: line => logs.push(String(line)), tprint() {}, scan: () => [], ps: () => [...processes.values()],
+        ui: { openTail: id => uiCalls.push(['open', id]), windowSize: () => [1024, 768],
+            moveTail: (...args) => uiCalls.push(['move', ...args]), resizeTail: (...args) => uiCalls.push(['resize', ...args]) },
         getResetInfo: () => reset, hasTorRouter: () => false, getServerMoneyAvailable: () => 1e6,
         fileExists: file => file === 'DarkscapeNavigator.exe' ? navigator : true,
         getScriptRam: file => { reads.push(file); return /augmentation|progression-(purchase|backdoor)/.test(file) ? 100 : 2; },
         getServerMaxRam: () => 4096, getServerUsedRam: () => 0, isRunning: id => processes.has(id),
         read: file => files.get(file) || '', write: async (file, value) => files.set(file, value),
         getPortHandle: n => { if (!ports.has(n)) ports.set(n, new Port()); return ports.get(n); },
-        kill: id => processes.delete(id),
+        kill: id => { killed.push(id); return processes.delete(id); },
         run: (filename, threads, ...args) => { const p = { filename, threads, args, pid: ++pid }; processes.set(pid, p); launches.push(p); return pid; },
         sleep: async () => { throw new Error('end fixture'); } };
-    return { ns, api, launches, files, reads, unlockDarknet: () => { navigator = true; } };
+    return { ns, api, clock, processes, launches, files, reads, logs, killed, uiCalls, unlockDarknet: () => { navigator = true; } };
 }
 
 test('plain supervisor startup in BN5 excludes locked helpers and persists new defaults', async () => {
@@ -144,4 +147,154 @@ test('supervisor does not compete with an active INT session and resumes after i
     f.files.set('data/intelligence-session.json', JSON.stringify(session));
     await assert.rejects(f.api.main(f.ns), /end fixture/);
     assert.ok(f.launches.some(p => p.filename === 'daemon.js'));
+});
+
+async function dashboardTicks(f, count = 3, afterTick = () => {}) {
+    let ticks = 0;
+    f.ns.sleep = async ms => {
+        await f.clock.runUntil(f.clock.now + ms);
+        afterTick(++ticks);
+        if (ticks >= count) throw new Error('end fixture');
+    };
+    await assert.rejects(f.api.main(f.ns), /end fixture/);
+}
+
+test('plain startup renders details, forwards details and opens only supervisor and daemon once', async () => {
+    const f = supervisorFixture(5);
+    await dashboardTicks(f);
+    const daemon = f.launches.find(p => p.filename === 'daemon.js');
+    assert.equal(daemon.args[daemon.args.indexOf('--dashboard-details') + 1], true);
+    assert.ok(!f.logs.some(line => line.includes('More detail:')));
+    assert.deepEqual(f.uiCalls.filter(c => c[0] === 'open'), [['open', 1], ['open', daemon.pid]]);
+    assert.equal(f.uiCalls.filter(c => c[0] === 'resize').length, 2);
+    assert.equal(f.uiCalls.filter(c => c[0] === 'move').length, 2);
+});
+
+test('explicit string false keeps both newly launched dashboards compact', async () => {
+    const f = supervisorFixture(5);
+    f.ns.args = ['--dashboard-details', 'false'];
+    await dashboardTicks(f);
+    const daemon = f.launches.find(p => p.filename === 'daemon.js');
+    assert.equal(daemon.args[daemon.args.indexOf('--dashboard-details') + 1], false);
+    assert.ok(f.logs.some(line => line.includes('More detail:')));
+});
+
+test('open-dashboards false disables all UI calls without changing service startup', async () => {
+    const f = supervisorFixture(5);
+    f.ns.args = ['--open-dashboards', 'false'];
+    f.ns.ui = new Proxy({}, { get() { assert.fail('UI must not be accessed'); } });
+    await dashboardTicks(f);
+    assert.ok(f.launches.some(p => p.filename === 'daemon.js'));
+    assert.deepEqual(f.uiCalls, []);
+    assert.equal(f.clock.steps, 0, 'no layout timer');
+});
+
+test('dashboard-layout none opens tails but never reads viewport, moves or resizes', async () => {
+    const f = supervisorFixture(5);
+    f.ns.args = ['--dashboard-layout', 'none'];
+    f.ns.ui.windowSize = () => assert.fail('no layout queries');
+    await dashboardTicks(f);
+    assert.equal(f.uiCalls.length, 2);
+    assert.ok(f.uiCalls.every(c => c[0] === 'open'));
+    assert.equal(f.clock.steps, 0);
+});
+
+for (const args of [[], ['--dashboard-details', false]]) {
+    test(`adopted daemon keeps ${JSON.stringify(args)} and is never restarted for UI preferences`, async () => {
+        const f = supervisorFixture(5);
+        f.processes.set(42, { filename: 'daemon.js', pid: 42, threads: 1, args: [...args] });
+        await dashboardTicks(f);
+        assert.deepEqual(f.processes.get(42).args, args);
+        assert.ok(!f.launches.some(p => p.filename === 'daemon.js'));
+        assert.deepEqual(f.killed, []);
+        assert.deepEqual(f.uiCalls.filter(c => c[0] === 'open'), [['open', 1], ['open', 42]]);
+        assert.ok(!f.logs.some(line => line.includes('More detail:')), 'supervisor uses its own detailed default');
+    });
+}
+
+test('crashed adopted daemon retains compact args and opens replacement PID once after backoff', async () => {
+    const f = supervisorFixture(5), args = ['--dashboard-details', false];
+    f.processes.set(42, { filename: 'daemon.js', pid: 42, threads: 1, args });
+    await dashboardTicks(f, 5, tick => { if (tick === 1) f.processes.delete(42); });
+    const replacements = f.launches.filter(p => p.filename === 'daemon.js');
+    assert.equal(replacements.length, 1);
+    assert.deepEqual(replacements[0].args, args);
+    assert.deepEqual(f.uiCalls.filter(c => c[0] === 'open'), [['open', 1], ['open', 42], ['open', replacements[0].pid]]);
+    assert.deepEqual(f.killed, []);
+});
+
+test('supervisor tail opens in 8 GB starter mode before a daemon can fit', async () => {
+    const f = supervisorFixture(5);
+    f.ns.args = ['--progression', false];
+    f.ns.getServerMaxRam = () => 8;
+    f.ns.getServerUsedRam = () => 7.7;
+    f.ns.getScriptRam = file => file === 'supervisor.js' ? 7.7 : 16;
+    f.ns.hasRootAccess = () => true;
+    await dashboardTicks(f);
+    assert.deepEqual(f.uiCalls.filter(c => c[0] === 'open'), [['open', 1]]);
+    assert.ok(f.logs.some(line => line.includes('STARTER MODE')));
+    assert.equal(f.launches.length, 0);
+});
+
+for (const failure of ['missing-ui', 'openTail', 'windowSize', 'resizeTail', 'moveTail']) {
+    test(`UI failure (${failure}) neither interrupts services nor retries every tick`, async () => {
+        const f = supervisorFixture(5);
+        let attempts = 0;
+        if (failure === 'missing-ui') delete f.ns.ui;
+        else f.ns.ui[failure] = () => { attempts++; throw new Error('UI unavailable'); };
+        await dashboardTicks(f);
+        assert.equal(f.launches.filter(p => p.filename === 'daemon.js').length, 1);
+        assert.ok(f.launches.some(p => p.filename === 'progression-manager.js'));
+        assert.deepEqual(f.killed, []);
+        assert.equal(attempts, failure === 'missing-ui' ? 0 : 2);
+        if (failure === 'windowSize') assert.equal(f.uiCalls.filter(c => c[0] === 'resize').length, 2);
+    });
+}
+
+test('dashboard initialization is idempotent and layout waits for mounting, then fits small screens', async () => {
+    const f = supervisorFixture(5), cfg = { openDashboards: true, dashboardLayout: 'auto' }, state = { opened: new Set() };
+    f.ns.ui.windowSize = () => [640, 480];
+    for (let tick = 0; tick < 3; tick++) {
+        f.api.openDashboard(f.ns, cfg, state, 1, 0);
+        f.api.openDashboard(f.ns, cfg, state, 42, 1);
+    }
+    assert.deepEqual(f.uiCalls, [['open', 1], ['open', 42]], 'layout is deferred');
+    await f.clock.runUntil(f.clock.now + 50);
+    const sizes = f.uiCalls.filter(c => c[0] === 'resize');
+    const positions = f.uiCalls.filter(c => c[0] === 'move');
+    assert.equal(sizes.length, 2);
+    assert.equal(positions.length, 2);
+    for (let i = 0; i < 2; i++) {
+        assert.ok(positions[i][1] + sizes[i][1] <= 640);
+        assert.ok(positions[i][2] + sizes[i][2] + 40 <= 480);
+    }
+    assert.ok(positions[0][1] + sizes[0][1] <= positions[1][1]);
+});
+
+for (const args of [[], ['--open-dashboards', false, '--dashboard-details', false, '--dashboard-layout', 'none']]) {
+    test(`bootstrap round trip preserves dashboard preferences ${JSON.stringify(args)}`, async () => {
+        const f = supervisorFixture(5);
+        f.ns.args = args;
+        await dashboardTicks(f, 1);
+        const raw = f.files.get('data/supervisor-bootstrap.json');
+        assert.deepEqual(JSON.parse(raw), { version: 2, args, updatedAt: 1000000 });
+        const restored = supervisorFixture(5), bootstrap = loadScript('bootstrap.js', restored.clock);
+        await bootstrap.main({ getHostname: () => 'home', read: () => raw, tprint() {},
+            spawn: (file, opts, ...saved) => { assert.equal(file, 'supervisor.js'); restored.ns.args = saved; } });
+        await dashboardTicks(restored, 1);
+        assert.deepEqual(restored.ns.args, args);
+        assert.equal(restored.uiCalls.filter(c => c[0] === 'open').length, args.length ? 0 : 2);
+        const daemon = restored.launches.find(p => p.filename === 'daemon.js');
+        assert.equal(daemon.args[daemon.args.indexOf('--dashboard-details') + 1], args.length === 0);
+    });
+}
+
+test('legacy saved arguments lacking UI flags receive current dashboard defaults', async () => {
+    const f = supervisorFixture(5), bootstrap = loadScript('bootstrap.js', f.clock);
+    await bootstrap.main({ getHostname: () => 'home', read: () => JSON.stringify({ version: 1, args: ['--profile', 'observe'] }),
+        tprint() {}, spawn: (file, opts, ...args) => { f.ns.args = args; } });
+    await dashboardTicks(f, 1);
+    assert.equal(f.uiCalls.filter(c => c[0] === 'open').length, 2);
+    const daemon = f.launches.find(p => p.filename === 'daemon.js');
+    assert.equal(daemon.args[daemon.args.indexOf('--dashboard-details') + 1], true);
 });
