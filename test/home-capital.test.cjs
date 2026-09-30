@@ -107,3 +107,14 @@ test('no-Singularity helper exits normally without touching expensive APIs',asyn
  const f=actorFixture();f.reset.currentNode=1;f.ns.args=['1:1:2',''];delete f.ns.singularity;
  await loadScript('home-capital.js',f.clock).main(f.ns);assert.equal(f.count(),0);
 });
+
+for (const kind of ['ram','cores']) for (const name of ['Ordinary donation aug','The Red Pill'])
+ test(`funded ${name} donation goal protects capital from home ${kind}`,async()=>{
+  const f=actorFixture(),funding=25e9;
+  f.expected.kind=kind;f.expected.cost=kind==='ram'?f.quote.ramCost:f.quote.coreCost;
+  f.goal.target='augmentation:'+name;f.goal.amount=funding/.9;f.cash(f.goal.amount);
+  f.goal.priority=name==='The Red Pill'?100:72;
+  Object.assign(f.objective,{limitingResource:'purchase',reputationStrategy:'DONATE',requiredCash:funding,
+   selectedPlan:{next:{name,price:5e9,donationPlanned:true,donationCost:20e9,fundingCost:funding}}});
+  await f.run();assert.equal(f.count(),0);
+ });

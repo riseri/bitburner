@@ -154,6 +154,20 @@ test('plain supervisor startup in BN4 enables the augmentation loop without an i
     assert.equal(aug.args[aug.args.indexOf('--min-install') + 1], 5);
 });
 
+test('augmentation donation opt-out reaches both manager and supervised planning advice', async () => {
+    const f = supervisorFixture(4); f.ns.args = ['--augmentation-donate', 'false'];
+    await assert.rejects(f.api.main(f.ns), /end fixture/);
+    const manager = f.launches.find(p => p.filename === 'augmentation-manager.js');
+    assert.equal(manager.args[manager.args.indexOf('--donate') + 1], false);
+    const jobs = f.api.createSupervisorUtilities({ augmentations: true, augmentationFocus: 'hacking',
+        augmentationTarget: '', augmentationMultiplier: 0, augmentationDonate: false, augmentationFocusWork: true,
+        augmentationCashReserve: .2, progression: true, progressionActions: true });
+    const planner = jobs.find(job => job.script === 'augmentation-planner.js');
+    assert.equal(planner.args[planner.args.indexOf('--donate') + 1], false);
+    assert.equal(planner.args[planner.args.indexOf('--cash-reserve') + 1], .2);
+    assert.equal(planner.args[planner.args.indexOf('--focus-work') + 1], true);
+});
+
 test('a Darknet unlock admits the service without restarting the supervisor', async () => {
     const f = supervisorFixture(5);
     let ticks = 0;

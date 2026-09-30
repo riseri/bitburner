@@ -53,6 +53,90 @@ beat continuing faction work. Unknown recovery time is explicitly heuristic.
 Red Pill installs immediately, with restart/manual-work checks intact; no further
 automatic augmentation reset occurs after it is installed.
 
+## Donation funding coordination
+
+The selected seller still compares concurrent faction-work and cash ETAs against
+donation plus purchase. Donation requires current favor eligibility, offered faction
+work, a valid Formulas quote, and enabled donation settings. Seller hysteresis keeps
+an incumbent within 10% of the best ETA. Missing donation formulas use the ordinary
+work path. The supervisor forwards `--augmentation-donate`, work focus, and the cash
+reserve to its read-only planner as well as its augmentation manager.
+
+`lib/augmentation-funding.js` defines the authoritative current-run funding amount:
+
+```js
+(next.chainCost || next.price)
+    + (next.donationPlanned ? next.donationCost : 0)
+```
+
+An absent selected item requires no funding; invalid quotes cannot authorize spending.
+The chain already includes the current purchase. `acquisitionCost` is not added to
+it. Only the actionable step's planned donation is funded; later chain donations
+are quoted when those steps become actionable. Selected items expose `fundingCost`,
+`progressionStrategy`, `workEtaMs`, and `donationEtaMs`. Fresh plans reprice cash,
+reputation, and the selected seller while retaining the existing static catalog cache.
+
+The version-1 progression snapshot keeps `requiredReputation` as the augmentation
+requirement and adds `reputationStrategy` (`DONATE`, `WORK`, or `NONE`) plus `donation`
+metadata: eligibility, faction, remaining reputation, quote, work/donation ETAs, and
+required/remaining funding. `requiredCash` and `remainingCash` include the selected
+donation. An unfunded donation path is limited by `cash`; a funded package is in the
+`purchase` state. Work retains the `reputation` bottleneck. Daedalus, queued Red Pill
+installation, and final-server milestone requirements keep their existing semantics.
+The daemon consumes these generic fields through its existing reader and ETA policy.
+
+Automatic savings use one `augmentation:<name>` target for the complete package,
+divided by `1 - augmentationCashReserve` exactly once. Manual augmentation savings
+mode retains its existing purchase-manually reserve semantics and uses the same
+funding amount. Material quote changes update the durable goal; changes below the
+larger of $1 or one part per million of the desired goal avoid file writes. Strategy
+changes bypass that threshold, so even a tiny old donation reserve disappears when
+work becomes preferable. Priority, target, and liquidity changes also update promptly.
+High-priority liquidity goals retain a fresh heartbeat for the stock reader.
+
+The donation inherits its augmentation's priority. Ordinary plans retain 70–72 and
+cannot request stock liquidity. Red Pill, including a selected prerequisite for its
+chain, retains 100 and existing authenticated liquidity eligibility. Daedalus (95)
+and critical service RAM (90) still outrank ordinary augmentations. Authorized
+performance/cloud requests at 79 can still outrank ordinary augmentation requests;
+the shared arbiter decides. Spenders reread the complete selected savings floor, so
+unapproved infrastructure and stock access cannot consume protected acquisition cash.
+
+Player faction work continues while saving for donation, reducing the remaining
+quote. Normal share RAM is off for the donation cash bottleneck; the work strategy
+retains spare-only sharing and Red Pill's existing aggressive demand. Detailed
+supervisor and standalone augmentation output show the selected strategy, rep gap,
+work rate/ETA, donation quote/ETA, purchase/chain cost, and full funding progress.
+Compact output adds the strategy to the existing selected/recommendation rows.
+
+Immediately before donation the manager rereads live reputation, price, eligibility,
+formula quote, cash, reserve, and savings. Donation and purchase can consume only
+their matching supervisor goal; manual and unrelated savings remain protected.
+Successful donation immediately rebuilds the plan from actual reputation and cash,
+and purchase waits for the refreshed decision. Existing conservative reset economics
+for donation-selected candidates remain unchanged.
+
+| Worked example | Strategy and funding |
+| --- | --- |
+| Work 12m; donation path 3m; purchase $5b; donation $20b; cash $8b | DONATE; `requiredCash` $25b, remaining $17b; automatic goal $27.78b at a 10% reserve |
+| Work 2m; donation path 7m; purchase $5b | WORK; funding $5b; automatic goal $5.56b at a 10% reserve; no donation reserve |
+| Donation remains best as work reduces the rep gap from 1m to 400k; purchase $5b; quote drops $25b to $10b | Funding falls $30b to $15b; automatic goal falls $33.33b to $16.67b at a 10% reserve, with the same target |
+
+Against baseline `1352836d861dfee41357e77fcecb3dc84f92465d`, recursive source/import
+inventories add no Netscript API references to daemon, fleet manager, starter worker,
+supervisor, progression manager, or augmentation producer/helper. Resident snapshot
+and dashboard consumers gain only the pure funding module; starter worker imports
+do not change. The standalone planner additionally imports the existing text-only
+dashboard module. Actual installed-game RAM is not measured by the Node harness.
+
+Donation-coordination validation (2026-09-29): 61 new regression tests and a stronger
+matching-goal/manual-savings assertion. The focused planning, loop, progression,
+milestone balance, supervisor, capital, reset-policy, and import run passed 245 tests.
+The final `npm test` passed all 886 tests in 100.1 seconds, with zero failures,
+skips, or cancellations. It includes all progression actions/milestones, savings,
+stock liquidity, home/cloud investment, starter compatibility, and scheduler
+simulations. `git diff --check` passed. Tests use repository mocks and simulations.
+
 ## Hacking, programs and home
 
 Live backdoor requirements guide faction skill targets. Daedalus uses 2500 hacking

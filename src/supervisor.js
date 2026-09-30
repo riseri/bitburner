@@ -6,7 +6,7 @@ import { intelligenceSessionActive } from "lib/intelligence-session.js";
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { loadTelemetry, recordTelemetry, summarizeTelemetry } from "lib/telemetry.js";
-import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime, renderSchedulerCapacity } from "lib/dashboard.js";
+import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime, renderSchedulerCapacity, renderFactionProgression } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
@@ -1143,12 +1143,15 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         row("Objective", p.milestone + " | limited by " + p.limitingResource);
         row("Installed distinct", p.installedCount + " / " + p.countRequired + " | queued distinct " + p.queuedDistinct.length);
         if (p.installDecision) row("Install / wait", p.installDecision);
-        if (p.selectedPlan?.next) row("Selected", p.selectedPlan.next.name + " from " + p.selectedPlan.next.faction + " | " + (p.selectedPlan.next.explanation || ""));
+        if (p.selectedPlan?.next) row("Selected", p.selectedPlan.next.name + " from " + p.selectedPlan.next.faction + " | " +
+            (p.selectedPlan.next.progressionStrategy || p.reputationStrategy || "NONE") + " | " + (p.selectedPlan.next.explanation || ""));
         if (p.missingInformation?.length) row("Unknown", p.missingInformation.join(", "));
     }
 	if (augmentation.recommendation) row("Next", augmentation.recommendation);
 	if (augmentation.formulas) row("Work model", `Exact Formulas | ${Number(augmentation.reputationPerSecond || 0).toFixed(3)} rep/s | share ${Number(augmentation.sharePower || 1).toFixed(3)}x${Number.isFinite(Number(augmentation.projectedFavor)) ? ` | projected favor ${Number(augmentation.projectedFavor).toFixed(2)}` : ""}`);
 	row("Queued", `${Number(augmentation.queued) || 0} augmentation(s) | ${cfg.resetPolicy || "auto"} policy | fallback threshold ${cfg.minInstall}`);
+    if (cfg.dashboardDetails && augmentation.progression?.donation)
+        renderFactionProgression(ns, augmentation.progression.selectedPlan?.next, augmentation.progression.currentCash);
     const d = augmentation.resetDecision;
     if (cfg.dashboardDetails && d) {
         dashboardSection(ns, "Reset decision");
@@ -1492,7 +1495,9 @@ function createSupervisorUtilities(cfg) {
 	const jobs = [];
 	if (cfg.diagnostics) jobs.push(createUtilityJob("doctor.js", "data/diagnostics.json", "diagnostics", [], 0));
 	if (cfg.augmentations) jobs.push(createUtilityJob("augmentation-planner.js", "data/augmentation-plan.json", "augmentation-plan",
-		["--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget, "--price-multiplier", cfg.augmentationMultiplier, "--route", Boolean(cfg.progression && cfg.progressionActions)]));
+		["--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget, "--price-multiplier", cfg.augmentationMultiplier,
+            "--donate", cfg.augmentationDonate, "--focus-work", cfg.augmentationFocusWork, "--cash-reserve", cfg.augmentationCashReserve,
+            "--route", Boolean(cfg.progression && cfg.progressionActions)]));
 	if (cfg.stocks) jobs.push(createUtilityJob("stock-access.js", "data/stock-access.json", "stock-access", [], 60000));
 	return jobs;
 }

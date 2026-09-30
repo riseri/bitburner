@@ -192,3 +192,13 @@ test('missing Formulas, unstable or mismatched milestone evidence and lost facti
         assert.equal(adapter.resetEconomics(f.ns, f.context, f.plan, f.state, ['A']).evidence.reliable, false, kind);
     }
 });
+
+test('donation funding as the effective cash bottleneck retains conservative reset economics', () => {
+    const f = evidenceFixture('cash'); f.plan.next.donationPlanned = true;
+    f.plan.next.donationCost = 20e9; f.plan.next.fundingCost = 20e9 + f.plan.next.price;
+    f.context.objective.reputationStrategy = 'DONATE';
+    const result = adapter.resetEconomics(f.ns, f.context, f.plan, f.state, ['A']);
+    assert.equal(result.evidence.reliable, false); assert.equal(result.evidence.confidence, 'LOW');
+    assert.equal(result.evidence.lanes.length, 0);
+    assert.match(result.evidence.reason, /post-reset.*LOW confidence/);
+});

@@ -60,6 +60,23 @@ test('manual savings and critical milestones stay ahead of fleet capital request
     }
 });
 
+for (const name of ['Ordinary donation aug','The Red Pill'])
+test(`protected ${name} donation funding blocks surplus cloud spending`,async()=>{
+    const f=fixture(),plan={errors:[],next:{name,price:900,repGap:10,donationPlanned:true,donationCost:4500,fundingCost:5400}};
+    const objective={limitingResource:'purchase',reputationStrategy:'DONATE',selectedPlan:plan,
+        savings:{amount:5400,target:'augmentation:'+name,label:name}};
+    f.objective(objective);
+    await f.supervisor.updateSupervisorSavings(f.ns,f.policy,plan);
+    assert.equal(f.goal().amount,6000);
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.equal(f.actions.length,0);assert.ok(f.state.capitalRequest);
+    if(name==='The Red Pill') {
+        await f.supervisor.updateSupervisorSavings(f.ns,f.policy,plan,null,null,f.status());
+        assert.equal(f.goal().target,'augmentation:The Red Pill');assert.equal(f.goal().priority,100);
+        await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);assert.equal(f.actions.length,0);
+    }
+});
+
 test('productive cloud requests can displace ordinary home expansion despite incumbent hysteresis', async()=>{
     const f=fixture();await f.savings.writeSavings(f.ns,1e9,'Optional services','home:ram','supervisor');
     await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);

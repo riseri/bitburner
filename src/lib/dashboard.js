@@ -1,7 +1,28 @@
+import { augmentationFundingCost, augmentationReputationStrategy } from "lib/augmentation-funding.js";
+
 // Text-only presentation helpers. No ports, timers, process control or game state.
 // Keep the same bounded width on Windows and in the supervisor's log window.
 const DASHBOARD_WIDTH = 78;
 const LABEL_WIDTH = 14;
+
+export function renderFactionProgression(ns, next, currentCash) {
+    if (!next) return;
+    const row = (label, value) => dashboardRow(ns, label, value);
+    const number = n => Number.isFinite(n) ? n.toLocaleString("en-US", { maximumFractionDigits: 0 }) : "unknown";
+    const money = n => Number.isFinite(n) ? "$" + number(n) : "unknown";
+    const funding = next.fundingCost ?? augmentationFundingCost(next);
+    dashboardSection(ns, "Faction progression");
+    row("Augmentation", next.name); row("Faction", next.faction);
+    row("Strategy", next.progressionStrategy || augmentationReputationStrategy(next));
+    row("Rep remaining", number(next.repGap));
+    row("Work rate", next.rate > 0 ? number(next.rate) + " rep/s" : "unknown");
+    row("Work ETA", dashboardTime(next.workEtaMs));
+    row("Donation", money(next.donationCost)); row("Donation ETA", dashboardTime(next.donationEtaMs));
+    row("Purchase", money(next.price));
+    if (next.chainCost) row("Chain purchase", money(next.chainCost));
+    row("Funding goal", money(funding)); row("Funding", money(currentCash) + " / " + money(funding));
+    row("Reason", next.explanation || "Selected augmentation acquisition");
+}
 
 export function renderSchedulerCapacity(ns, capacity, details = false) {
     if (!capacity) return;

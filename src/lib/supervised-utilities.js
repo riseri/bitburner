@@ -4,6 +4,7 @@ import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
 import { progressionPrograms } from "lib/programs.js";
+import { augmentationFundingCost, augmentationReputationStrategy } from "lib/augmentation-funding.js";
 
 export function createUtilityJob(script, reportFile, type, args = [], interval = 60000) {
     return { script, reportFile, type, args: ["--report", true, ...args], interval,
@@ -87,11 +88,14 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
             if(p) requests.push({amount:p.cost/(1-(singularity?cfg.progressionCashReserve:0)),target:p.name,label:"Buy "+p.name,priority:85,reason:singularity ? "Fallback program bootstrap" : "Fallback program bootstrap; purchase manually"});
         }
         const goal=controller?.savings || shared?.savings || milestone?.savings;
-        if(goal) requests.push({...goal,amount:goal.amount/(1-(goal.target.startsWith("augmentation:") ? cfg.augmentationCashReserve : 0)),
-            priority:goal.target.includes("The Red Pill") ? 100 : goal.target === "faction:Daedalus" ? 95 : 72,reason:controller?.recommendation || milestone?.label || "Progression requirement",
+        const selectedGoal = goal && plan?.next && goal.target === "augmentation:" + plan.next.name;
+        if(goal) requests.push({...goal,amount:(selectedGoal ? augmentationFundingCost(plan.next) : goal.amount)/(1-(goal.target.startsWith("augmentation:") ? cfg.augmentationCashReserve : 0)),
+            priority:goal.target.includes("The Red Pill") || selectedGoal && plan.next.chainTarget === "The Red Pill" ? 100 : goal.target === "faction:Daedalus" ? 95 : 72,reason:controller?.recommendation || milestone?.label || "Progression requirement",
+            reputationStrategy:selectedGoal ? augmentationReputationStrategy(plan.next) : "NONE",
             liquidity:shared?.limitingResource === "cash" || controller?.phase === "FUND"});
-        else if(plan?.next && cfg.augmentationActions && !plan.errors?.length) requests.push({amount:(plan.next.chainCost || plan.next.price)/(1-cfg.augmentationCashReserve),
-            target:"augmentation:"+plan.next.name,label:plan.next.name,priority:plan.next.name === "The Red Pill"?100:70,
+        else if(plan?.next && cfg.augmentationActions && !plan.errors?.length) requests.push({amount:augmentationFundingCost(plan.next)/(1-cfg.augmentationCashReserve),
+            target:"augmentation:"+plan.next.name,label:plan.next.name,priority:plan.next.name === "The Red Pill" || plan.next.chainTarget === "The Red Pill"?100:70,
+            reputationStrategy:augmentationReputationStrategy(plan.next),
             liquidity:plan.next.repGap===0,reason:"Selected achievable augmentation chain"});
         if(cfg.homeInvestment) requests.push(cfg.homeInvestment);
         // Service admission is evaluated before performance candidates exist.
@@ -110,11 +114,21 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
         else cfg.savingsStatus = "All automatic program unlocks owned";
     } else if (cfg.savingsMode === "augmentations") {
         if (!plan || plan.errors?.length) { cfg.savingsStatus = "Waiting for a fresh, complete augmentation plan"; return; }
-        if (plan.next) desired = { amount: plan.next.price, label: `Augmentation: ${plan.next.name}`, target: `augmentation:${plan.next.name}` };
+        if (plan.next) desired = { amount: augmentationFundingCost(plan.next), label: `Augmentation: ${plan.next.name}`,
+            target: `augmentation:${plan.next.name}`, reputationStrategy: augmentationReputationStrategy(plan.next) };
         cfg.savingsStatus = plan.next ? `Saving for ${plan.next.name}; purchase manually` : "No matching unowned augmentations";
     }
-    if (desired && (current.inactive || current.amount !== desired.amount || current.target !== desired.target || current.owner !== "supervisor" || desired.liquidity || current.liquidity)) {
-        await writeSavings(ns, desired.amount, desired.label, desired.target, "supervisor", { priority: desired.priority || 0, liquidity: Boolean(desired.liquidity && desired.priority >= 80), producerPid: ns.pid });
+    const liquidity = Boolean(desired?.liquidity && desired.priority >= 80);
+    const reputationStrategy = desired?.reputationStrategy || "NONE";
+    // Reprice materially shrinking goals without writing floating-point noise.
+    // High-priority liquidity still needs a fresh heartbeat for the stock reader.
+    const repriced = desired && Math.abs((current.amount || 0) - desired.amount) > Math.max(1, desired.amount * 1e-6);
+    if (desired && (current.inactive || repriced || current.target !== desired.target || current.owner !== "supervisor" ||
+        current.label !== desired.label || (current.priority || 0) !== (desired.priority || 0) || Boolean(current.liquidity) !== liquidity ||
+        (current.reputationStrategy || "NONE") !== reputationStrategy ||
+        liquidity && Date.now() - current.updatedAt >= 10000)) {
+        await writeSavings(ns, desired.amount, desired.label, desired.target, "supervisor", { priority: desired.priority || 0,
+            liquidity, reputationStrategy, producerPid: ns.pid });
     } else if (!desired && current.owner === "supervisor" && current.amount > 0) {
         await writeSavings(ns, 0, "No pending automatic savings goal", "", "supervisor");
     }

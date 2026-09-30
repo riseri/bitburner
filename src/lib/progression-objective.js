@@ -1,5 +1,6 @@
 import { PORTS } from "lib/ports.js";
 import { resetEpoch } from "lib/progression-protocol.js";
+import { augmentationFundingCost, augmentationReputationStrategy } from "lib/augmentation-funding.js";
 
 // Consumers import this cheap reader, never the Singularity producer.
 export function readProgressionSnapshot(ns, now = Date.now()) {
@@ -38,8 +39,9 @@ export function progressionObjective({ currentNode, installed = [], owned = [], 
     const countRequired = Number.isFinite(multipliers?.DaedalusAugsRequirement) ? multipliers.DaedalusAugsRequirement : 30;
     const redPill = installed.includes("The Red Pill") ? "installed" : owned.includes("The Red Pill") ? "queued" : "none";
     const level = Number(player.skills?.hacking) || 0, next = plan?.next;
-    let milestone = "AUGMENTATIONS", limitingResource = next?.repGap > 0 ? "reputation" : "cash";
-    let requiredHacking = null, requiredCash = next?.chainCost || next?.price || 0, requiredReputation = next?.repRequired || null;
+    const selectedStrategy = augmentationReputationStrategy(next);
+    let milestone = "AUGMENTATIONS", limitingResource = selectedStrategy === "WORK" ? "reputation" : "cash";
+    let requiredHacking = null, requiredCash = augmentationFundingCost(next), requiredReputation = next?.repRequired || null;
     if (redPill === "installed") {
         milestone = "FINAL_SERVER"; requiredHacking = finalRequirement; requiredCash = 0;
         limitingResource = finalRequirement == null ? "discovery" : level < finalRequirement ? "hacking" : "completion";
@@ -55,14 +57,20 @@ export function progressionObjective({ currentNode, installed = [], owned = [], 
         if (!next && unlock) { milestone = "FACTION_UNLOCK"; limitingResource = "hacking"; }
         else if (ownedCount >= countRequired) limitingResource = "installation";
     }
-    if (next && next.repGap === 0 && money >= requiredCash && limitingResource === "cash") limitingResource = "purchase";
+    const augmentationMilestone = ["AUGMENTATIONS", "RED_PILL"].includes(milestone);
+    const reputationStrategy = augmentationMilestone ? selectedStrategy : "NONE";
+    if (next && augmentationMilestone && selectedStrategy !== "WORK" && money >= requiredCash && limitingResource === "cash") limitingResource = "purchase";
+    const donation = next && augmentationMilestone ? { planned: Boolean(next.donationPlanned), eligible: Boolean(next.donationEligible),
+        faction: next.faction, reputationRemaining: next.repGap, cost: next.donationCost ?? null,
+        workEtaMs: next.workEtaMs ?? null, donationEtaMs: next.donationEtaMs ?? null,
+        fundingRequired: requiredCash, fundingRemaining: Math.max(0, requiredCash - money) } : null;
     const savings = requiredCash > 0 && !(milestone === "DAEDALUS" && limitingResource === "hacking") ? { amount: requiredCash,
         target: milestone === "DAEDALUS" ? "faction:Daedalus" : next ? "augmentation:" + next.name : "",
         label: milestone === "DAEDALUS" ? "Daedalus invitation" : next?.name || milestone } : null;
     return { currentNode, strategy: currentNode === 4 ? "BN4 hacking and distinct augmentations" : "Generic capability-aware hacking/faction strategy",
         installed: distinctAugmentations(installed), owned: distinctAugmentations(owned), installedCount, ownedCount,
         queuedDistinct: distinctAugmentations(owned).filter(name => !installed.includes(name)), countRequired, redPill,
-        milestone, limitingResource, requiredHacking, requiredReputation, requiredCash, moneyCovered: money >= requiredCash,
+        milestone, limitingResource, requiredHacking, requiredReputation, requiredCash, reputationStrategy, donation, moneyCovered: money >= requiredCash,
         // These are bank-balance goals. Protected savings are part of that bank
         // balance, not a second deduction; spender-specific reserves still gate XP.
         currentCash: money, availableProgressionCash: money, remainingCash: Math.max(0, requiredCash - money), currentHacking: level,

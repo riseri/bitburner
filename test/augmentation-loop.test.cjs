@@ -19,7 +19,8 @@ test('faction work selection follows the configured focus and available work', (
 
 test('augmentation spending honors reserves and unrelated savings but releases its matching goal', () => {
     assert.equal(policy.spendableForAugmentation(1000, 800, .1, { floor: 500, target: 'manual' }, 'BitWire'), false);
-    assert.equal(policy.spendableForAugmentation(1000, 800, .1, { floor: 800, target: 'augmentation:BitWire' }, 'BitWire'), true);
+    assert.equal(policy.spendableForAugmentation(1000, 800, .1, { floor: 800, target: 'augmentation:BitWire', owner: 'supervisor' }, 'BitWire'), true);
+    assert.equal(policy.spendableForAugmentation(1000, 800, .1, { floor: 800, target: 'augmentation:BitWire', owner: 'manual' }, 'BitWire'), false);
     assert.equal(policy.spendableForAugmentation(1000, 950, .1, { floor: 0 }, 'BitWire'), false);
 });
 

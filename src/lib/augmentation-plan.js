@@ -1,5 +1,6 @@
 import { factionWorkAnalysis, formulaDonationForRep, formulaFavorProjection } from "lib/formulas.js";
 import { readSavings } from "lib/savings.js";
+import { augmentationFundingCost, augmentationReputationStrategy } from "lib/augmentation-funding.js";
 
 // Orders expensive eligible purchases first, while always buying prerequisites first.
 // This is a heuristic, not a claim of globally optimal ordering.
@@ -24,7 +25,8 @@ export function planAugmentations(catalog, owned, targets, multiplier = 1) {
         const item = eligible[0];
         if (!item) { errors.push(`Unresolved prerequisites: ${[...remaining].join(", ")}`); break; }
         const estimatedPrice = item.price * multiplier ** order.length;
-        order.push({ ...item, estimatedPrice }); have.add(item.name); remaining.delete(item.name);
+        order.push({ ...item, estimatedPrice, fundingCost: augmentationFundingCost(item),
+            progressionStrategy: augmentationReputationStrategy(item) }); have.add(item.name); remaining.delete(item.name);
     }
     return { order, errors, total: order.reduce((sum, a) => sum + a.estimatedPrice, 0), multiplier,
         next: order[0] || null };
@@ -109,11 +111,15 @@ export function chooseAugmentationSeller(sellers, { price, cash, income, donate 
         const workEta = s.repGap === 0 ? 0 : s.rate > 0 ? s.repGap / s.rate * 1000 : null;
         const moneyEta = eta(price - cash);
         const directEta = workEta != null && moneyEta != null ? Math.max(workEta, moneyEta) : null;
-        const donationEta = donate && s.donationEligible && s.donationCost > 0 ? eta(price + s.donationCost - cash) : null;
+        const donationEta = donate && s.repGap > 0 && s.donationEligible && Number.isFinite(s.donationCost) && s.donationCost > 0
+            ? eta(augmentationFundingCost({ ...s, price, donationPlanned: true }) - cash) : null;
         const donation = donationEta != null && (directEta == null || donationEta < directEta);
+        const selected = { ...s, price, donationPlanned: donation };
         return { ...s, etaMs: donation ? donationEta : directEta, donationPlanned: donation,
-            acquisitionCost: price + (donation ? s.donationCost : 0),
-            explanation: donation ? "donation + cash ETA" : workEta == null ? "work rate unknown; reputation/favor fallback" : "work and cash can accrue together" };
+            workEtaMs: workEta, donationEtaMs: donationEta,
+            fundingCost: augmentationFundingCost(selected), progressionStrategy: augmentationReputationStrategy(selected),
+            acquisitionCost: augmentationFundingCost({ ...selected, chainCost: 0 }),
+            explanation: donation ? "Donation + purchase beats faction-work ETA" : workEta == null ? "work rate unknown; reputation/favor fallback" : "work and cash can accrue together" };
     }).sort((a,b) => (a.etaMs ?? Infinity) - (b.etaMs ?? Infinity) || a.repGap - b.repGap || b.favor - a.favor || a.faction.localeCompare(b.faction));
     const best = ranked[0], old = ranked.find(s => s.faction === previous);
     // Keep an incumbent within 10%; never hide an immediately eligible seller.
@@ -141,19 +147,24 @@ export function planAugmentationBasket(catalog, owned, context, { cash = 0, mult
         const candidates = catalog.filter(a => !have.has(a.name) && (!target || a.name === target)).map(a => {
             const items = chain(a.name,have); if (!items) return null;
             const cost = estimate(items,order.length), value = items.reduce((n,v) => n + augmentationValue(v,context),0);
+            const fundingCost = augmentationFundingCost({ ...items[0], chainCost: cost });
             const eligible = items.every(v => v.repGap === 0), affordable = eligible && cost <= remainingCash;
             return { item:a, items, cost, value, affordable, utility: value / Math.max(1,Math.sqrt(cost)),
-                etaMs: items.every(v => v.etaMs != null) ? Math.max(...items.map(v => v.etaMs), context.income > 0 ? Math.max(0,cost-remainingCash)/context.income*1000 : cost<=remainingCash ? 0 : Infinity) : null };
+                fundingCost,
+                etaMs: items.every(v => v.etaMs != null) ? Math.max(...items.map(v => v.etaMs), context.income > 0 ? Math.max(0,fundingCost-remainingCash)/context.income*1000 : fundingCost<=remainingCash ? 0 : Infinity) : null };
         }).filter(c => c && (target || c.value > 0));
         candidates.sort((a,b) => Number(b.affordable)-Number(a.affordable) || b.utility-a.utility || a.cost-b.cost || a.item.name.localeCompare(b.item.name));
         if (!candidates.length) break;
         let best = candidates[0];
         const old = candidates.find(c => c.item.name === previous);
         if (old && old.affordable === best.affordable && old.utility >= best.utility*.9) best = old;
-        if (!best.affordable) { deferred.push(...candidates.map(c => ({ ...c.items[0], chainTarget:c.item.name, chainCost:c.cost, benefitNow:0, benefitAfterInstall:augmentationValue(c.items[0],context), etaMs:Number.isFinite(c.etaMs)?c.etaMs:null }))); break; }
+        if (!best.affordable) { deferred.push(...candidates.map(c => ({ ...c.items[0], chainTarget:c.item.name, chainCost:c.cost,
+            fundingCost:c.fundingCost, progressionStrategy:augmentationReputationStrategy(c.items[0]),
+            benefitNow:0, benefitAfterInstall:augmentationValue(c.items[0],context), etaMs:Number.isFinite(c.etaMs)?c.etaMs:null }))); break; }
         for (const item of best.items) {
             const estimatedPrice = item.price * multiplier ** order.length;
-            order.push({ ...item, estimatedPrice, benefitAfterInstall: augmentationValue(item,context), benefitNow: 0 });
+            order.push({ ...item, estimatedPrice, fundingCost:augmentationFundingCost(item), progressionStrategy:augmentationReputationStrategy(item),
+                benefitAfterInstall: augmentationValue(item,context), benefitNow: 0 });
             remainingCash -= estimatedPrice; have.add(item.name);
         }
         if (target) break;
