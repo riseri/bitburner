@@ -48,10 +48,46 @@ The official stable game source was inspected on 2026-09-29:
 The package aggregates hacking, hacking_exp, hacking_money, hacking_grow,
 hacking_speed, hacking_chance, faction_rep, company_rep, work_money and combat
 attributes. Ordinary names are deduplicated and installed names excluded. Each
-queued NeuroFlux occurrence contributes once; buying NeuroFlux remains excluded
-by the existing planner. Prerequisites and multiple sellers are not added twice.
+queued NeuroFlux occurrence contributes once. The ordinary planner excludes
+repeatable purchases; the manager can buy NeuroFlux in the final installation pass
+described below. Prerequisites and multiple sellers are not added twice.
 Missing/invalid stats cause fallback. Non-multiplier effects such as focus immunity,
 programs and starting money are not assigned speculative throughput gains.
+
+## NeuroFlux before installation
+
+After an existing reset policy approves installation, the manager verifies
+bootstrap/restart settings, releases its own work, checks player activity and the
+reset epoch, saves state, and checks them again. Only then does it run a synchronous
+NeuroFlux purchase pass and install through `bootstrap.js` in the same tick.
+Ordinary basket purchases retain their existing order and reset timing. An empty
+or waiting queue cannot buy NeuroFlux to initiate a reset, and installed Red Pill
+continues toward node completion without another augmentation reset.
+
+The pass honors `--purchase`, uses only joined factions whose live offerings include
+NeuroFlux, and chooses an eligible seller with the highest current reputation.
+Membership, offerings, price, rep requirement, faction reputation, cash and savings
+are refreshed for every level. It uses existing reputation only: no donations,
+work, faction invitations, stock liquidation or waiting for more funds.
+
+The configured cash-reserve fraction of the pass's starting cash remains protected
+throughout the pass. Every active savings floor remains protected, including a
+supervisor goal matching NeuroFlux; optional purchases never release a goal.
+Corrupt savings or invalid quotes prevent optional spending. Insufficient funds,
+reputation, a failed purchase or an unavailable optional API stops the pass and
+installation proceeds. A hard limit of 100 purchases also ends the pass immediately.
+Epoch/activity changes stop spending and block installation for a fresh decision.
+
+The manager logs successful level purchases and includes purchased count, quoted
+spend and the stopping reason in its installation status. A reset-scoped pass
+record prevents failed installation retries from spending again. Existing version-1
+state migration clears that record on a new reset. Its Singularity calls reuse APIs
+already present in the augmentation process; daemon/worker imports and APIs are unchanged.
+Actual in-game RAM accounting has not been measured here.
+
+Tests cover repeated owned levels, live quotes/sellers, savings and fixed reserves,
+ordinary-purchase order, disabled purchases, bounded execution, optional failures,
+installation guards, failed retries, empty/waiting queues and Red Pill behavior.
 
 ## Recovery and reset losses
 

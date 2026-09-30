@@ -27,10 +27,10 @@ export function matchingFactionWork(work, faction, workType = "") {
         (!workType || work.factionWorkType === workType));
 }
 
-export function spendableForAugmentation(cash, price, reserve, savings, augmentation) {
+export function spendableForAugmentation(cash, price, reserve, savings, augmentation, releaseMatchingGoal = true) {
     const funds = Number(cash), cost = Number(price), fraction = Number(reserve);
     if (![funds, cost, fraction].every(Number.isFinite) || funds < 0 || cost < 0 || fraction < 0 || fraction > 0.95) return false;
-    const matchingGoal = savings?.owner === "supervisor" && savings.target === `augmentation:${augmentation}`;
+    const matchingGoal = releaseMatchingGoal && savings?.owner === "supervisor" && savings.target === `augmentation:${augmentation}`;
     const protectedFloor = matchingGoal || savings?.inactive ? 0 : Math.max(0, Number(savings?.floor) || 0);
     return funds - cost >= Math.max(funds * fraction, protectedFloor);
 }

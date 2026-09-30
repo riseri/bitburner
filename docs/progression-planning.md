@@ -19,8 +19,11 @@ The standalone planner and manual observations remain fallback paths.
 
 Static augmentation metadata is cached for 60 seconds and invalidated by faction,
 target or epoch changes. Prices, ownership and reputation are live each decision.
-Catalogs omit repeatable NeuroFlux purchases. Extra NeuroFlux levels still count
-toward the existing installation threshold but add no distinct augmentation.
+Catalogs omit repeatable NeuroFlux purchases from ordinary baskets. Once an
+installation is approved and its execution checks pass, the augmentation manager
+buys affordable NeuroFlux levels with existing reputation immediately before
+installing. Extra levels count toward the existing installation threshold but add
+no distinct augmentation; they never trigger or delay that installation decision.
 Shadows of Anarchy's separate inflation system is excluded from default baskets;
 an explicit single augmentation target from that faction is supported.
 

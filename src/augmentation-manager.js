@@ -16,6 +16,7 @@ import { factionWorkAnalysis, formulaDonationForRep, formulaFavorProjection } fr
 import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
 
 const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP = "bootstrap.js";
+const NEUROFLUX = "NeuroFlux Governor", MAX_NEUROFLUX_PURCHASES = 100;
 
 /** Singularity augmentation loop with automatic installation. @param {NS} ns */
 export async function main(ns) {
@@ -69,7 +70,7 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
     if (!singularityAvailable(reset)) return { state: "BLOCKED", phase: "UNLOCK", recommendation: singularityRecommendation(), queued: 0 };
 
     // A threshold is a reset decision, independent of the remaining shopping list.
-    // Install before joining another faction or buying another upgrade.
+    // Install before joining another faction or extending the ordinary basket.
     const installed = ns.singularity.getOwnedAugmentations(false);
     const pending = queuedAugmentations(installed, ns.singularity.getOwnedAugmentations(true));
     const queued = pending.length;
@@ -175,10 +176,67 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
         recommendation: "Reset epoch changed while saving; refresh the installation decision" };
     if (ns.singularity.isBusy() || ns.singularity.getCurrentWork()) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: "Player activity changed while saving; refresh before automatic installation" };
+    queued = queuedCount(ns);
+    if (!queued) return { state: "WAITING", phase: "INSTALL", plan, queued,
+        recommendation: "No augmentations remain queued; refresh the installation decision" };
+
+    // Optional repeatable purchases cannot approve or postpone a reset. Run one
+    // bounded, synchronous pass only after all installation checks have passed.
+    // A failed installation retry must not spend another slice of the reserve.
+    if (state.neurofluxPass?.epoch !== state.resetEpoch) {
+        state.neurofluxPass = { ...buyNeuroFluxBeforeInstall(ns, cfg), epoch: state.resetEpoch };
+        if (state.neurofluxPass.purchased) ns.print?.(`NeuroFlux: bought ${state.neurofluxPass.purchased} levels for ${Math.ceil(state.neurofluxPass.spent)}; ${state.neurofluxPass.reason}`);
+    }
+    const neuroflux = state.neurofluxPass;
+    queued = queuedCount(ns);
+    if (resetEpoch(ns.getResetInfo()) !== state.resetEpoch) return { state: "BLOCKED", phase: "INSTALL", plan, queued, neuroflux,
+        recommendation: "Reset epoch changed before installation; refresh the installation decision" };
+    if (ns.singularity.isBusy() || ns.singularity.getCurrentWork()) return { state: "BLOCKED", phase: "INSTALL", plan, queued, neuroflux,
+        recommendation: "Player activity changed before automatic installation" };
     const installed = ns.singularity.installAugmentations(BOOTSTRAP);
-    if (installed === false) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
+    if (installed === false) return { state: "BLOCKED", phase: "INSTALL", plan, queued, neuroflux,
         recommendation: "Augmentation installation failed; inspect the game log before retrying" };
-    return { state: "RESETTING", phase: "INSTALL", plan, action: `Installing ${queued} augmentations`, recommendation: "", queued };
+    return { state: "RESETTING", phase: "INSTALL", plan, action: `Installing ${queued} augmentations`, recommendation: "", queued, neuroflux };
+}
+
+function buyNeuroFluxBeforeInstall(ns, cfg) {
+    const result = { purchased: 0, spent: 0, reason: "Purchasing disabled" };
+    if (!cfg.purchase) return result;
+    const finish = reason => ({ ...result, reason });
+    try {
+        const epoch = resetEpoch(ns.getResetInfo());
+        // Keep the initial reserve for the whole pass, rather than reducing it
+        // each time a level is bought. Every active savings goal also stays locked.
+        const reserveFloor = ns.getServerMoneyAvailable(HOME) * cfg.cashReserve;
+        if (!Number.isFinite(reserveFloor) || reserveFloor < 0) return finish("Invalid cash reserve");
+        for (let attempt = 0; attempt < MAX_NEUROFLUX_PURCHASES; attempt++) {
+            if (resetEpoch(ns.getResetInfo()) !== epoch) return finish("Reset epoch changed");
+            if (ns.singularity.isBusy() || ns.singularity.getCurrentWork()) return finish("Player activity changed");
+            const sellers = (ns.getPlayer().factions || []).filter(faction =>
+                ns.singularity.getAugmentationsFromFaction(faction).includes(NEUROFLUX));
+            if (!sellers.length) return finish("No joined faction offers NeuroFlux");
+            const price = ns.singularity.getAugmentationPrice(NEUROFLUX);
+            const repRequired = ns.singularity.getAugmentationRepReq(NEUROFLUX);
+            if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(repRequired) || repRequired < 0)
+                return finish("Invalid NeuroFlux quote");
+            let seller = "", bestRep = -1;
+            for (const faction of sellers) {
+                const rep = ns.singularity.getFactionRep(faction);
+                if (Number.isFinite(rep) && rep >= repRequired && rep > bestRep) { seller = faction; bestRep = rep; }
+            }
+            if (!seller) return finish("Insufficient existing reputation");
+            const cash = ns.getServerMoneyAvailable(HOME);
+            if (cash - price < reserveFloor ||
+                !spendableForAugmentation(cash, price, cfg.cashReserve, readSavings(ns), NEUROFLUX, false))
+                return finish("Remaining cash is reserved or protected");
+            if (!ns.singularity.purchaseAugmentation(seller, NEUROFLUX)) return finish("NeuroFlux purchase failed");
+            result.purchased++; result.spent += price;
+        }
+        return finish(`Reached the ${MAX_NEUROFLUX_PURCHASES}-level purchase limit`);
+    } catch (error) {
+        // Optional fill purchases must not stall an already-approved installation.
+        return finish(`NeuroFlux unavailable: ${String(error?.message ?? error)}`);
+    }
 }
 
 function buildLoopPlan(ns, cfg, state, context) {
