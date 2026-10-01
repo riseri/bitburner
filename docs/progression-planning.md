@@ -23,7 +23,10 @@ Catalogs omit repeatable NeuroFlux purchases from ordinary baskets. Once an
 installation is approved and its execution checks pass, the augmentation manager
 buys affordable NeuroFlux levels with existing reputation immediately before
 installing. Extra levels count toward the existing installation threshold but add
-no distinct augmentation; they never trigger or delay that installation decision.
+no distinct augmentation; this pre-install pass never triggers or delays that
+installation decision. After The Red Pill is installed, a separate
+[endgame upgrade policy](endgame-upgrades.md) can acquire hacking augments and
+NeuroFlux when measured completion and recovery estimates justify another reset.
 Shadows of Anarchy's separate inflation system is excluded from default baskets;
 an explicit single augmentation target from that faction is supported.
 

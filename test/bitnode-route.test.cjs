@@ -156,14 +156,15 @@ test('route travels for useful factions, joins, earns reputation, buys, and inst
     assert.ok(f.world.calls.some(c => c[0] === 'stop'));
 });
 
-test('faction backdoors preempt owned faction or class work but preserve manual work', async () => {
+test('faction backdoors preserve both managed and manual work while the actor installs', async () => {
     for (const kind of ['faction', 'class', 'manual']) {
         const f = fixture(); f.world.readyBackdoor = true;
         if (kind === 'faction') { f.state.ownedWork = { faction: 'CyberSec', workType: 'hacking' }; f.world.work = { type: 'FACTION', factionName: 'CyberSec', factionWorkType: 'hacking' }; }
         else { f.world.work = { type: 'CLASS', location: 'Rothman University', classType: 'Computer Science' }; if (kind === 'class') f.state.ownedClass = { ...f.world.work }; }
         const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
         assert.equal(status.phase, 'BACKDOOR');
-        assert.equal(f.world.work === null, kind !== 'manual');
+        assert.notEqual(f.world.work, null);
+        assert.equal(f.world.calls.some(c => c[0] === 'stop'), false);
         assert.equal(f.world.calls.some(c => c[0] === 'buy'), false);
     }
 });

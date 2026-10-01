@@ -5,6 +5,20 @@ import { augmentationFundingCost, augmentationReputationStrategy } from "lib/aug
 const DASHBOARD_WIDTH = 78;
 const LABEL_WIDTH = 14;
 
+export function dashboardFrame(ns, render) {
+    // Bitburner retains a bounded number of print entries (50 by default).
+    // A complete refresh must be one entry, or detailed views lose their headers.
+    const lines = [], frame = Object.create(ns);
+    Object.defineProperties(frame, {
+        print: { value: (...values) => lines.push(values.map(String).join("")) },
+        clearLog: { value: () => { lines.length = 0; } },
+    });
+    const result = render(frame);
+    ns.clearLog();
+    ns.print(lines.join("\n"));
+    return result;
+}
+
 export function renderFactionProgression(ns, next, currentCash) {
     if (!next) return;
     const row = (label, value) => dashboardRow(ns, label, value);

@@ -14,6 +14,7 @@ import { PORTS } from "lib/ports.js";
 import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
 import { factionWorkAnalysis, formulaDonationForRep, formulaFavorProjection } from "lib/formulas.js";
 import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
+import { quoteEndgamePackage, purchaseEndgamePackage } from "lib/augmentation-endgame.js";
 
 const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP = "bootstrap.js";
 const NEUROFLUX = "NeuroFlux Governor", MAX_NEUROFLUX_PURCHASES = 100;
@@ -82,7 +83,7 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
             countRequired: context.objective.countRequired, minInstall: cfg.minInstall });
         return handleInstallation(ns, cfg, state, null, queued, true);
     }
-    if (installed.includes("The Red Pill")) return route ? { ...routeEndgame(ns, cfg, state), queued } : { state: "READY", phase: "COMPLETE_NODE", queued,
+    if (installed.includes("The Red Pill")) return route ? tickEndgame(ns, cfg, state, context, pending) : { state: "READY", phase: "COMPLETE_NODE", queued,
         recommendation: "The Red Pill is installed; raise hacking and backdoor w0r1d_d43m0n to finish this BitNode" };
     if (!route && queued >= cfg.minInstall) return handleInstallation(ns, cfg, state, null, queued);
 
@@ -143,6 +144,50 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
         return { ...(daedalus || trainHacking(ns, cfg, state, Math.max(2500, player.skills.hacking + 1))), plan, queued };
     }
     return handleInstallation(ns, cfg, state, plan, queued);
+}
+
+async function tickEndgame(ns, cfg, state, context, pending) {
+    const plan = { errors: [], next: null }, objective = context.objective;
+    if (objective.limitingResource !== "hacking") return { ...routeEndgame(ns, cfg, state), queued: pending.length };
+    let joined = "";
+    if (cfg.joinFactions) {
+        const cities = routeCities(context.player.factions, cfg.cityFaction);
+        const invitations = ns.singularity.checkFactionInvitations().sort((a, b) => Number(b === "Daedalus") - Number(a === "Daedalus"));
+        const faction = invitations.find(f => chooseInvitation([f], context.player.factions, cities.includes(f) ? f : ""));
+        if (faction && ns.singularity.joinFaction(faction)) {
+            joined = faction; context.player = ns.getPlayer();
+            state.nextEndgameQuoteAt = 0; // Newly joined sellers can change the useful package.
+        }
+    }
+    const decisionFor = names => decideAugmentationReset({ ...resetEconomics(ns, context, plan, state, names),
+        completionGoal: true, installed: context.installed, pending: names, plan, minInstall: cfg.minInstall,
+        mode: cfg.resetPolicy || "auto", resetEpoch: context.resetEpoch,
+        objectiveKey: JSON.stringify(["FINAL_SERVER", objective.requiredHacking]), history: state.resetHistory });
+    let decision = decisionFor(pending), purchases = null;
+    if (decision.action !== "INSTALL" && cfg.purchase && state.endgameAcquired !== context.resetEpoch &&
+        Date.now() >= (state.nextEndgameQuoteAt || 0)) {
+        state.nextEndgameQuoteAt = Date.now() + 30000;
+        try {
+            const proposal = quoteEndgamePackage(ns, cfg, context);
+            const projected = decisionFor([...pending, ...proposal.purchases.map(item => item.name)]);
+            if (proposal.purchases.length && (projected.advantage || cfg.resetPolicy === "threshold" && projected.action === "INSTALL")) {
+                purchases = purchaseEndgamePackage(ns, cfg, context, proposal);
+                if (purchases.purchased) {
+                    state.endgameAcquired = context.resetEpoch;
+                    pending = queuedAugmentations(context.installed, ns.singularity.getOwnedAugmentations(true));
+                    decision = decisionFor(pending);
+                }
+            }
+            state.endgameReason = projected.reason;
+        } catch (error) { state.endgameReason = `Endgame quote unavailable: ${String(error?.message ?? error)}`; }
+    }
+    state.resetHistory = decision.history; state.resetDecision = decision;
+    if (decision.action === "INSTALL") return handleInstallation(ns, cfg, state, null, pending.length, true);
+    return { ...routeEndgame(ns, cfg, state), queued: pending.length,
+        ...(purchases?.purchased ? { action: `Queued ${purchases.purchased} endgame upgrades; measuring reset advantage` }
+            : joined ? { action: `Joined ${joined} for endgame upgrade access` } : {}),
+        endgame: { reason: pending.length ? decision.reason : state.endgameReason || decision.reason,
+            continueEtaMs: decision.wait.totalMs, resetEtaMs: decision.installNow.etaMs, purchases } };
 }
 
 async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold = false) {

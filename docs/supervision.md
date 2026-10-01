@@ -23,7 +23,9 @@ The pool rescans every five seconds, adopts its marked workers after supervisor
 restarts, and preserves unrelated processes. Healthy workers keep their current
 actions while their allocation stays unchanged. Failed copies, launches and PID
 cancellations are retried. The dashboard shows active threads and worker hosts.
-Home upgrades remain manual. Once supervisor, daemon and fleet manager fit in
+BN4 route automation quotes and funds home upgrades when enabled services need
+RAM; other capability configurations retain their existing upgrade policy.
+Once supervisor, daemon and fleet manager fit in
 actually available home RAM, all owned starter workers are stopped before the
 ordinary managed-service lifecycle begins. Failed cleanup delays that handoff.
 
@@ -130,6 +132,19 @@ their credentials even when temporarily unreachable.
 Home crawler launches scale up to `--darknet-agent-threads` within free RAM after
 the supervisor's home/utility reserve. Existing crawlers keep their thread count
 until restarted. Direct manager launches use `--home-reserve 8` by default.
+During hacking/reputation bottlenecks the crawler's allocation is capped at
+25% of home RAM, with one minimum crawler permitted when it fits. This cap does
+not require 75% of the machine to be idle. The planner uses the same configured
+home/utility reserve. RAM needed to start an unlocked, enabled crawler has capital
+priority 83, ahead of ordinary fleet expansion (79); core progression service
+admission retains priority 90 and manual savings remain protected.
+
+Detailed supervisor and daemon dashboards print each refresh as one multiline
+log entry. Bitburner's default log capacity retains only 50 entries; printing
+each row separately could discard headings and overview rows within a refresh.
+The supervisor's legacy daemon log reader accepts both multiline refreshes and
+separate rows. Target diagnostics and utility diagnostics have explicit sections.
+Long dashboards still scroll inside their tail windows.
 
 `Formulas.exe` is a live capability rather than a startup requirement. The JIT
 scheduler tunes replacement plans in the background when hacking formulas become

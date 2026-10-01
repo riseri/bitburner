@@ -66,6 +66,23 @@ test('authoritative funding adds the selected donation once and ignores acquisit
     assert.equal(api.augmentationReputationStrategy({ ...next, repGap: 0 }), 'NONE');
 });
 
+test('selected plan publishes authenticated work-rate provenance without treating a donation as work', () => {
+    const f = fixture(); f.cfg.donate = false;
+    assert.equal(f.plan().next.rateSource, 'model');
+    assert.equal(f.plan().next.workActive, false);
+    f.world.current = { type: 'FACTION', factionName: 'BitRunners' };
+    f.plan(); f.clock.now += 1000; f.world.rep += 200;
+    const measured = f.plan(), p = f.publish(measured).progression;
+    assert.equal(measured.next.rate, 200); assert.equal(p.selectedPlan.next.rateSource, 'measured');
+    assert.equal(p.selectedPlan.next.workActive, true);
+    f.state.lastDonation = { faction: 'BitRunners', at: f.clock.now };
+    f.clock.now += 1000; f.world.rep += 500;
+    assert.equal(f.plan().next.rateSource, 'model');
+    f.world.current = null; f.world.formulas = false;
+    const unknown = f.plan().next;
+    assert.equal(unknown.rateSource, 'unknown'); assert.equal(unknown.workActive, false);
+});
+
 for (const [workSeconds, donationSeconds, donate] of [[720, 180, true], [120, 420, false], [180, 180, false]]) {
     test(`seller retains ${donate ? 'donation' : 'work'} for work ${workSeconds}s vs donation ${donationSeconds}s`, () => {
         const f = fixture(), selected = f.planner.chooseAugmentationSeller([{ faction: 'BitRunners', repGap: 720,

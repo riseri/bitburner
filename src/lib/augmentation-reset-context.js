@@ -15,9 +15,11 @@ export function resetEconomics(ns, context, plan, state, pending) {
     const evidence = { reliable: false, reason: "Stable recovery history is not available", lanes: [] };
     const result = { package: pack, evidence };
     const recovery = recoveryEstimate(state, context), objective = context.objective, next = plan.next;
+    const completionGoal = objective.milestone === "FINAL_SERVER";
+    result.completionGoal = completionGoal;
     if (!recovery) return result;
     evidence.recoveryMs = recovery.ms;
-    if (!next || !nextPack.complete || !Number.isFinite(next.etaMs) || next.etaMs < 0) {
+    if (!completionGoal && (!next || !nextPack.complete || !Number.isFinite(next.etaMs) || next.etaMs < 0)) {
         evidence.reason = "Next augmentation ETA or stats unavailable"; return result;
     }
     const balance = context.balance;
@@ -54,8 +56,8 @@ export function resetEconomics(ns, context, plan, state, pending) {
             balance.cashRate * .8, 1, 1));
     } else if (objective.limitingResource === "hacking" && objective.requiredHacking > 0) {
         const skills = formulaGroup(ns, "skills", ["calculateExp"]);
-        if (!freshBalance || balance.xpSource !== "measured" || balance.cashSource !== "measured" ||
-            !positive(balance.xpRate) || !positive(balance.cashRate) || !skills || !context.multipliers) {
+        if (!freshBalance || balance.xpSource !== "measured" || !positive(balance.xpRate) ||
+            objective.requiredCash > 0 && (balance.cashSource !== "measured" || !positive(balance.cashRate)) || !skills || !context.multipliers) {
             evidence.reason = "Measured milestone cash/XP rates or skill Formulas unavailable"; return result;
         }
         const mult = context.player.mults?.hacking * context.multipliers.HackingLevelMultiplier;
@@ -67,12 +69,24 @@ export function resetEconomics(ns, context, plan, state, pending) {
             // Exact inverse skill curve + direct XP multiplier; only half the
             // implied gain is credited, with a 4x ceiling. Speed is left unpriced.
             evidence.benefit = haircut(target / queuedTarget * q.hacking_exp);
+            if (completionGoal) {
+                // Augmentation installation clears IPvGO speed power. Price that
+                // loss only on script XP; university/player XP keeps its rate.
+                const goStats = ns.go.analysis.getStats();
+                if (!goStats || typeof goStats !== "object") throw new Error("unknown Go reset loss");
+                const bonus = goStats.Illuminati?.bonusPercent ?? 0;
+                if (!Number.isFinite(bonus) || bonus < 0) throw new Error("unknown Go reset loss");
+                const share = Number.isFinite(balance.scriptXpRate) && balance.scriptXpRate >= 0
+                    ? Math.min(1, balance.scriptXpRate / balance.xpRate) : 1;
+                evidence.xpRetention = 1 - share * (1 - 100 / (100 + bonus));
+                evidence.benefit *= evidence.xpRetention;
+            }
             evidence.nextBenefit = haircut(queuedTarget / largerTarget * n.hacking_exp);
             evidence.lanes.push(lane("hacking XP", target, context.player.exp?.hacking, recovery.xp,
                 balance.xpRate * .8, evidence.benefit, evidence.nextBenefit));
             if (objective.requiredCash > 0) evidence.lanes.push(lane("cash", objective.requiredCash, context.money,
                 recovery.cash, balance.cashRate * .8, 1, 1));
-        } catch { evidence.reason = "Reset XP loss cannot be projected"; return result; }
+        } catch { evidence.reason = "Reset XP or IPvGO loss cannot be projected"; return result; }
     } else {
         evidence.confidence = "LOW";
         evidence.reason = objective.limitingResource === "cash"

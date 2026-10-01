@@ -47,9 +47,7 @@ export function routeBackdoorYield(ns, state) {
     const ready = progressionBackdoors().find(t => ns.serverExists(t.host) && ns.hasRootAccess(t.host) &&
         skill >= ns.getServerRequiredHackingLevel(t.host) && !ns.getServer(t.host).backdoorInstalled);
     if (!ready) return null;
-    const released = releaseRouteWork(ns, state);
-    return status(released ? "WAITING" : "BLOCKED", "BACKDOOR", released
-        ? `Yielding player work so the progression actor can backdoor ${ready.host}` : "Waiting for current player activity before faction backdoors");
+    return status("WAITING", "BACKDOOR", `Waiting for the progression actor to backdoor ${ready.host}; player work continues`);
 }
 
 export function routeUnlock(ns, cfg, state, owned, onlyAffordable = false) {

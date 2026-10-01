@@ -6,7 +6,7 @@ import { intelligenceSessionActive } from "lib/intelligence-session.js";
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { loadTelemetry, recordTelemetry, summarizeTelemetry } from "lib/telemetry.js";
-import { dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime, renderSchedulerCapacity, renderFactionProgression } from "lib/dashboard.js";
+import { dashboardFrame, dashboardTitle, dashboardSection, dashboardRow, dashboardTargets, dashboardTime, renderSchedulerCapacity, renderFactionProgression } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
@@ -653,6 +653,10 @@ async function runOnce(ns, script) {
 function progressionActorProcess(ns) { return actorProcesses(ns)[0] ?? null; }
 
 function render(ns, state) {
+    return dashboardFrame(ns, frame => renderSupervisorFrame(frame, state));
+}
+
+function renderSupervisorFrame(ns, state) {
 	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, darknetStatus, fleetHealth, contractHealth, progressionHealth } = state;
 	const daemon = readDaemonDashboard(ns);
 	const fleet = fleetStatus?.type === "fleet-status" ? fleetStatus : null;
@@ -678,6 +682,7 @@ function render(ns, state) {
 		ns.print("  More detail: restart with --dashboard-details true");
 		return;
 	}
+	dashboardSection(ns, "Resources and services");
 	if (goal.floor > 0 || goal.error) {
 		const funds = ns.getServerMoneyAvailable(HOME);
 		const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
@@ -687,6 +692,7 @@ function render(ns, state) {
 	}
 	if (fleet?.cloud?.investment) dashboardRow(ns, "RAM investment", fleet.cloud.investment);
 	renderSchedulerCapacity(ns, daemon?.capacity, cfg.dashboardDetails);
+	dashboardSection(ns, "Utility diagnostics");
 	if (cfg.telemetryError) dashboardRow(ns, "Telemetry", cfg.telemetryError);
 	else if (cfg.telemetrySummary) {
 		const report = cfg.telemetrySummary;
@@ -1122,8 +1128,8 @@ function renderProgression(ns, progression, cfg, actions = null) {
 		row("Singularity", progression.singularity?.available ? `Available (${progression.singularity.source})` : "Locked; requires BN4 or Source-File 4");
 		row("Source Files", formatSourceFiles(progression.sourceFiles));
 		row("TOR router", progression.torOwned ? "Owned" : "Not owned");
-		const ready = progression.backdoors?.find(target => target.ready);
-		if (ready?.path?.length && ready.host !== bitRunners?.host) row("Route", ready.path.join(" -> "));
+		const ready = progression.progression?.redPill === "installed" ? null : progression.backdoors?.find(target => target.ready);
+		if (ready?.path?.length && ready.host !== bitRunners?.host) row("Backdoor path", ready.path.join(" -> "));
 	}
 	if (cfg.progressionActions) {
 		const actor = progressionActorProcess(ns);
@@ -1148,6 +1154,11 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         if (p.missingInformation?.length) row("Unknown", p.missingInformation.join(", "));
     }
 	if (augmentation.recommendation) row("Next", augmentation.recommendation);
+    if (augmentation.endgame) {
+        row("Endgame policy", augmentation.endgame.reason);
+        if (Number.isFinite(augmentation.endgame.continueEtaMs) && Number.isFinite(augmentation.endgame.resetEtaMs))
+            row("Finish ETA", `${dashboardTime(augmentation.endgame.continueEtaMs)} continuing | ${dashboardTime(augmentation.endgame.resetEtaMs)} with reset`);
+    }
 	if (augmentation.formulas) row("Work model", `Exact Formulas | ${Number(augmentation.reputationPerSecond || 0).toFixed(3)} rep/s | share ${Number(augmentation.sharePower || 1).toFixed(3)}x${Number.isFinite(Number(augmentation.projectedFavor)) ? ` | projected favor ${Number(augmentation.projectedFavor).toFixed(2)}` : ""}`);
 	row("Queued", `${Number(augmentation.queued) || 0} augmentation(s) | ${cfg.resetPolicy || "auto"} policy | fallback threshold ${cfg.minInstall}`);
     if (cfg.dashboardDetails && augmentation.progression?.donation)
@@ -1160,11 +1171,14 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         const benefit = n => Number.isFinite(n) ? `${n.toFixed(2)}x` : "unknown";
         row("Current package", `${benefit(d.installNow.packageBenefit)} relevant benefit | break-even ${dashboardTime(d.installNow.breakEvenMs)}`);
         row("Install now", `${dashboardTime(d.installNow.etaMs)} projected | residual loss ${dashboardTime(d.installNow.lostProgressMs)}`);
-        row("Next aug", `${d.wait.nextAugmentation || "none"} | ETA ${dashboardTime(d.wait.etaMs)} | benefit ${benefit(d.wait.incrementalBenefit)}`);
-        row("Wait total", dashboardTime(d.wait.totalMs));
+        if (d.completionGoal) row("Continue to finish", dashboardTime(d.wait.totalMs));
+        else {
+            row("Next aug", `${d.wait.nextAugmentation || "none"} | ETA ${dashboardTime(d.wait.etaMs)} | benefit ${benefit(d.wait.incrementalBenefit)}`);
+            row("Wait total", dashboardTime(d.wait.totalMs));
+        }
         if (d.package?.multipliers) row("Package stats", Object.entries(d.package.multipliers).filter(([,v]) => v !== 1).map(([k,v]) => `${k} ${v.toFixed(2)}x`).join(" | ") || "No modeled multipliers");
         row("Reason", d.reason);
-        row("Fallback", `${d.queued}/${d.fallback.minInstall} | stalled ${dashboardTime(d.fallback.stalledMs)} | waiting ${dashboardTime(d.fallback.waitingMs)}`);
+        if (!d.completionGoal) row("Fallback", `${d.queued}/${d.fallback.minInstall} | stalled ${dashboardTime(d.fallback.stalledMs)} | waiting ${dashboardTime(d.fallback.waitingMs)}`);
         if (augmentation.phase === "INSTALL") row("Execution", `${augmentation.state}${augmentation.recommendation ? ": " + augmentation.recommendation : ""}`);
     }
 }
@@ -1190,6 +1204,12 @@ function renderGoStatus(ns, go, cfg, services) {
 	}
 	row("Bonus", `+${Number(go.bonusPercent || 0).toFixed(3)}% | streak ${Number(go.winStreak) || 0}`);
 	if (go.last) row("Last action", go.last);
+	if (cfg.dashboardDetails && go.selectedOpponent) {
+		row("Policy", `${go.autoOpponent ? "AUTO" : "PINNED"} | ${go.selectedOpponent}`);
+		row("Policy reason", go.selectionReason || "collecting evidence");
+		row("Confidence", go.selectionConfidence || "PRIOR");
+		row("Bonus pace", Number.isFinite(go.bonusPerMinute) ? `+${go.bonusPerMinute.toFixed(3)}%/min` : "collecting evidence");
+	}
 }
 
 function renderHealth(ns, daemon, details = false) {
@@ -1224,7 +1244,7 @@ function readDaemonDashboard(ns) {
 	}
 
 	let logs;
-	try { logs = ns.getScriptLogs(process.pid).map(String); }
+	try { logs = ns.getScriptLogs(process.pid).flatMap(entry => String(entry).split(/\r?\n/)); }
 	catch { return null; }
 	if (!logs.length) return null;
 
@@ -1583,7 +1603,10 @@ export function ongoingHomeTarget(ns,cfg,capabilities,services,jobs) {
     const enabled=selectedServices(cfg,capabilities), blocked=services.some(s=>enabled.some(e=>e.name===s.name) && ["WAITING_RAM","WAITING_PRIORITY"].includes(s.state)) ||
         jobs.some(j=>j.state === "WAITING_RAM" && !(j.type === "augmentation-plan" && readProgressionSnapshot(ns)));
     const budget = supervisorRamBudget(ns,cfg,capabilities);
-    const darknet = darknetActivation(ns, { enabled: cfg.darknet === true, reserve: budget.utilityRam });
+    const darknet = darknetActivation(ns, { enabled: cfg.darknet === true, reserve: Math.max(cfg.homeReserve || 0, budget.utilityRam) });
+    const crawlerBlocked = ["OWNED", "BITNODE_ACCESS"].includes(darknet.navigator) && !darknet.threads && !darknet.fits;
+    cfg.homeUpgradePriority = cfg.homeUpgradeCritical ? 90 : crawlerBlocked ? 83 : 75;
+    cfg.homeUpgradeReason = crawlerBlocked ? "Start enabled Darknet crawler" : "Enabled service/helper RAM is blocked";
     // Plan prospective RAM now; ordinary home capital (75) waits behind the
     // Navigator (84). Core/actor RAM blockers still take priority (90).
     const required = blocked ? ns.getScriptRam(SUPERVISOR,HOME) + enabled.reduce((n,s)=>n+ns.getScriptRam(s.name,HOME),0) +
@@ -1629,7 +1652,7 @@ export async function tickStarterHomeUpgrade(ns, hosts, target, state = {}) {
     const floor=readSavings(ns,"home:ram").floor;
     if(!Number.isFinite(floor)) return;
     if(valid) {
-        state.homeInvestment={amount:quote.cost,target:"home:ram",label:"Admit blocked services on home",priority:state.homeUpgradeCritical ? 90 : 75,reason:"Enabled service/helper RAM is blocked"};
+        state.homeInvestment={amount:quote.cost,target:"home:ram",label:state.homeUpgradeReason || "Admit blocked services on home",priority:state.homeUpgradePriority || (state.homeUpgradeCritical ? 90 : 75),reason:state.homeUpgradeReason || "Enabled service/helper RAM is blocked"};
         if(ns.getServerMoneyAvailable(HOME)-quote.cost<floor) { state.homeUpgradeStatus = `Saving ${cash(quote.cost)} for RAM; protected floor ${cash(floor)}`; return; }
     } else if(ram===state.nextHomeQuoteRam && now<(state.nextHomeQuoteAt||0)) return;
     for(const host of [...hosts].sort((a,b)=>Number(b===HOME)-Number(a===HOME))) {

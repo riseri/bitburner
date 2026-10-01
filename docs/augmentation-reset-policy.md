@@ -50,7 +50,8 @@ hacking_speed, hacking_chance, faction_rep, company_rep, work_money and combat
 attributes. Ordinary names are deduplicated and installed names excluded. Each
 queued NeuroFlux occurrence contributes once. The ordinary planner excludes
 repeatable purchases; the manager can buy NeuroFlux in the final installation pass
-described below. Prerequisites and multiple sellers are not added twice.
+described below and through the separate [endgame upgrade policy](endgame-upgrades.md).
+Prerequisites and multiple sellers are not added twice.
 Missing/invalid stats cause fallback. Non-multiplier effects such as focus immunity,
 programs and starting money are not assigned speculative throughput gains.
 
@@ -60,9 +61,11 @@ After an existing reset policy approves installation, the manager verifies
 bootstrap/restart settings, releases its own work, checks player activity and the
 reset epoch, saves state, and checks them again. Only then does it run a synchronous
 NeuroFlux purchase pass and install through `bootstrap.js` in the same tick.
-Ordinary basket purchases retain their existing order and reset timing. An empty
-or waiting queue cannot buy NeuroFlux to initiate a reset, and installed Red Pill
-continues toward node completion without another augmentation reset.
+Ordinary basket purchases retain their existing order and reset timing. This
+pre-install pass cannot initiate a reset from an empty or waiting queue. After
+The Red Pill is installed, the separate [endgame upgrade policy](endgame-upgrades.md)
+can acquire further hacking upgrades and NeuroFlux when measured recovery and XP
+data show that another installation can materially shorten node completion.
 
 The pass honors `--purchase`, uses only joined factions whose live offerings include
 NeuroFlux, and chooses an eligible seller with the highest current reputation.

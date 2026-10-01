@@ -85,6 +85,7 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		state.diagnostics.push({ target: objective.target, state: waiting ? "waiting" : "blocked", reason });
 	};
 	for (const objective of objectives) {
+		if (objective.kind === "backdoor" && progression?.redPill === "installed") continue;
 		// An adopted planner can still carry its previous feature flags.
 		if (objective.kind === "program" && !progressionPrograms({ darknet: cfg.darknet !== false }).some(program => program.name === objective.target)) continue;
 		if (!objective.ready) { blocked(objective, `${objective.target}: ${objective.blocker}`); continue; }
@@ -126,5 +127,7 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		return;
 	}
 	state.current = state.diagnostics.find(item => item.target === plan.nextObjective?.target) ||
-		state.diagnostics[0] || { state: "blocked", reason: "No runnable progression objectives" };
+		state.diagnostics[0] || (progression?.redPill === "installed"
+			? { state: "waiting", reason: `FINAL_SERVER: ${progression.recommendation || progression.limitingResource}; faction backdoors no longer required` }
+			: { state: "blocked", reason: "No runnable progression objectives" });
 }

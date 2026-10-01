@@ -34,10 +34,7 @@ export async function main(ns) {
 		const unlocked = ns.fileExists("DarkscapeNavigator.exe", "home") || Number(ns.getResetInfo()?.currentNode) === 15;
 		let homeAgent = { ok: false, reason: "Darknet locked" };
 		if (unlocked) {
-			const objective=readProgressionSnapshot(ns);
-            const budgeted=objective && ["hacking","reputation"].includes(objective.limitingResource)
-                ? { ...cfg, homeReserve: Math.max(cfg.homeReserve,ns.getServerMaxRam("home")*.75) } : cfg;
-            homeAgent = ensureHomeAgent(ns, budgeted);
+			homeAgent = ensureHomeAgent(ns, cfg, readProgressionSnapshot(ns));
 			if (Date.now() - lastRestore >= 30_000) { await restoreAnchors(ns, cfg, state); lastRestore = Date.now(); }
 		}
 		const now = Date.now();
@@ -80,20 +77,24 @@ export function managerConfig(flags) {
 		freezeDepth: Number(flags["freeze-depth"]), stormSeed: bool(flags["storm-seed"]) };
 }
 
-function ensureHomeAgent(ns, cfg) {
+function ensureHomeAgent(ns, cfg, objective = null) {
 	const agents = ns.ps("home").filter(p => p.filename === AGENT);
 	const existing = agents.find(p => agentVersion(p) === AGENT_VERSION);
 	if (existing) return { ok: true, pid: existing.pid };
 	for (const process of agents) ns.kill(process.pid);
 	const agentCfg = { ...cfg, coordinationPort: cfg.port, version: AGENT_VERSION }; delete agentCfg.port;
 	const required = ns.getScriptRam(AGENT, "home");
+	// Bound the crawler's allocation, not the whole machine's free RAM. Keeping
+	// 75% completely idle prevented startup despite the planner reporting READY.
+	const cap = objective && ["hacking", "reputation"].includes(objective.limitingResource)
+		? Math.min(cfg.agentThreads, Math.max(1, Math.floor(ns.getServerMaxRam("home") * .25 / required))) : cfg.agentThreads;
 	let free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
-	const desired = homeAgentThreads(free + homeShareRam(ns), required, cfg.agentThreads, cfg.homeReserve);
+	const desired = homeAgentThreads(free + homeShareRam(ns), required, cap, cfg.homeReserve);
 	if (desired > 0) {
 		reclaimHomeShare(ns, desired * required + cfg.homeReserve);
 		free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
 	}
-	const threads = homeAgentThreads(free, required, cfg.agentThreads, cfg.homeReserve);
+	const threads = homeAgentThreads(free, required, cap, cfg.homeReserve);
 	const pid = threads > 0 ? ns.run(AGENT, { threads, temporary: true }, JSON.stringify(agentCfg)) : 0;
 	if (pid) return { ok: true, pid };
 	return { ok: false, reason: `home agent launch failed (${free.toFixed(2)} GB free; ${required.toFixed(2)} GB + ${cfg.homeReserve.toFixed(2)} GB reserve required)` };

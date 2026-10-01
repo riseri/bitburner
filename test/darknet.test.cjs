@@ -317,6 +317,21 @@ test('home crawler threading respects actual RAM, caps, reserves, and low-RAM la
     assert.equal(JSON.parse(launches[0][2]).coordinationPort,10);
 });
 
+test('hacking allocation caps crawler RAM without requiring 75 percent of home to be idle', () => {
+    const manager = loadScript('darknet-manager.js', new Clock()), launches = [];
+    const ns = { ps: () => [], getScriptRam: () => 16, getServerMaxRam: () => 256,
+        getServerUsedRam: () => 180, run: (...args) => { launches.push(args); return 42; } };
+    for (const limitingResource of ['hacking', 'reputation']) {
+        assert.equal(manager.ensureHomeAgent(ns, { agentThreads: 1024, homeReserve: 8, port: 10 }, { limitingResource }).ok, true);
+        assert.equal(launches.at(-1)[1].threads, 4);
+    }
+    ns.getServerUsedRam = () => 231;
+    assert.equal(manager.ensureHomeAgent(ns, { agentThreads: 4, homeReserve: 8, port: 10 }, { limitingResource: 'hacking' }).ok, true);
+    assert.equal(launches.at(-1)[1].threads, 1);
+    ns.getServerUsedRam = () => 240;
+    assert.equal(manager.ensureHomeAgent(ns, { agentThreads: 4, homeReserve: 8, port: 10 }, { limitingResource: 'hacking' }).ok, false);
+});
+
 test('Labyrinth repeats movement commands and returns the actual session password', async () => {
     let east=0, attempted='', logs=[];
     const ns={dnet:{authenticate:async (_host,attempt)=>{

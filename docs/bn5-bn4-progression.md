@@ -64,8 +64,10 @@ BN4.3; it is not a strategy for every BitNode or every optional subsystem.
   rooted remote RAM and only reclaims workers owned by the starter pool. Manual
   savings goals remain protected. Your SF1 normally gives 32 GB on a new node;
   the bootstrap also supports the 8 GB fallback.
-- The controller yields its faction/class work when hacker-faction backdoors
-  are ready. The existing progression actors install those backdoors.
+- The progression actors install faction backdoors alongside classes, faction
+  work, crimes and program creation. They preserve the player's work and respect
+  manual connection changes. Infiltration/BitVerse activity still blocks admission.
+  Once The Red Pill is installed, obsolete faction backdoors leave the action plan.
 - It pursues Tian Di Hui and compatible city factions when they offer unowned
   augmentations. By default it uses Sector-12 and Aevum; existing eastern or
   Volhaven memberships are respected. An explicit city preference is retained.
@@ -84,11 +86,13 @@ BN4.3; it is not a strategy for every BitNode or every optional subsystem.
   This is a bounded waiting policy, not a globally optimal reset calculation.
 - When faction reputation is not the immediate task, free Computer Science adds
   hacking experience while income workers continue. The controller tracks that
-  work and releases it for faction work, backdoors, installations and completion.
+  work and releases it for faction work, installations and completion.
   It does not take over unrelated manual player activity.
 - It protects faction invitation cash, joins Daedalus, earns Red Pill reputation,
   buys and immediately installs it, then trains toward the final server's live
-  hacking requirement. The fleet roots the final server.
+  hacking requirement. The fleet roots the final server. Training also evaluates
+  another useful hacking/XP augmentation package, including repeated NeuroFlux
+  Governor levels from existing faction reputation. See [endgame upgrades](endgame-upgrades.md).
 
 The augmentation manager publishes one versioned progression snapshot containing
 installed/queued ownership, live requirements, its selected basket, capabilities,

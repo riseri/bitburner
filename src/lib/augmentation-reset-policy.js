@@ -32,6 +32,7 @@ export function augmentationPackage(installed, pending, stats) {
 // requires reacquiring it from reset reputation and a second recovery. WAIT has
 // already acquired it, so we must not charge that reputation workload twice.
 export function decideAugmentationReset(input) {
+    if (input.completionGoal) return decideCompletionReset(input);
     const { pending = [], installed = [], plan = { errors: [] }, evidence, history,
         now = Date.now(), mode = "auto", minInstall = 5, progress = {} } = input;
     const legacy = routeInstallation({ ...input, installed, pending, plan, minInstall, progress, now });
@@ -85,9 +86,53 @@ export function decideAugmentationReset(input) {
         : "Observing the economic installation advantage for 60 seconds" };
 }
 
+// After The Red Pill, compare another reset with finishing this node using
+// today's multipliers. Basket completion and queue age cannot justify a reset.
+export function decideCompletionReset(input) {
+    const { pending = [], now = Date.now(), history } = input, evidence = input.evidence || {};
+    const result = { action: "WAIT", confidence: "UNKNOWN", reason: "Endgame recovery/XP evidence unavailable",
+        completionGoal: true, queued: pending.length, recoveryMs: evidence.recoveryMs ?? null, package: input.package,
+        installNow: { packageBenefit: evidence.benefit ?? null, breakEvenMs: null, etaMs: null },
+        wait: { nextAugmentation: null, etaMs: null, incrementalBenefit: null, totalMs: null },
+        fallback: { action: "WAIT", minInstall: input.minInstall, reason: "Preserve final-server progress" }, history: null };
+    if (!pending.length) return { ...result, reason: "No queued endgame upgrades" };
+    if (input.mode === "threshold") return { ...result, action: pending.length >= input.minInstall ? "INSTALL" : "WAIT",
+        confidence: "HIGH", reason: "Explicit endgame threshold policy" };
+    const lanes = evidence.lanes || [], recovery = evidence.recoveryMs;
+    if (!input.package?.complete || !evidence.reliable || !Number.isFinite(recovery) || recovery <= 0 ||
+        !lanes.length || lanes.some(l => ![l.remainingMs, l.lostMs, l.benefit].every(Number.isFinite) ||
+            l.remainingMs < 0 || l.lostMs < 0 || l.benefit <= 0))
+        return { ...result, reason: evidence.reason || result.reason };
+    const continued = Math.max(...lanes.map(l => l.remainingMs));
+    const reset = recovery + Math.max(...lanes.map(l => (l.remainingMs + l.lostMs) / l.benefit));
+    result.wait.etaMs = result.wait.totalMs = continued;
+    result.installNow.etaMs = reset;
+    result.installNow.resources = lanes;
+    result.confidence = "MEDIUM";
+    const benefit = evidence.benefit;
+    const loss = Math.max(...lanes.map(l => l.lostMs / l.benefit));
+    result.installNow.lostProgressMs = loss;
+    result.installNow.breakEvenMs = benefit > 1 ? (recovery + loss) / (1 - 1 / benefit) : null;
+    result.advantage = Number.isFinite(reset) && Number.isFinite(continued) && benefit >= RESET_POLICY.minBenefit &&
+        reset <= continued * (1 - RESET_POLICY.margin) && continued - reset >= RESET_POLICY.minSavingMs;
+    if (!result.advantage) return { ...result, reason: "Finishing with current multipliers beats rebuilding after a reset" };
+    const key = JSON.stringify([input.resetEpoch, input.objectiveKey, [...pending].sort(), "FINAL_SERVER"]);
+    const values = [recovery, ...lanes.flatMap(l => [l.remainingMs + l.lostMs, l.benefit])];
+    const stable = history?.key === key && Number.isFinite(history.since) && history.since <= history.at &&
+        history.at <= now && now - history.at <= RESET_POLICY.staleMs && Array.isArray(history.values) &&
+        history.values.length === values.length && values.every((v, i) => Number.isFinite(history.values[i]) &&
+            Math.abs(v - history.values[i]) <= Math.max(1, Math.abs(history.values[i])) * RESET_POLICY.rateTolerance);
+    result.history = { key, since: stable ? history.since : now, at: now, values: stable ? history.values : values };
+    const ready = now - result.history.since >= RESET_POLICY.observationMs;
+    return { ...result, action: ready ? "INSTALL" : "WAIT", reason: ready
+        ? "Endgame upgrades finish the node sooner after accounting for lost hacking and measured recovery"
+        : "Observing the endgame reset advantage for 60 seconds" };
+}
+
 export function resetDecisionSummary(d) {
     const time = ms => Number.isFinite(ms) ? `~${Math.ceil(ms / 1000)}s` : "unknown";
     if (d.action === "FALLBACK") return `FALLBACK ${d.fallback.action}: ${d.queued}/${d.fallback.minInstall}; ${d.reason}`;
     if (d.confidence === "HIGH") return `${d.action}: ${d.reason}`;
+    if (d.completionGoal) return `${d.action}: continue ${time(d.wait.totalMs)}; reset ${time(d.installNow.etaMs)}; ${d.reason}`;
     return `${d.action}: break-even ${time(d.installNow.breakEvenMs)}; next ${time(d.wait.etaMs)}; recovery ${time(d.recoveryMs)}; ${d.reason}`;
 }

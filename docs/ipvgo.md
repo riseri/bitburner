@@ -3,17 +3,21 @@
 `go-bot.js` plays ordinary black-side IPvGO games through the supported `ns.go`
 API. It does not need Singularity or use `go.cheat`. The supervisor manages exactly
 one copy on `home` by default and reads its dashboard snapshot from reserved port 12
-(`PORTS.GO_STATUS`). Go remains independent from JIT scheduling, fleet allocation,
-progression actors and contract execution.
+(`PORTS.GO_STATUS`). Go reads authenticated progression and JIT status for opponent
+selection while remaining independent from scheduler/fleet control, progression
+actions and contract execution.
 
 ## Start with a finite trial
 
-Sync these three files to `home`, preserving the `lib` directory:
+Sync the bot and its library dependencies to `home`, preserving the `lib`
+directory (normal filesync uploads them together). The Go-specific files are:
 
 ```text
 go-bot.js
 lib/go-strategy.js
 lib/go-session.js
+lib/go-opponent-policy.js
+lib/go-opponent-telemetry.js
 ```
 
 Run a five-game trial:
@@ -85,6 +89,7 @@ rather than looping indefinitely.
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--opponent` | `Daedalus` | Ordinary opponent for new games |
+| `--details` | `true` | Show opponent policy, confidence and up to three candidates |
 | `--size` | `5` | New board size: 5, 7, 9, or 13 |
 | `--games` | `0` | Verified game completions before exit; 0 = continuous |
 | `--takeover` | `false` | Explicitly adopt the unfinished starting game |
@@ -100,6 +105,12 @@ Other supported opponents are `Netburners`, `Slum Snakes`, `The Black Hand`,
 ```text
 run go-bot.js --opponent Netburners --games 5
 ```
+
+The supervisor uses `--opponent auto` by default. Auto measures actual bonus gain
+per elapsed game minute and estimates reduction in the current milestone ETA.
+Explicit opponents remain pinned. Changes occur only before a clean new board.
+See [measured opponent policy](go-opponent-policy.md) for stable mechanics,
+telemetry, valuation, donation behavior, exploration, hysteresis and examples.
 
 Or target the Black Hand hacking-money bonus:
 

@@ -43,6 +43,22 @@ test('prospective home RAM is planned before Navigator and still needed after pu
     }
     assert.equal(supervisor.ongoingHomeTarget(home({max:32,used:20,sharing:0}),{darknet:false},{},[],[]),32);
 });
+
+test('owned Navigator startup RAM outranks fleet capital and honors the configured home reserve', () => {
+    const supervisor = loadScript('supervisor.js', clock), investments = loadScript('lib/investment-policy.js', clock);
+    const cfg = { darknet: true, homeReserve: 24 };
+    const ns = home({ max: 64, used: 20, sharing: 0, owned: true });
+    assert.equal(supervisor.ongoingHomeTarget(ns, cfg, { singularity: false, darknet: true }, [], []), 78);
+    assert.equal(cfg.homeUpgradePriority, 83);
+    assert.equal(investments.chooseInvestment([{ target: 'home:ram', priority: cfg.homeUpgradePriority, amount: 100 },
+        { target: 'fleet:new', priority: 79, amount: 1 }], 'fleet:new').chosen.target, 'home:ram');
+    cfg.homeUpgradeCritical = true;
+    supervisor.ongoingHomeTarget(ns, cfg, { singularity: false, darknet: true }, [], []);
+    assert.equal(cfg.homeUpgradePriority, 90);
+    cfg.homeUpgradeCritical = false;
+    supervisor.ongoingHomeTarget(home({ max: 128, used: 20, sharing: 0 }), cfg, { singularity: false }, [], []);
+    assert.equal(cfg.homeUpgradePriority, 75);
+});
 test('Navigator 84 beats ordinary cloud 79 including hysteresis; critical goals still win',()=>{
     const api=loadScript('lib/investment-policy.js',clock), programs=loadScript('lib/programs.js',clock);
     const nav=programs.rankPrograms(programs.progressionPrograms().filter(p=>p.category==='darknet'))[0];

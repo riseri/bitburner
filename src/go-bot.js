@@ -3,12 +3,14 @@ import { chooseGoMove } from "lib/go-strategy.js";
 import { PORTS } from "lib/ports.js";
 import { dashboardTitle, dashboardSection, dashboardRow } from "lib/dashboard.js";
 import { GO_STATE_FILE, GO_OPPONENTS, GO_CYCLE_MS, goConfig, readGoSnapshot, snapshotKey, readGoRecord, saveGoRecord, mayStartGo, assertSameGo, verifyGoReply, inferWhiteReply, daedalusPriorityRng, findDaedalusDistractionWindow } from "lib/go-session.js";
+import { beginGoObservation, finishGoObservation, goRewardEpoch, readGoTelemetry, recordGoObservation, saveGoTelemetry, summarizeGoOpponent } from "lib/go-opponent-telemetry.js";
+import { GO_EFFECT_LABELS, readGoStats, readGoJitStatus, progressionGoPrior, selectGoOpponent, pinnedGoPolicy } from "lib/go-opponent-policy.js";
 
 /** Supervisor-managed singleton IPvGO player. Never deployed to the hacking fleet. @param {NS} ns */
 export async function main(ns) {
 	const flags = ns.flags([["opponent", "Daedalus"], ["size", 5], ["games", 0],
 		["takeover", false], ["interval", 25], ["think-ms", 8], ["rng-snipe", false], ["rng-max-wait", 10_000],
-		["port", PORTS.GO_STATUS]]);
+		["details", true], ["port", PORTS.GO_STATUS]]);
 	ns.disableLog("ALL");
 
 	let status = null;
@@ -31,39 +33,56 @@ export async function main(ns) {
 		const cfg = goConfig(flags);
 		session = { games: 0, wins: 0, losses: 0, moves: 0, margin: 0, score: 0, gameMs: 0,
 			startedAt: Date.now(), gameStartedAt: Date.now(), startBonus: 0, last: "Starting", analysis: null,
-			rng: null, rngAttempts: 0, rngSnipes: 0, rngWaitMs: 0 };
+			rng: null, rngAttempts: 0, rngSnipes: 0, rngWaitMs: 0, gameRngWaitMs: 0,
+			details: cfg.details, observation: null, policy: null, telemetry: null };
 		snapshot = readGoSnapshot(ns);
 		const decision = mayStartGo(snapshot, readGoRecord(ns), cfg.takeover);
-		if (decision === "new") snapshot = await startGame(ns, cfg, snapshot);
+		session.telemetry = readGoTelemetry(ns);
+		if (decision === "new") snapshot = await startGame(ns, cfg, snapshot, session);
 		else if (snapshot.game.currentPlayer === "Black") await saveGoRecord(ns, snapshot, "ready");
+		// A resumed/taken-over partial board has no authenticated full start time.
+		session.policy ||= pinnedGoPolicy(snapshot.opponent, cfg.autoOpponent, "finish the existing board; select after completion");
 		session.bonusOpponent = snapshot.opponent;
-		session.startBonus = Number(ns.go.analysis.getStats()[snapshot.opponent]?.bonusPercent) || 0;
+		session.startBonus = Number(readGoStats(ns)?.[snapshot.opponent]?.bonusPercent) || 0;
 		session.startedAt = Date.now();
-		session.gameStartedAt = Date.now();
+		session.gameStartedAt = session.observation?.startedAt ?? Date.now();
 		let turns = 0;
 		renderGo(ns, snapshot, session, "STARTING", status);
 
 		while (true) {
 			if (snapshot.game.currentPlayer !== "White") assertSameGo(ns, snapshot);
 			if (snapshot.game.currentPlayer === "None") {
+				const finishedAt = session.gameFinishedAt ?? Date.now();
 				session.games++;
 				const won = snapshot.game.blackScore >= snapshot.game.whiteScore;
 				if (won) session.wins++; else session.losses++;
 				session.margin += snapshot.game.blackScore - snapshot.game.whiteScore;
 				session.score += snapshot.game.blackScore;
-				session.gameMs += Math.max(0, Date.now() - session.gameStartedAt);
+				session.gameMs += Math.max(0, finishedAt - session.gameStartedAt);
 				session.last = `${won ? "Won" : "Lost"} ${snapshot.game.blackScore} to ${snapshot.game.whiteScore} vs ${snapshot.opponent}`;
 				await saveGoRecord(ns, snapshot, "complete", { lastResult: session.last });
+				assertSameGo(ns, snapshot);
+				const completed = finishGoObservation(session.observation, { snapshot, stats: readGoStats(ns),
+					member: ns.getPlayer().factions.includes(snapshot.opponent), rngWaitMs: session.gameRngWaitMs, now: finishedAt });
+				if (completed && recordGoObservation(session.telemetry, completed)) {
+					if (!await saveGoTelemetry(ns, session.telemetry)) session.telemetryWarning = "policy telemetry write failed; continuing with in-memory evidence";
+					const evidence = summarizeGoOpponent(session.telemetry, snapshot.opponent, snapshot.board.length,
+						completed.epoch, completed.after.bonusPercent);
+					session.policy.bonusPerMinute = evidence.bonusPerMinute;
+					session.policy.telemetryGames = evidence.games;
+				}
+				session.observation = null;
+				assertSameGo(ns, snapshot);
 				renderGo(ns, snapshot, session, "GAME COMPLETE", status);
 				if (cfg.games && session.games >= cfg.games) return;
 				await ns.sleep(Math.max(250, cfg.interval));
-				snapshot = await startGame(ns, cfg, snapshot);
+				snapshot = await startGame(ns, cfg, snapshot, session);
 				if (snapshot.opponent !== session.bonusOpponent) {
 					session.bonusOpponent = snapshot.opponent;
-					session.startBonus = Number(ns.go.analysis.getStats()[snapshot.opponent]?.bonusPercent) || 0;
+					session.startBonus = Number(readGoStats(ns)?.[snapshot.opponent]?.bonusPercent) || 0;
 					session.startedAt = Date.now();
 				}
-				session.gameStartedAt = Date.now(); turns = 0;
+				session.gameStartedAt = session.observation?.startedAt ?? Date.now(); turns = 0;
 				continue;
 			}
 			if (++turns > snapshot.board.length ** 2 * 8) throw new Error("Turn limit reached; leaving the unfinished board intact");
@@ -95,7 +114,9 @@ export async function main(ns) {
 				}
 				const endingPass = action.x === null && snapshot.game.previousMove === null && snapshot.history.length > 0;
 				if (!endingPass && snapshot.opponent === "Daedalus" && cfg.rngSnipe) {
+					const rngStartedAt = Date.now();
 					session.rng = await alignDaedalusRng(ns, snapshot, cfg);
+					session.gameRngWaitMs += Math.max(0, Date.now() - rngStartedAt);
 					session.rngAttempts++;
 					if (session.rng.armed) session.rngSnipes++;
 					session.rngWaitMs += session.rng.waitedMs;
@@ -114,6 +135,7 @@ export async function main(ns) {
 				throw new Error("Unexpected Go transition or manual intervention; board preserved, use --takeover true to resume");
 			}
 			snapshot = after;
+			if (snapshot.game.currentPlayer === "None") session.gameFinishedAt = Date.now();
 			await saveGoRecord(ns, snapshot, "ready");
 			renderGo(ns, snapshot, session, "RUNNING", status);
 		}
@@ -155,12 +177,20 @@ async function alignDaedalusRng(ns, snapshot, cfg) {
 	return { armed: false, waitedMs, priority: lastPriority, reason: "timing band slipped" };
 }
 
-async function startGame(ns, cfg, previous) {
-    if(cfg.autoOpponent) cfg.opponent = progressionGoOpponent(readProgressionSnapshot(ns));
+async function startGame(ns, cfg, previous, session) {
 	assertSameGo(ns, previous);
 	if (previous.game.currentPlayer !== "None" &&
 		(previous.history.length || previous.game.currentPlayer !== "Black" || previous.game.previousMove !== null ||
 		previous.board.some(column => column.includes("X")))) throw new Error("Refusing to reset an unfinished game");
+	const stats = readGoStats(ns), epoch = goRewardEpoch(ns.getResetInfo());
+	if (cfg.autoOpponent) {
+		session.policy = selectGoOpponent({ objective: readProgressionSnapshot(ns), jit: readGoJitStatus(ns),
+			telemetry: session.telemetry, stats, size: cfg.size, epoch, incumbent: previous.opponent });
+		cfg.opponent = session.policy.selectedOpponent;
+	} else session.policy = pinnedGoPolicy(cfg.opponent);
+	session.observation = beginGoObservation({ opponent: cfg.opponent, size: cfg.size, epoch, stats,
+		member: ns.getPlayer().factions.includes(cfg.opponent) });
+	session.gameFinishedAt = null; session.gameRngWaitMs = 0;
 	await saveGoRecord(ns, previous, "pending", { resetTo: cfg.opponent });
 	assertSameGo(ns, previous);
 	ns.go.resetBoardState(cfg.opponent, cfg.size);
@@ -172,7 +202,7 @@ async function startGame(ns, cfg, previous) {
 }
 
 function renderGo(ns, snapshot, session, state, status = null) {
-	const stats = ns.go.analysis.getStats()[snapshot.opponent];
+	const stats = readGoStats(ns)?.[snapshot.opponent];
 	const member = ns.getPlayer().factions.includes(snapshot.opponent);
 	const row = (label, value) => dashboardRow(ns, label, value);
 	publishGoStatus(status, ns, snapshot, session, state, stats, member);
@@ -191,6 +221,8 @@ function renderGo(ns, snapshot, session, state, status = null) {
 		row("Pace", `${(avgGameMs / 1000).toFixed(1)}s/game | ${scorePerMinute.toFixed(1)} score/min | ${(session.margin / session.games).toFixed(2)} avg margin`);
 	}
 	row("Last action", session.last);
+	if (session.details) renderGoOpponentPolicy(ns, session.policy, stats);
+	if (session.telemetryWarning) row("Telemetry", session.telemetryWarning);
 
 	if (session.analysis) {
 		const a = session.analysis;
@@ -207,6 +239,7 @@ function renderGo(ns, snapshot, session, state, status = null) {
 		const bonusRate = (Number(stats.bonusPercent) - session.startBonus) / elapsedHours;
 		row("Bonus pace", `${bonusRate >= 0 ? "+" : ""}${bonusRate.toFixed(3)}%/hour this session`);
 		row("Membership", member ? "Joined; qualifying win streaks can award favor" : "Not joined; node-power bonus still applies");
+		row("Favor evidence", `Go converted-rep progress ${Number(stats.rep) || 0} | recorded only`);
 	}
 
 	if (session.rngAttempts) {
@@ -245,6 +278,12 @@ function publishGoStatus(port, ns, snapshot, session, state, stats = null, membe
 		bonusDescription: stats?.bonusDescription || "",
 		winStreak: Number(stats?.winStreak) || 0,
 		member: Boolean(member),
+		goRep: Number.isFinite(stats?.rep) ? stats.rep : null,
+		lastGame: session.telemetry?.opponents?.[snapshot.opponent]?.[snapshot.board.length]?.samples?.at(-1) ? (() => {
+			const sample = session.telemetry.opponents[snapshot.opponent][snapshot.board.length].samples.at(-1);
+			return { durationMs: sample.durationMs, bonusDelta: sample.bonusDelta, repDelta: sample.repDelta, rngWaitMs: sample.rngWaitMs };
+		})() : null,
+		...session.policy,
 	});
 }
 
@@ -271,7 +310,23 @@ function publishGoStopped(port, ns, snapshot, session, error) {
 
 
 export function progressionGoOpponent(objective) {
-    if(objective?.limitingResource === "hacking") return "Illuminati";
-    if(objective?.limitingResource === "cash" && objective.milestone !== "RED_PILL") return "The Black Hand";
-    return "Daedalus";
+    return progressionGoPrior(objective);
+}
+
+function renderGoOpponentPolicy(ns, policy, stats) {
+	if (!policy) return;
+	const row = (label, value) => dashboardRow(ns, label, value);
+	dashboardSection(ns, "Opponent policy");
+	row("Mode", policy.autoOpponent ? "AUTO" : "PINNED");
+	const objective = policy.objective;
+	row("Objective", objective ? `${objective.milestone} | ${objective.reputationStrategy} | ${objective.limitingResource} | ${objective.balance}` : "unavailable");
+	row("Selected", policy.selectedOpponent);
+	row("Effect", GO_EFFECT_LABELS[policy.effect] || policy.effect);
+	row("Current bonus", `+${Number(stats?.bonusPercent || 0).toFixed(3)}%`);
+	row("Bonus pace", Number.isFinite(policy.bonusPerMinute) ? `+${policy.bonusPerMinute.toFixed(3)}%/min` : "collecting evidence");
+	row("Progress value", Number.isFinite(policy.projectedMilestoneValue) ? `~${(policy.projectedMilestoneValue / 1000).toFixed(1)}s milestone ETA saved / Go min` : "unknown; semantic prior");
+	row("Confidence", `${policy.selectionConfidence} | ${policy.telemetryGames} games recorded`);
+	row("Reason", policy.selectionReason);
+	for (const candidate of policy.ranking || []) row(candidate.opponent, `${Number.isFinite(candidate.projectedMilestoneValue)
+		? (candidate.projectedMilestoneValue / 1000).toFixed(1) + "s/min" : "unknown"} | ${candidate.confidence}`);
 }

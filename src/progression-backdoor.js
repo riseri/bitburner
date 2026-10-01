@@ -19,7 +19,7 @@ export async function main(ns) {
 		const route = routeBetween(parents, original, request.target);
 		if (!route.length) { outcome = { state: "blocked", reason: "invalid-route" }; return; }
 		for (const host of route.slice(1)) {
-			if (ns.singularity.getCurrentServer() !== lastReached || ns.singularity.isBusy()) {
+			if (ns.singularity.getCurrentServer() !== lastReached || exclusivePlayerActivity(ns)) {
 				outcome = { state: "blocked", reason: "player-took-control" }; return;
 			}
 			if (!ns.singularity.connect(host)) { outcome = { state: "failed", reason: `connection-failed: ${host}` }; return; }
@@ -42,7 +42,7 @@ export async function main(ns) {
 		try {
 			if (original && lastReached !== original && resetEpoch(ns.getResetInfo()) === request.resetEpoch) {
 				// Human touched the wheel. Do not fight them for the aux cable.
-				if (ns.singularity.getCurrentServer() !== lastReached || ns.singularity.isBusy()) restoration = "manual-control-preserved";
+				if (ns.singularity.getCurrentServer() !== lastReached || exclusivePlayerActivity(ns)) restoration = "manual-control-preserved";
 				else {
 					const route = routeBetween(parents, lastReached, original);
 					restoration = route.length ? "restored" : "restore-route-missing";
@@ -65,6 +65,12 @@ function backdoorBlocker(ns, request) {
 	if (!ns.hasRootAccess(request.target)) return "root-required";
 	if (!Number.isFinite(server.requiredHackingSkill)) return "invalid-server-state";
 	if (ns.getHackingLevel() < server.requiredHackingSkill) return "hacking-level-required";
-	if (ns.singularity.isBusy()) return "player-busy";
+	if (exclusivePlayerActivity(ns)) return "player-busy";
 	return "";
+}
+
+function exclusivePlayerActivity(ns) {
+	// installBackdoor does not consume the player's work slot. Classes, faction
+	// work, crimes and program creation can continue; infiltration/BitVerse cannot.
+	return ns.singularity.isBusy() && !ns.singularity.getCurrentWork();
 }

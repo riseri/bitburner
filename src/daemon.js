@@ -1,7 +1,7 @@
 import { gwHosts, observeHomeCapacity, homeLaunchFits, homeProtectedRam, prepareHomeLaunch } from "lib/home-capacity.js";
 import { homeCoreBonus } from "lib/home-mechanics.js";
 import { runTargetPipelines } from "lib/target-pipelines.js";
-import { dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets, renderSchedulerCapacity } from "lib/dashboard.js";
+import { dashboardFrame, dashboardTitle, dashboardSection, dashboardRow, dashboardTime, dashboardCounters, dashboardTargets, renderSchedulerCapacity } from "lib/dashboard.js";
 import { PORTS } from "lib/ports.js";
 import { backgroundPrepFiles, createBackgroundPrep, backgroundPrepRam, backgroundPrepJobs, cancelBackgroundPrep, cleanupBackgroundOrphans, tickBackgroundPrep, backgroundPrepSummary, recentPipelineIncome } from "lib/background-prep.js";
 import { hackingFormulasAvailable, preparedHackingModel } from "lib/formulas.js";
@@ -4325,7 +4325,11 @@ function nextPendingHackLanding(batches) {
 	return next;
 }
 
-function renderDashboard(
+function renderDashboard(ns, ...args) {
+	return dashboardFrame(ns, frame => renderPipelineDashboard(frame, ...args));
+}
+
+function renderPipelineDashboard(
 	ns, target, runtime, network, cfg, stats, queue, running, reservations,
 	batches, targetAnalysis, cloudState, drain, recovery, foreignUsedByHost
 ) {
@@ -4462,6 +4466,10 @@ function renderDashboard(
 // Publish machine-readable status independently of the text layout. Only the
 // supervisor reads this reserved status channel; worker/control ports are separate.
 function renderSchedulerDashboard(ns, pool) {
+	return dashboardFrame(ns, frame => renderSchedulerFrame(frame, pool));
+}
+
+function renderSchedulerFrame(ns, pool) {
 	const now = Date.now();
 	const all = [...pool.pipelines.values(), ...pool.history];
 	const elapsed = Math.max(1, Math.min(60_000, now - pool.started)) / 1000;
@@ -4609,7 +4617,8 @@ function renderSchedulerDashboard(ns, pool) {
 	if (pool.cfg.dashboardDetails) {
 		dashboardSection(ns, "Target diagnostics");
 		for (const p of rows) {
-			row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s actual`);
+			dashboardSection(ns, `Target ${p.target}`);
+			row("State", `${p.mode} | ${p.role} | ${cash(p.income60)}/s actual`);
 			row("Plan", `${cash(p.model)}/s estimate | ${p.batchRate.toFixed(3)}/${p.modelBatchRate.toFixed(3)} batches/s actual/model`);
 			if (p.mode === "WARMUP") row("First hack", `ETA ${dashboardTime(p.eta)}`);
 			row("Workers", `${p.running} running | ${p.queued} queued | ${formatRam(p.workerRam)}`);

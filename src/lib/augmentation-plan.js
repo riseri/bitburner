@@ -194,20 +194,22 @@ function buildDynamicPlan(ns, options) {
         savings.owner === "supervisor" && savings.target?.startsWith("augmentation:") ? 0 : savings.floor);
     const cash = Math.max(0,context.money-reserve), factionData = new Map();
     for (const faction of factions) {
-        let rate = null, favor = 0, projectedFavor = null, workAvailable = false;
+        let rate = null, rateSource = "unknown", favor = 0, projectedFavor = null, workAvailable = false;
         try {
             favor = ns.singularity.getFactionFavor(faction);
             const types = ns.singularity.getFactionWorkTypes(faction); workAvailable = types.length > 0;
             const analysis = factionWorkAnalysis(ns,faction,types,context.player);
             rate = analysis?.reputationPerSecond * (options.focusWork || context.installed.includes("Neuroreceptor Management Implant") ? 1 : .8) || null;
+            if (rate > 0) rateSource = "model";
             projectedFavor = formulaFavorProjection(ns,faction);
         } catch {}
         const rep = ns.singularity.getFactionRep(faction), prior = state.repSamples?.[faction];
         const current = ns.singularity.getCurrentWork?.();
         if (!(state.lastDonation?.faction === faction && state.lastDonation.at >= prior?.at) && prior && prior.epoch === context.resetEpoch && now>prior.at && now-prior.at<=15000 && rep>prior.rep && current?.type === "FACTION" && current.factionName === faction && prior.working)
-            rate = (rep-prior.rep)*1000/(now-prior.at);
+            { rate = (rep-prior.rep)*1000/(now-prior.at); rateSource = "measured"; }
         state.repSamples ||= {}; state.repSamples[faction] = {epoch:context.resetEpoch,at:now,rep,working:current?.type === "FACTION" && current.factionName === faction};
-        factionData.set(faction,{faction,rep,rate,favor,projectedFavor,donationEligible:workAvailable && favor >= (ns.getFavorToDonate?.() ?? Infinity)});
+        factionData.set(faction,{faction,rep,rate,rateSource,workActive:current?.type === "FACTION" && current.factionName === faction,
+            favor,projectedFavor,donationEligible:workAvailable && favor >= (ns.getFavorToDonate?.() ?? Infinity)});
     }
     const catalog = state.catalog.items.filter(a=>!context.owned.includes(a.name)).map(a=>{
         const price=ns.singularity.getAugmentationPrice(a.name), repRequired=ns.singularity.getAugmentationRepReq(a.name);

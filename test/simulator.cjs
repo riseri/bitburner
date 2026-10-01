@@ -185,7 +185,7 @@ class NetscriptSimulation {
         return { actions: this.actions.length, paid: this.paid.length,
             income60: this.paid.filter(p => p.at >= last).reduce((s, p) => s + p.money, 0) / 60,
             money: this.server.money, security: this.server.sec, errors: this.errors.map(String),
-            logs: this.logs, steps: this.clock.steps, processes: this.processes.size };
+            logs: this.logs.flatMap(entry => String(entry).split(/\r?\n/)), steps: this.clock.steps, processes: this.processes.size };
     }
 }
 module.exports = { NetscriptSimulation };

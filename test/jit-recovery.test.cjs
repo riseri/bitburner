@@ -380,7 +380,7 @@ function dashboardFixture() {
     });
     const logs = [];
     const ns = {
-        clearLog: () => { logs.length = 0; }, print: line => logs.push(String(line)),
+        clearLog: () => { logs.length = 0; }, print: entry => logs.push(...String(entry).split(/\r?\n/)),
         getServerMoneyAvailable: () => 317_880_000, getServerMaxMoney: () => 600_000_000,
         getServerSecurityLevel: () => 7.278, getServerMinSecurityLevel: () => 7,
         getHackingLevel: () => 472, getServerUsedRam: () => 0,

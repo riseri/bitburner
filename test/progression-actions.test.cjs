@@ -19,7 +19,7 @@ function fixture() {
         getServer:host=>({requiredHackingSkill:100,backdoorInstalled:world.installed.has(host)}),
         run:(filename,threads,...args)=>{const pid=100+launched.length; launched.push({filename,threads,args,pid}); processes.set(pid,{pid,filename,args,threads}); return pid;},
         kill:()=>assert.fail('actions must not kill income workers'),
-        singularity:{isBusy:()=>world.busy, getCurrentServer:()=>world.current,
+        singularity:{isBusy:()=>world.busy, getCurrentWork:()=>world.work || null, getCurrentServer:()=>world.current,
             getDarkwebProgramCost:name=>loadScript('lib/programs.js', new Clock()).progressionPrograms().find(p=>p.name===name)?.cost,
             purchaseTor:()=>{purchases.push('TOR');world.tor=true;world.cash-=200000;return true;},
             purchaseProgram:name=>{purchases.push(name);world.owned.add(name);return true;},
@@ -215,6 +215,41 @@ test('installed backdoor is confirmed and previous terminal location is restored
     const f=fixture(),job=f.prepare();f.world.current='a';await job.api.main(job.actor);
     assert.equal(f.world.current,'a');assert.equal(f.world.installed.has('CSEC'),true);
     assert.equal(f.ports.get(14).peek().state,'succeeded');
+});
+
+for (const type of ['CLASS', 'FACTION', 'COMPANY', 'CRIME', 'CREATE_PROGRAM']) {
+    test(`backdoor installs during ${type} without stopping or replacing player work`, async () => {
+        const f = fixture(), job = f.prepare(), work = { type };
+        f.world.busy = true; f.world.work = work;
+        f.ns.singularity.stopAction = () => assert.fail('backdoors must preserve work');
+        await job.api.main(job.actor);
+        assert.equal(f.world.installed.has('CSEC'), true);
+        assert.equal(f.world.current, 'home'); assert.equal(f.world.work, work);
+        assert.equal(f.ports.get(14).peek().restoration, 'restored');
+    });
+}
+
+test('final-server milestone filters faction backdoors from both new and adopted plans', () => {
+    const f = fixture(), port = new Port(), state = f.dispatch.createActionState();
+    f.processes.set(9, { pid: 9, filename: 'augmentation-manager.js' });
+    f.ports.set(11, port);
+    const progression = { type: 'progression-objective', version: 1, producer: 'augmentation-manager.js',
+        producerPid: 9, generatedAt: f.clock.now, resetEpoch: f.plan.resetEpoch,
+        milestone: 'FINAL_SERVER', redPill: 'installed', limitingResource: 'hacking' };
+    port.write({ type: 'augmentation-status', version: 1, producerPid: 9, generatedAt: f.clock.now,
+        resetEpoch: f.plan.resetEpoch, progression });
+    f.plan.objectives = f.plan.objectives.slice(1);
+    state.blocked.set('backdoor:CSEC', { reason: 'player-busy', until: f.clock.now + 30000 });
+    f.dispatch.tickProgressionActions(f.ns, state, f.plan, f.cfg);
+    assert.equal(f.launched.length, 0); assert.equal(state.diagnostics.length, 0);
+    assert.match(state.current.reason, /FINAL_SERVER/);
+    assert.equal(f.manager.planObjectives({ torOwned: true, money: 1e9, programs: [],
+        backdoors: [{ host: 'CSEC' }], progression }).length, 0);
+    const lines = [];
+    loadScript('supervisor.js', f.clock).renderProgression({ ...f.ns, print: s => lines.push(s) },
+        { ...f.plan, progression, backdoors: [{ host: 'CSEC', ready: true, path: ['home', 'iron-gym', 'CSEC'] }] },
+        { ...f.cfg, dashboardDetails: true }, state);
+    assert.doesNotMatch(lines.join('\n'), /iron-gym|player-busy/);
 });
 
 test('manual movement during a long installation is not overwritten by restoration', async () => {

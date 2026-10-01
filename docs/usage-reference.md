@@ -261,7 +261,8 @@ focuses on it and its prerequisites; once purchased, the automatic basket is emp
 Earlier, it scores economy, faction reputation, skill/XP, and distinct-count progress
 against the shared bottleneck. Those progression/support upgrades are included in
 the default hacking focus; `--target` remains an explicit override. NeuroFlux is
-excluded from automatic purchasing. Missing prerequisites
+excluded from the ordinary automatic basket. The BN4 endgame controller can
+include it in a separate completion package. Missing prerequisites
 from unjoined factions are reported. This is a useful ordering heuristic, not a
 global optimization over every faction, donation, or unlock.
 
@@ -280,8 +281,11 @@ automatically unless explicitly configured. Outside the BN4 route, installation 
 Within BN4, the controller compares a bounded wait for the next valuable purchase
 with the current batch, favor access, and observed reset recovery. The Red Pill
 installs immediately, subject
-to manual-work and restart checks. An installed Red Pill stops further purchases
-and installations to preserve progress toward the final server. Donations retain
+to manual-work and restart checks. After The Red Pill is installed, the controller
+continues toward the final server and considers further hacking augments and
+NeuroFlux through the [endgame upgrade policy](endgame-upgrades.md). Another
+installation requires measured evidence that it can shorten completion enough to
+pay for rebuilding hacking and lost IPvGO bonuses. Donations retain
 enough cash for the planned purchase, the percentage reserve, and unrelated goals.
 
 Outside the BN4 route, automatic installation checks `--min-install` before

@@ -93,7 +93,7 @@ function buildStatus(ns, fleetStatus, options = {}) {
     const ranked = rankPrograms(programs, { servers, money, homeRam: ns.getServerMaxRam(HOME), darknetAvailableRam: darknet.availableRam,
         darknetRam: darknet.minimumRam,
         income: objective?.incomePerSecond, objective });
-    const objectives = planObjectives({ torOwned, programs: ranked, backdoors, money });
+    const objectives = planObjectives({ torOwned, programs: ranked, backdoors, money, progression: objective });
     if (darknet.navigator === "MISSING") darknet.navigator = money >= programs.find(p => p.category === "darknet")?.cost && torOwned ? "PURCHASABLE" : "SAVING";
 	const milestone = planMilestone({ currentNode, player: ns.getPlayer(), money, worldDaemon,
 		observation: readProgressionObservation(ns) });
@@ -188,7 +188,7 @@ function analyzeBackdoor(ns, target, discovered, parents, hackingLevel) {
 }
 
 // Independent backdoors do not sit behind an unaffordable shopping cart.
-export function planObjectives({ torOwned, programs, backdoors, money }) {
+export function planObjectives({ torOwned, programs, backdoors, money, progression = null }) {
 	const objectives = [];
 	if (!torOwned) objectives.push({ kind: "tor", target: "TOR", label: "Get a TOR router",
 		ready: true, costEstimate: 200_000, affordable: money >= 200_000, blocker: money >= 200_000 ? "" : "insufficient-cash" });
@@ -197,6 +197,7 @@ export function planObjectives({ torOwned, programs, backdoors, money }) {
 		priority: missing.priority, reason: missing.reason, label: `Acquire ${missing.name}`, ready: torOwned, costEstimate: missing.cost,
 		affordable: money >= missing.cost, blocker: !torOwned ? "tor-required" : money >= missing.cost ? "" : "insufficient-cash" });
 	for (const target of backdoors) {
+		if (progression?.redPill === "installed") break;
 		if (target.installed) continue;
 		const blocker = !target.discovered ? "not-discovered" : !target.rooted ? "root-required"
 			: !target.skillReady ? `hacking-level-${target.requiredHacking}-required` : !target.path.length ? "route-required" : "";
