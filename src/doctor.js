@@ -38,7 +38,7 @@ export function diagnoseAutomation(ns) {
         visited.add(file);
         if (!ns.fileExists(file, "home")) { issues.push(`Missing ${file}`); return; }
         const source = ns.read(file);
-        for (const match of source.matchAll(/\bfrom\s+["']([^"']+)["']/g)) inspect(match[1]);
+        for (const dependency of scriptDependencies(source)) inspect(dependency);
     };
     for (const file of entries) inspect(file);
     lines.push(`AUTOMATION DOCTOR | inspected ${visited.size} entry points/dependencies`);
@@ -100,4 +100,11 @@ export function diagnoseAutomation(ns) {
     for (const issue of issues) lines.push(`WARN: ${issue}`);
     lines.push(`${issues.length} diagnostic warning(s). No processes, ports or purchases changed.`);
     return { state: issues.length ? "WARN" : "READY", summary: `${issues.length} warning(s); ${visited.size} files checked`, issues, lines };
+}
+
+function scriptDependencies(source) {
+    // Consume comments and strings as whole tokens. A dashboard string such as
+    // `" from " + faction` is text, not a dependency declaration.
+    const tokens = /\/\/[^\r\n]*|\/\*[\s\S]*?\*\/|^\s*(?:import\s*(?:(?:\{[^}]*\}|\*\s+as\s+[\w$]+|[\w$]+(?:\s*,\s*(?:\{[^}]*\}|\*\s+as\s+[\w$]+))?)\s*from\s*)?|export\s*(?:\{[^}]*\}|\*(?:\s+as\s+[\w$]+)?)\s*from\s*)["']([^"'\r\n]+)["']|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`/gm;
+    return [...source.matchAll(tokens)].flatMap(match => match[1] ? [match[1]] : []);
 }

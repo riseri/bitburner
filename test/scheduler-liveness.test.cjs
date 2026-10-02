@@ -90,6 +90,25 @@ test('probe rejects fragmented launch bursts and rolls back without touching pee
     assert.equal(f.pool.launchBuckets.size,0);
 });
 
+test('a secondary whole batch uses the global 16-launch ledger beside eight incumbent launches',()=>{
+    const f=fixture();f.cfg.maxLaunches=16;
+    f.pool.network.hosts=[{name:'cloud',maxRam:10000,cores:1}];
+    Object.assign(f.ns,{getServerUsedRam:()=>0,growthAnalyzeSecurity:t=>t*.004,weakenAnalyze:t=>t*.05});
+    const plan={...f.peer.runtime.plan,H:4,gEffective:10,hackSecurity:.008,steal:.1};
+    const landing=f.clock.now+10000;
+    const probe=f.multi.reserveBudgetedBatch(f.ns,f.pool,f.peer,'proposal',landing,plan,f.peer.cfg);
+    assert.ok(probe.chunks);assert.deepEqual([...new Set(probe.chunks.map(c=>c.phase))].sort(),['G','H','W1','W2']);
+    const slots=[...new Set(probe.chunks.map(c=>Math.floor(c.launchAt/250)))];
+    f.api.rollbackReservations(f.pool.reservations,0);
+    const first=slots[0];f.pool.launchBuckets=new Map([[first,2],[first+1,2],[first+2,2],[first+3,2]]);
+    assert.equal([...f.pool.launchBuckets.values()].reduce((n,v)=>n+v,0),8);
+    assert.equal(f.multi.fitsLaunchBudget(f.pool.launchBuckets,probe.chunks,8),false,'old secondary ceiling counted the primary budget again');
+    const result=f.multi.reserveBudgetedBatch(f.ns,f.pool,f.peer,'accepted',landing,plan,f.peer.cfg);
+    assert.ok(result.chunks,'whole batch fits the shared global ledger');
+    assert.ok(f.multi.fitsLaunchBudget(f.pool.launchBuckets,result.chunks,16));
+    assert.equal(f.p.stats.restarts,0);assert.equal(f.p.drain,null);
+});
+
 function fragmentedFleet() {
     const f=fixture();
     f.pool.network.hosts=[{name:'cloud',maxRam:10000,cores:1},

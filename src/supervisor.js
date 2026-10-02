@@ -14,6 +14,7 @@ import { pathFromHome, singularityAvailable, resetEpoch } from "lib/progression-
 import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget, selectedServices, darknetActivation } from "lib/service-catalog.js";
 import { starterHosts, starterWorkers, stopStarterPool, tickStarterPool } from "lib/starter-pool.js";
 import { targetLimit } from "lib/target-limit.js";
+import { schedulerLimit } from "lib/scheduler-scaling.js";
 
 const HOME = "home";
 const SUPERVISOR = "supervisor.js";
@@ -36,6 +37,8 @@ export async function main(ns) {
 	const flags = ns.flags([
 		["background-prep", true],
 		["max-targets", "auto"],
+		["max-batch-rate", "auto"],
+		["max-launches", "auto"],
 		["dashboard-details", true],
 		["open-dashboards", true],
 		["dashboard-layout", "auto"],
@@ -104,6 +107,8 @@ export async function main(ns) {
 	}
 
 	const cfg = {
+		maxBatchRate: schedulerLimit(flags["max-batch-rate"], "batch"),
+		maxLaunches: schedulerLimit(flags["max-launches"], "launch"),
 		dashboardDetails: asBoolean(flags["dashboard-details"]),
 		openDashboards: asBoolean(flags["open-dashboards"]),
 		dashboardLayout: String(flags["dashboard-layout"]),
@@ -182,6 +187,7 @@ export async function main(ns) {
 	targetLimit(flags["max-targets"]);
 	const daemonArgs = asBoolean(flags["background-prep"]) ? [] : ["--background-prep", false];
 	daemonArgs.push("--max-targets", flags["max-targets"]);
+	daemonArgs.push("--max-batch-rate", cfg.maxBatchRate, "--max-launches", cfg.maxLaunches);
 	daemonArgs.push("--dashboard-details", cfg.dashboardDetails);
 	if (cfg.shareEnabled) daemonArgs.push("--fleet-share", true);
 	const budget = supervisorRamBudget(ns, cfg, supervisorCapabilities(ns));
@@ -702,7 +708,9 @@ function renderSupervisorFrame(ns, state) {
 	if (cfg.shareStatus) dashboardRow(ns, "Sharing", sharingLabel(cfg.shareStatus));
 	for (const job of cfg.utilityJobs || []) {
 		const stale = job.type === "augmentation-plan" && job.report && Date.now() - job.report.generatedAt > 120000;
-		dashboardRow(ns, job.type === "diagnostics" ? "Diagnostics" : "Augmentations", `${stale ? "STALE / " : ""}${job.state}: ${job.message}`);
+		const label = job.type === "diagnostics" ? "Diagnostics" : job.type === "stock-access" ? "Stock access" : "Augmentations";
+		const managed = job.type === "augmentation-plan" && job.message === "Manager publishes the live plan";
+		dashboardRow(ns, label, `${stale ? "STALE / " : ""}${managed ? "MANAGED" : job.state}: ${job.message}`);
 		if (job.type === "diagnostics") {
 			for (const issue of (job.report?.issues || []).slice(0, cfg.dashboardDetails ? 10 : 2)) dashboardRow(ns, "Warning", issue);
 		}
@@ -1033,7 +1041,10 @@ function renderExperienceStatus(ns, daemon) {
 	const policy = daemon.policy, xp = policy?.xp;
 	dashboardRow(ns, "Hacking policy", `${policy?.mode || "NORMAL"} | ${policy?.reason || daemon.note}`);
 	dashboardRow(ns, "XP work", `${xp?.target || "waiting"} | ${xp?.action || ""} | ${xp?.state || "WAITING"}`);
-	if (xp?.estimatedXpPerSecond > 0) dashboardRow(ns, "XP model", `${xp.estimatedXpPerSecond.toPrecision(3)}/s`);
+	if (xp?.reason) dashboardRow(ns, "XP note", xp.reason);
+	if (xp && Number.isFinite(xp.availableRam)) dashboardRow(ns, "XP capacity", `${formatRam(xp.availableRam)} unreserved | ${formatRam(xp.ram || 0)} running | ${xp.workers || 0} workers`);
+	if (xp?.estimatedXpPerSecond > 0) dashboardRow(ns, "XP model", `${xp.estimatedXpPerSecond.toPrecision(3)}/s${xp.workers ? "" : " potential; no XP workers running"}`);
+	if (xp?.observedTotalXpPerSecond > 0) dashboardRow(ns, "Total XP rate", `${xp.observedTotalXpPerSecond.toPrecision(3)}/s observed from scripts and player work`);
 	const progress = policy?.progress;
 	if (progress) {
 		dashboardRow(ns, "XP level", `${progress.level} / ${progress.targetLevel}`);
@@ -1156,6 +1167,17 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
 	if (augmentation.recommendation) row("Next", augmentation.recommendation);
     if (augmentation.endgame) {
         row("Endgame policy", augmentation.endgame.reason);
+        const xp = augmentation.endgame.xp;
+        if (xp) row("Reset XP rate", Number.isFinite(xp.rate) && xp.rate > 0
+            ? `${xp.rate.toExponential(2)}/s | ${xp.source}`
+            : `${xp.source} | ${xp.samples}/${xp.requiredSamples} stable ${xp.sampleMs / 1000}s windows`);
+        const quote = augmentation.endgame.quote;
+        if (quote) row("Upgrade quote", `${quote.neurofluxLevels} NeuroFlux levels | ${quote.augmentations.length} other upgrades | ${cash(quote.cost)} estimated`);
+        if (Number.isFinite(augmentation.endgame.neurofluxQueued)) row("NeuroFlux", `${augmentation.endgame.neurofluxQueued} queued levels`);
+        if (augmentation.endgame.funding) {
+            const f = augmentation.endgame.funding;
+            row("Upgrade funding", `${f.strategy} | ${f.faction} | target ${Math.ceil(f.requiredRep)} rep`);
+        }
         if (Number.isFinite(augmentation.endgame.continueEtaMs) && Number.isFinite(augmentation.endgame.resetEtaMs))
             row("Finish ETA", `${dashboardTime(augmentation.endgame.continueEtaMs)} continuing | ${dashboardTime(augmentation.endgame.resetEtaMs)} with reset`);
     }
@@ -1168,6 +1190,7 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         dashboardSection(ns, "Reset decision");
         row("Decision", `${d.action}${d.action === "FALLBACK" ? " -> " + d.fallback.action : ""} | confidence ${d.confidence}`);
         row("Recovery", dashboardTime(d.recoveryMs));
+        if (d.recoverySource) row("Recovery model", d.recoverySource === "conservative" ? "Conservative 24h allowance; zero recovered XP" : "Measured augmentation-reset history");
         const benefit = n => Number.isFinite(n) ? `${n.toFixed(2)}x` : "unknown";
         row("Current package", `${benefit(d.installNow.packageBenefit)} relevant benefit | break-even ${dashboardTime(d.installNow.breakEvenMs)}`);
         row("Install now", `${dashboardTime(d.installNow.etaMs)} projected | residual loss ${dashboardTime(d.installNow.lostProgressMs)}`);
@@ -1565,6 +1588,8 @@ function layoutDashboard(ns, pid, column) {
 }
 
 function validateSupervisorOptions(flags, cfg) {
+	schedulerLimit(cfg.maxBatchRate, "batch");
+	schedulerLimit(cfg.maxLaunches, "launch");
 	if (cfg.dashboardLayout !== undefined && !["auto", "none"].includes(cfg.dashboardLayout)) throw new Error("dashboard-layout must be auto or none");
 	if (!["auto", "keep", "programs", "augmentations", "none"].includes(String(flags.savings))) throw new Error("savings must be auto, keep, programs, augmentations, or none");
 	const amount = Number(flags["save-amount"]);

@@ -44,13 +44,32 @@ export function renderSchedulerCapacity(ns, capacity, details = false) {
     dashboardSection(ns, "Scheduler capacity");
     dashboardRow(ns, "Limit", c.limitingFactor);
     dashboardRow(ns, "Targets", `${c.targets.active} / ${c.targets.mode === "auto" ? `AUTO (max ${c.targets.limit})` : c.targets.limit}`);
+    if (c.targets.waiting > 0) dashboardRow(ns, "Target work", `${c.targets.admitting} running/committed | ${c.targets.waiting} waiting`);
     dashboardRow(ns, "Worker RAM", `${ram(c.ram.used)} / ${ram(c.ram.total)} (${(100*c.ram.utilization).toFixed(1)}%)`);
     dashboardRow(ns, "Batch / launch", `${c.batchRate.used.toFixed(2)} / ${c.batchRate.limit.toFixed(2)} | ${c.launches.recent} / ${c.launches.limit}`);
+    if (c.scaling) {
+        const s = c.scaling;
+        dashboardRow(ns, "Scaling", `${s.batchMode.toUpperCase()} batches | ${s.launchMode.toUpperCase()} launches | ${s.decision}`);
+        dashboardRow(ns, "Scale reason", s.reason);
+        if (s.restore) dashboardRow(ns, "Recover budget", `${s.restore.batch.toFixed(2)} batches/s | ${s.restore.launches} launches/s after healthy observations`);
+        if (details) dashboardRow(ns, "Scale ceiling", `${s.batchCeiling.toFixed(2)} batches/s cadence | ${s.launchCeiling} launches/s safety envelope`);
+        if (s.ramRequest) dashboardRow(ns, "RAM request", `${ram(s.ramRequest.addedRam)} bounded growth | ${s.ramRequest.confidence}`);
+    }
+    if (details && c.batchRate.nextRequired > 0) dashboardRow(ns, "Batch headroom", `${c.batchRate.remaining.toFixed(3)}/s free | next target needs ${c.batchRate.nextRequired.toFixed(3)}/s`);
+    if (details && Number.isFinite(c.launches.peakReserved)) {
+        dashboardRow(ns, "Launch plan", `${c.launches.peakReserved} peak reserved / ${c.launches.limit} per 1s window | ${c.launches.peakBucket}/${c.launches.bucketLimit} per 250ms`);
+        const moneyLimit = c.launches.moneyLimit ?? c.launches.optionalLimit;
+        dashboardRow(ns, "Peer budget", `${moneyLimit} launches/s | ${Math.floor(moneyLimit / 4)} per 250ms for secondary targets`);
+        if (c.launches.moneyLimit != null) dashboardRow(ns, "XP/prep budget", `${c.launches.optionalLimit} launches/s after money headroom`);
+        if (c.launches.requiredLimit > 0) dashboardRow(ns, "Launch demand", `${c.launches.requiredLimit} launches/s needed by a recent whole money batch`);
+    }
     dashboardRow(ns, "Workers", `${c.workers.committed} / ${c.workers.limit}`);
     dashboardRow(ns, "XP pressure", c.xp.constrained ? `${ram(c.xp.allocatedRam)} / ${ram(c.xp.desiredRam)} desired` : "none");
+    if (c.xp.expansion) dashboardRow(ns, "XP expansion", `${ram(c.xp.desiredRam - c.xp.allocatedRam)} bounded growth | ${c.xp.confidence}`);
+    else if (c.xp.availableRam != null) dashboardRow(ns, "XP capital", `Observing prepared G/W RAM pressure: ${Math.min(60, Math.floor(c.xp.observedMs / 1000))}/60s`);
     if (c.targets.next) dashboardRow(ns, "Next candidate", c.targets.next.name);
     if (c.admission) {
-        dashboardRow(ns, "Admission", `${c.admission.decision} | ${c.admission.candidate || c.admission.reason}`);
+        dashboardRow(ns, "Admission", `${c.admission.decision} | ${[c.admission.candidate, c.admission.reason].filter(Boolean).join(" | ")}`);
         if (c.admission.marginalIncome > 0) dashboardRow(ns, "Marginal model", `+$${Math.round(c.admission.marginalIncome).toLocaleString()}/s | ${c.admission.expectedLanes} lanes`);
     }
     if (details) for (const reason of c.reasons) dashboardRow(ns, "Constraint", reason);

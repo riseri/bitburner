@@ -15,7 +15,7 @@ export function augmentationContext(ns, state = {}) {
     let finalRequirement = null;
     try { if (ns.serverExists("w0r1d_d43m0n")) finalRequirement = ns.getServerRequiredHackingLevel("w0r1d_d43m0n"); } catch {}
     const money = ns.getServerMoneyAvailable("home");
-    let income = null, balance = null, engineStable = false;
+    let income = null, balance = null, engineStable = false, engineProductive = false;
     try {
         const s = ns.getPortHandle(PORTS.JIT_STATUS).peek();
         if (s?.type === "jit-status" && s.version === 2 && Number.isFinite(s.generatedAt) && s.generatedAt <= Date.now() && Date.now() - s.generatedAt < 15000 &&
@@ -23,6 +23,7 @@ export function augmentationContext(ns, state = {}) {
             if (Number.isFinite(s.income60) && s.income60 > 0) income = s.income60;
             balance = s.policy?.balance || null;
             engineStable = Array.isArray(s.pipelines) && s.pipelines.length > 0 && s.pipelines.every(p => p.mode === "LIVE") && !(s.prepRam > 0);
+            engineProductive = Array.isArray(s.pipelines) && s.pipelines.some(p => p.mode === "LIVE") && income > 0;
         }
     } catch {}
     const capabilities = { singularity: singularityAvailable(reset), formulas: ns.fileExists("Formulas.exe", "home"),
@@ -30,7 +31,7 @@ export function augmentationContext(ns, state = {}) {
         gang: reset.currentNode === 2 || Number(reset.ownedSF?.get?.(2)) > 0,
         corporation: reset.currentNode === 3 || Number(reset.ownedSF?.get?.(3)) >= 3,
         optionalSystems: "Access hints only; no sleeve, gang, or corporation manager" };
-    return { reset, resetEpoch: epoch, installed, owned, player, money, multipliers, backdoors, finalRequirement, income, balance, engineStable, capabilities,
+    return { reset, resetEpoch: epoch, installed, owned, player, money, multipliers, backdoors, finalRequirement, income, balance, engineStable, engineProductive, capabilities,
         objective: progressionObjective({ plan: state.previousPlan, currentNode: reset.currentNode, installed, owned, player, money, multipliers, backdoors, finalRequirement }) };
 }
 
@@ -38,12 +39,16 @@ export function makeProgressionSnapshot(ns, context, status) {
     const objective = progressionObjective({ ...context, currentNode: context.reset.currentNode, plan: status.plan });
     let work = null;
     try { work = ns.singularity.getCurrentWork(); } catch {}
+    const funding = status.endgame?.funding;
+    const shareObjective = funding?.strategy === "WORK" ? { ...objective, limitingResource: "reputation",
+        selectedPlan: { next: { faction: funding.faction, repGap: funding.repGap } } } : objective;
     return { ...objective, type: "progression-objective", version: 1, generatedAt: Date.now(), producer: "augmentation-manager.js",
         producerPid: ns.pid, resetEpoch: context.resetEpoch, capabilities: context.capabilities, multipliers: context.multipliers,
         incomePerSecond: context.income, savings: status.savings || objective.savings,
         installDecision: status.installDecision || status.plan?.installDecision || null,
-        resetImminent: status.phase === "INSTALL", recommendation: status.recommendation,
-        sharingDemand: sharingDemand({ ...objective, resetImminent: status.phase === "INSTALL" }, work),
+        resetImminent: status.phase === "INSTALL",
+        resetPending: Boolean(status.resetDecision?.completionGoal && status.resetDecision.advantage), recommendation: status.recommendation,
+        sharingDemand: sharingDemand({ ...shareObjective, resetImminent: status.phase === "INSTALL" }, work),
         missingInformation: [!context.income && "measured income", !context.capabilities.formulas && "Formulas work/donation rates",
             !context.multipliers && "BitNode multipliers"].filter(Boolean) };
 }

@@ -22,6 +22,47 @@ for(const limit of [3,4,'auto']) test(`elastic ${limit}: multiple lanes earn wit
     console.log(JSON.stringify({limit,lanes:status.pipelines.length,income60:status.income60,capacity:status.capacity.limitingFactor,steps:sim.clock.steps}));
 });
 
+for(const budget of [{batch:4,launches:32},{batch:6,launches:64}]) {
+    test(`AUTO target admission respects the shared ${budget.batch}/${budget.launches} budgets rather than filling six slots`,{timeout:180000},async()=>{
+        const spec=profile('auto');
+        spec.flags={target:'alpha','max-targets':'auto','max-batch-rate':budget.batch,'max-launches':budget.launches,gap:100};
+        const sim=new NetscriptSimulation(spec);sim.run();await sim.clock.runUntil(sim.start+22*60000);
+        assert.deepEqual(sim.errors.map(String),[]);
+        const status=sim.getPort(17).peek();
+        if(budget.batch===4) {
+            assert.equal(status.pipelines.length,2,JSON.stringify(status));
+            assert.ok(status.capacity.batchRate.remaining<.25,JSON.stringify(status.capacity));
+            assert.equal(status.capacity.admission.decision,'PREP REPLACEMENT');
+            assert.match(status.capacity.admission.reason,/shared batch budget full/);
+            assert.doesNotMatch(sim.logs.join('\n'),/candidate pending \| ADMITTED/);
+        } else assert.ok(status.pipelines.length>2,JSON.stringify(status));
+        for(const lane of status.pipelines) {
+            assert.equal(lane.mode,'LIVE',JSON.stringify(lane));assert.ok(lane.income60>0);
+            assert.equal(lane.restarts,0);assert.notEqual(lane.role,'TRIAL');
+        }
+        assert.ok(sim.snapshots.every(s=>(s.capacity?.batchRate.used||0)<=budget.batch+.001));
+        assert.ok(sim.actions.filter(a=>['H','G','W1','W2'].includes(a.phase)).every(a=>a.startSec<=sim.servers.get(a.target).min+.001));
+        console.log(JSON.stringify({budget,lanes:status.pipelines.length,income60:status.income60,admission:status.capacity.admission}));
+    });
+}
+
+test('automatic rate budgets grow beyond the two-target fixed-budget result from measured productive work',{timeout:180000},async()=>{
+    const spec=profile('auto');
+    spec.flags={target:'alpha','max-targets':'auto',gap:100};
+    const sim=new NetscriptSimulation(spec);sim.run();await sim.clock.runUntil(sim.start+22*60000);
+    assert.deepEqual(sim.errors.map(String),[]);
+    const status=sim.getPort(17).peek();
+    console.log(JSON.stringify({adaptive:true,lanes:status.pipelines.length,income60:status.income60,
+        budgets:[status.maxBatchRate,status.maxLaunches],scaling:status.capacity.scaling,admission:status.capacity.admission}));
+    assert.ok(status.pipelines.length>2,JSON.stringify(status));
+    assert.ok(status.maxBatchRate>4);assert.ok(status.maxLaunches>32);
+    assert.ok(status.income60>2.5395e9,'measured income exceeds the same fixed 4/32 profile');
+    for(const p of status.pipelines){assert.equal(p.mode,'LIVE');assert.ok(p.income60>0);assert.equal(p.restarts,0);}
+    assert.ok(sim.snapshots.every(s=>(s.capacity?.batchRate.used||0)<=(s.maxBatchRate||4)+.001));
+    assert.ok(sim.actions.filter(a=>['H','G','W1','W2'].includes(a.phase)).every(a=>a.startSec<=sim.servers.get(a.target).min+.001));
+    for(const [host,ram]of sim.peakRam)assert.ok(ram<=sim.hosts.get(host).ram+1e-6,host);
+});
+
 test('automatic scheduling stays on one useful lane on a tiny no-Formulas fleet',{timeout:60000},async()=>{
     const sim=new NetscriptSimulation({target:'alpha',weakenTime:4000,levelPerMinute:0,hostCount:2,
         mainServer:{max:1e6,money:1e6,sec:1,min:1,required:1},flags:{'max-targets':'auto'},

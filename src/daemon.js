@@ -10,6 +10,7 @@ import { runHackingFallback, reclaimXpRam, xpPipelineStatus } from "lib/hacking-
 import { readSharingDemand } from "lib/progression-objective.js";
 import { schedulerCapacity } from "lib/scheduler-capacity.js";
 import { targetLimit } from "lib/target-limit.js";
+import { createSchedulerScaling, recordSchedulerTiming } from "lib/scheduler-scaling.js";
 
 const HOME = "home";
 
@@ -41,9 +42,9 @@ export async function main(ns) {
 	const flags = ns.flags([
 		["target", "auto"],
 		["max-targets", "auto"],
-		["max-batch-rate", 4],
+		["max-batch-rate", "auto"],
 		["max-workers", 6_000],
-		["max-launches", 32],
+		["max-launches", "auto"],
 		["dashboard-details", false],
 		["background-prep", true],
 		["prep-max-ram", 0],
@@ -71,9 +72,7 @@ export async function main(ns) {
 		requestedTarget: String(flags.target ?? "auto"),
 		maxTargets: targetLimit(flags["max-targets"]).limit,
 		targetMode: targetLimit(flags["max-targets"]).mode,
-		maxBatchRate: Number(flags["max-batch-rate"]),
 		maxWorkers: Number(flags["max-workers"]),
-		maxLaunches: Number(flags["max-launches"]),
 		dashboardDetails: asBoolean(flags["dashboard-details"]),
 		gap: Math.max(15, Number(flags.gap)),
 		lead: Math.max(10, Number(flags.lead)),
@@ -129,10 +128,9 @@ export async function main(ns) {
 	});
 	ns.atExit(() => cancelBackgroundPrep(ns, cfg.backgroundPrep, "daemon stopped"), "background-prep");
 	validateDaemonPorts(cfg);
-	if (!(cfg.maxBatchRate > 0 && cfg.maxBatchRate <= 8) ||
-		!Number.isSafeInteger(cfg.maxWorkers) || cfg.maxWorkers < 16 ||
-		!Number.isSafeInteger(cfg.maxLaunches) || cfg.maxLaunches < 4 || cfg.maxLaunches > 128) {
-		throw new Error("Require max-batch-rate (0,8], max-workers >=16, max-launches 4..128");
+	createSchedulerScaling(cfg, flags["max-batch-rate"], flags["max-launches"]);
+	if (!Number.isSafeInteger(cfg.maxWorkers) || cfg.maxWorkers < 16) {
+		throw new Error("Require max-workers >=16");
 	}
 	cfg.minimumPeriod = 1000 / cfg.maxBatchRate;
 	cfg.lead = Math.max(cfg.lead, cfg.gap * 6);
@@ -1692,11 +1690,10 @@ function* tuneTargetSteps(
 		);
 
 	// Separate H ceiling; the shared allocator proves asymmetric feasibility.
-	const hackCapacity = profile.capacity;
-	const homeCapacity = cfg.homeGw?.host ? baseHostCapacity(ns, cfg.homeGw.host, cfg, running) : 0;
-	profile.averageCoreBonus = (profile.capacity * profile.averageCoreBonus + homeCapacity * coreBonus(cfg.homeGw?.cores || 1)) / Math.max(1, profile.capacity + homeCapacity);
-	profile.capacity += homeCapacity;
-	profile.capacity = Math.min(profile.capacity, (cfg.ramBudget ?? Infinity) + homeCapacity);
+	const hackCapacity = Math.min(profile.capacity, cfg.ramBudget ?? Infinity);
+	const homeCapacity = cfg.homeGw?.host ? Math.min(baseHostCapacity(ns, cfg.homeGw.host, cfg, running), cfg.homeRamBudget ?? Infinity) : 0;
+	profile.averageCoreBonus = (hackCapacity * profile.averageCoreBonus + homeCapacity * coreBonus(cfg.homeGw?.cores || 1)) / Math.max(1, hackCapacity + homeCapacity);
+	profile.capacity = hackCapacity + homeCapacity;
 	if (
 		profile.capacity <= 0
 	) {
@@ -3627,7 +3624,7 @@ function settleChunk(batch, chunk, event, stats) {
 			batch.moneyEarned += earned;
 			stats.lastHackAt = finished;
 			stats.lastHackLanding = chunk.landAt;
-			stats.income.push({ time: finished, money: earned, generation: batch.generation });
+			stats.income.push({ time: finished, money: earned, generation: batch.generation, admissionPolicy: batch.admissionPolicy });
 		}
 	} else {
 		state.skipped = true;
@@ -3667,7 +3664,7 @@ function finishReadyBatches(batches, stats, cfg) {
 			stats.pipeline.completed++;
 			// Credit the cadence that produced this completed batch, not the
 			// currently admitting generation. Hot swaps must not revalue history.
-			const period = batch.plan?.period;
+			const period = batch.admissionPeriod ?? batch.plan?.period;
 			if (Number.isFinite(period) && period > 0 && !Object.values(batch.phases).some(p => p.skipped)) {
 				stats.pipeline.productiveMs += period;
 			}
@@ -3887,6 +3884,7 @@ function consumeEvents(ns, port, batches, stats, target, runtime, cfg, running, 
 			}
 		} else {
 			const drift = Math.abs(Number(event.drift) || 0);
+			recordSchedulerTiming(cfg.schedulerScaling, "landing", drift, batchCfg.gap);
 			stats.driftSum += drift;
 			stats.driftCount++;
 			stats.driftMax = Math.max(stats.driftMax, drift);
@@ -4379,7 +4377,7 @@ function renderPipelineDashboard(
 	if (prep?.target || prep?.candidate || prep?.status && prep.status !== "DISABLED") {
 		dashboardSection(ns, "Next target");
 		const eta = prep?.active ? ` | ETA ${dashboardTime(Math.max(0, prep.active.finishAt - now))}` : "";
-		row("Background", `${prep?.target || "candidate pending"} | ${prep?.status || "PLANNING"}${eta}`);
+		row("Background", `${prep?.target || "none selected"} | ${prep?.status || "PLANNING"}${eta}`);
 		if (prep?.health) row("Prep health", `money ${(100 * prep.health.money / Math.max(1, prep.health.max)).toFixed(1)}% | security +${Math.max(0, prep.health.sec - prep.health.min).toFixed(3)}`);
 		if (prep?.candidate) row("Potential", `${cash(prep.candidate.potential)}/s ${prep.candidate.upperBound ? "upper bound" : "estimate"}`);
 		if (prepRam > 0) row("Prep RAM", `${formatRam(prepRam)} held`);
@@ -4583,7 +4581,7 @@ function renderSchedulerFrame(ns, pool) {
 
 	if (background?.target || background?.candidate || background?.status && background.status !== "DISABLED") {
 		dashboardSection(ns, "Next target");
-		row("Background", `${background?.target || "candidate pending"} | ${background?.status || "PLANNING"}${background?.active ? ` | ETA ${dashboardTime(backgroundEta)}` : ""}`);
+		row("Background", `${background?.target || "none selected"} | ${background?.status || "PLANNING"}${background?.active ? ` | ETA ${dashboardTime(backgroundEta)}` : ""}`);
 		if (background?.health) row("Prep health", `money ${(100 * background.health.money / Math.max(1, background.health.max)).toFixed(1)}% | security +${Math.max(0, background.health.sec - background.health.min).toFixed(3)}`);
 		if (background?.candidate) row("Potential", `${cash(background.candidate.potential)}/s ${background.candidate.upperBound ? "upper bound" : "estimate"}`);
 		if (backgroundRam > 0) row("Prep RAM", `${formatRam(backgroundRam)} held`);

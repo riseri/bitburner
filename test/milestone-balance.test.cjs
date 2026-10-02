@@ -130,7 +130,7 @@ function livePolicyFixture() {
         formulas: { hacking: Object.fromEntries(['hackExp','hackChance','hackPercent','hackTime','growTime','weakenTime','weakenEffect','growThreads'].map(k => [k, () => 1])),
             skills: { calculateExp: () => 85e6 + 1000 } } };
     const cfg = {};
-    const refresh = () => {
+    const refresh = (force = true) => {
         const objective = { ...f.objective, type: 'progression-objective', version: 1, generatedAt: f.clock.now,
             producer: 'augmentation-manager.js', producerPid: 7 };
         const portApi = loadScript('lib/ports.js', f.clock);
@@ -139,11 +139,24 @@ function livePolicyFixture() {
             generatedAt: f.clock.now, resetEpoch: objective.resetEpoch, progression: objective });
         cfg.milestoneEvidence = { key: f.api.milestoneKey(objective), generatedAt: f.clock.now, safe: true,
             cash: f.input.cash, xp: { rate: 20000, source: 'measured' }, scriptXpRate: 5000 };
-        return api.refreshHackingPolicy(ns, cfg, { hosts: [{ name: 'worker', maxRam: workerRam }] }, true);
+        return api.refreshHackingPolicy(ns, cfg, { hosts: [{ name: 'worker', maxRam: workerRam }] }, force);
     };
     return { ...f, ns, cfg, refresh, set: options => { homeRam = options.homeRam ?? homeRam; workerRam = options.workerRam ?? workerRam;
         cash = options.cash ?? cash; formulas = options.formulas ?? formulas; } };
 }
+
+test('live milestone estimates remain fresh between the thirty-second capability rescoring passes', () => {
+    const f = livePolicyFixture(); let probes = 0;
+    const detect = f.ns.getBitNodeMultipliers;
+    f.ns.getBitNodeMultipliers = () => { probes++; return detect(); };
+    f.refresh(); assert.equal(probes, 1);
+    for (let i = 0; i < 5; i++) {
+        f.clock.now += 5000;
+        const policy = f.refresh(false);
+        assert.equal(policy.balance.generatedAt, f.clock.now);
+        assert.equal(policy.balance.xpSource, 'measured'); assert.equal(probes, 1);
+    }
+});
 
 test('authenticated uncovered milestone reaches the real policy; no Formulas and tiny fleet stay safe', () => {
     const f = livePolicyFixture(); assert.equal(f.refresh().xpAllocation, 0);

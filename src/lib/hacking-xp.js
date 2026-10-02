@@ -4,6 +4,8 @@ import { HACKING_POLICY, refreshHackingPolicy, hackingXpProgress, renderHackingP
 import { PORTS } from "lib/ports.js";
 import { dashboardTitle, dashboardRow } from "lib/dashboard.js";
 import { MILESTONE_BALANCE, boundedXpAllocation, milestoneKey, observeMilestoneRates, milestoneRate } from "lib/milestone-balance.js";
+import { pipelineUsesBudget } from "lib/scheduler-scaling.js";
+import { recentPipelineIncome } from "lib/background-prep.js";
 
 // Reuse deployed executors. H uses the existing one-shot PREP protocol; G/W
 // already have cheaper one-shot workers with owner-tagged orphan cleanup.
@@ -130,7 +132,7 @@ function launchXpWave(ns, ctx, choice, hosts, running, serial, fallback, options
 	if (!Number.isFinite(duration) || duration <= 0) return null;
 	const api = !fallback ? formulaGroup(ns, "hacking", ["growThreads", "weakenEffect"]) : null;
 	if (!fallback && !api) return null;
-	let launched = 0;
+	let launched = 0, blocker = "ram", reason = "no eligible host fits the current XP action";
 	for (const host of hosts) {
 		if (choice.action === "H" && host.name !== choice.host) continue;
 		let threads = slots(host, action);
@@ -141,21 +143,29 @@ function launchXpWave(ns, ctx, choice, hosts, running, serial, fallback, options
 			threads = Math.min(threads, need);
 		}
 		if (!Number.isSafeInteger(threads) || threads <= 0) continue;
-		if (ctx.canLaunch && !ctx.canLaunch()) break;
+		if (ctx.canLaunch && !ctx.canLaunch()) {
+			blocker = ctx.launchBlocker?.() || "launches";
+			reason = blocker === "workers" ? "shared worker commitments leave no XP worker slot" : "shared launch budget leaves no XP launch slot";
+			break;
+		}
 		const id = `bgprep-xp-${ns.pid}-${serial}-${host.name}`, now = Date.now();
 		const args = action === "H" ? [choice.name, now + duration + options.tickMs, id, cfg.port, "PREP-H", id,
 			cfg.gap, 0, duration, now, 0, threads] : [choice.name, ns.pid, id];
 		if (host.name !== "home") ctx.reclaimShare?.(host.name);
 		let pid = 0;
 		if (host.name === "home") prepareHomeLaunch(ns, cfg, threads * host.ram[action]);
-		try { pid = host.name === "home" && (action === "H" || !homeLaunchFits(ns, cfg, threads * host.ram[action])) ? 0 : ns.exec(XP_WORKERS[action], host.name, threads, ...args); }
-		catch { /* A removed worker host does not cancel work already launched elsewhere. */ }
+		if (host.name === "home" && (action === "H" || !homeLaunchFits(ns, cfg, threads * host.ram[action]))) {
+			blocker = "home"; reason = "home services or protected sharing use the available XP RAM"; continue;
+		}
+		try { pid = ns.exec(XP_WORKERS[action], host.name, threads, ...args); }
+		catch (error) { reason = `XP ${action} launch on ${host.name}: ${String(error?.message ?? error).slice(0, 160)}`; }
+		if (!pid) { blocker = "exec"; if (!reason.startsWith("XP ")) reason = `XP ${action} launch failed on ${host.name}; rechecking live RAM and executor deployment`; }
 		if (pid) {
 			const job = { id, host: host.name, ram: threads * host.ram[action], target: choice.name, action, threads };
 			running.set(pid, job); ctx.onLaunch?.(pid, job); launched++;
 		}
 	}
-	return launched ? { action, preparing, duration, launched } : null;
+	return { action, preparing, duration, launched, blocker, reason };
 }
 
 // The optional XP lane borrows only capacity not committed to money. Its PIDs,
@@ -164,6 +174,7 @@ export function createXpPipeline(pool) {
 	const state = { jobs: new Map(), choice: null, wave: null, samples: [], cycle: null,
 		nextTick: 0, nextScore: 0, retryAt: 0, serial: 0, scan: null,
 		status: "DISABLED", reason: "money pipeline remains primary", earned: 0, income: [],
+		waveCapacity: new Map(), capacityJoinRetry: 0,
 		preemptRetryMs: (pool.cfg.policyOptions || HACKING_POLICY).xpPreemptRetryMs };
 	state.release = (pid, status = "done") => {
 		const job = state.jobs.get(pid);
@@ -212,6 +223,34 @@ function xpExcludedTargets(pool) {
 		...(pool.cfg.prepStates || []).map(p => p?.target)].filter(Boolean));
 }
 
+// Fresh allocator evidence covers home and remote RAM, including future money
+// reservations. A prepared G/W worker earns XP per additional thread even when
+// its first long wave has not completed. Bound that warmup request rather than
+// requiring several completed waves before the first cloud investment.
+export function sampleXpCapacity(ns, pool, now = Date.now()) {
+	const state = pool.xp;
+	if (!state) return;
+	const lanes = [...pool.pipelines.values()].filter(pipelineUsesBudget), timing = pool.cfg.schedulerScaling?.window;
+	const timingSafe = timing && timing.loop.count >= 10 && timing.landing.count >= 4 &&
+		[timing.loop, timing.launch, timing.landing].every(s => !s.count || s.late / s.count <= .05 && s.max <= pool.cfg.gap * 2);
+	const safe = Boolean(timingSafe && lanes.some(p => !p.trial && p.stats?.pipeline?.completed > 0 &&
+		pool.api.incomeRate(p.stats, 60_000, now) > 0 && recentPipelineIncome(p.stats, p.runtime, now)) &&
+		lanes.every(p => p.mode === "RUNNING" && !p.recovery && !p.drain && p.shadow?.state !== "PREFLIGHT" && !p.swap) &&
+		!(pool.cfg.prepStates || []).some(p => p?.active));
+	if (!safe || state.status !== "RUNNING" || !state.wave || state.wave.preparing || !["G", "W"].includes(state.wave.action) ||
+		!(state.choice?.score > 0) || !state.jobs.size) { state.capacity = null; return; }
+	const hosts = gwHosts(pool.network.hosts, pool.cfg);
+	const availableRam = hosts.reduce((n, host) => n + pool.api.availableRam(ns, host, pool.cfg, pool.running,
+		pool.reservations, now, Infinity, pool.foreign), 0);
+	const allocated = [...state.jobs.values()].reduce((n, job) => n + job.ram, 0);
+	const key = JSON.stringify([milestoneKey(pool.cfg.progressionObjective), state.choice.name, state.wave.action,
+		...hosts.map(h => `${h.name}:${h.maxRam}`)]);
+	const full = availableRam <= Math.max(1, allocated * .02);
+	const since = full && state.capacity?.key === key ? state.capacity.since ?? now : full ? now : null;
+	state.availableRam = availableRam;
+	state.capacity = { key, since, generatedAt: now, availableRam, observedMs: since == null ? 0 : now - since, safe };
+}
+
 // Observe total player XP independently of XP waves: university and money-lane
 // gains improve the milestone ETA, but never become a RAM throughput estimate.
 export function refreshMilestoneEvidence(ns, pool) {
@@ -219,14 +258,16 @@ export function refreshMilestoneEvidence(ns, pool) {
 	if (!objective) { cfg.milestoneSamples = null; cfg.milestoneEvidence = null; return; }
 	if (now < (cfg.nextMilestoneSample || 0)) return;
 	cfg.nextMilestoneSample = now + 1000;
-	const lanes = [...pool.pipelines.values()], key = milestoneKey(objective);
+	const lanes = [...pool.pipelines.values()], active = lanes.filter(pipelineUsesBudget), key = milestoneKey(objective);
 	if (pool.xp && pool.xp.objectiveKey !== key) {
 		pool.xp.objectiveKey = key; pool.xp.samples.length = 0; pool.xp.cycle = null;
 	}
-	const safe = lanes.length > 0 && lanes.every(p => p.mode === "RUNNING" && !p.recovery && !p.drain && !p.shadow && !p.swap &&
+	// Read-only planning does not change the active generation or its earnings.
+	// Only a candidate at cutover preflight needs to suspend XP allocation.
+	const safe = active.length > 0 && active.every(p => p.mode === "RUNNING" && !p.recovery && !p.drain && p.shadow?.state !== "PREFLIGHT" && !p.swap &&
 		p.stats?.pipeline?.completed > 0 && now - p.stats.lastHackAt < Math.max(120_000, (p.runtime?.plan.times.W || 0) * 2)) &&
 		!(cfg.prepStates || []).some(p => p?.active);
-	const layout = JSON.stringify(lanes.map(p => [p.name, p.generation, p.mode]));
+	const layout = JSON.stringify(active.map(p => [p.name, p.generation, p.mode]));
 	const sampleKey = key + layout;
 	const samples = cfg.milestoneSamples ||= {};
 	if (!safe) { samples.key = null; }
@@ -234,11 +275,11 @@ export function refreshMilestoneEvidence(ns, pool) {
 	// Longer actions need longer bins: observing a long weaken as zero followed
 	// by a spike would otherwise make a perfectly healthy XP lane look unstable.
 	const sampleMs = Math.max(MILESTONE_BALANCE.sampleMs, (pool.xp?.wave?.duration || 0) * 2,
-		...lanes.map(p => (p.runtime?.plan.times.W || 0) * 2));
+		...active.map(p => (p.runtime?.plan.times.W || 0) * 2));
 	try { observeMilestoneRates(samples, { key: sampleKey, now, xp: ns.getPlayer().exp.hacking, money, sampleMs }); }
 	catch { cfg.milestoneSamples = null; }
 	const allocation = boundedXpAllocation(cfg.hackingPolicy?.xpAllocation);
-	const moneyModel = safe ? lanes.reduce((sum, p) => sum + (p.runtime?.plan.expected || 0), 0) * (1 - allocation) : null;
+	const moneyModel = safe ? active.reduce((sum, p) => sum + (p.runtime?.plan.expected || 0), 0) * (1 - allocation) : null;
 	const state = pool.xp, ram = [...(state?.jobs.values() || [])].reduce((sum, job) => sum + job.ram, 0);
 	// Model only actual script work. Never use total player XP for fleet ROI.
 	const scriptXpRate = safe && state?.status === "RUNNING" && state.choice?.ram > 0 ?
@@ -257,11 +298,24 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 	const enabled = pool.cfg.hackingPolicy?.mode === "XP", excluded = xpExcludedTargets(pool);
 	state.desiredRam = enabled ? pool.network.hosts.reduce((n, h) => n + h.maxRam, 0) *
 		boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation) : 0;
-	if ([...state.jobs.values()].some(job => excluded.has(job.target)) ||
-		[...pool.pipelines.values()].some(p => p.mode !== "RUNNING" || p.recovery || p.drain || p.shadow)) {
+    const lanes = [...pool.pipelines.values()];
+    // Shadow tuning keeps the old money plan live. At the final-server goal a
+    // healthy earner also permits XP on spare RAM while another lane prepares;
+    // actual money RAM/launch requests still preempt XP through the shared ledger.
+    const cutover = lanes.filter(p => p.shadow?.state === "PREFLIGHT" || p.swap?.restoring);
+    const moneyWork = lanes.filter(p => p.mode !== "RUNNING" || p.recovery || p.drain || cutover.includes(p));
+    const objective = pool.cfg.progressionObjective;
+    const endgameBorrow = enabled && objective?.milestone === "FINAL_SERVER" &&
+        objective.limitingResource === "hacking" && objective.moneyCovered && lanes.some(p =>
+            p.mode === "RUNNING" && !p.recovery && !p.drain && !p.swap?.restoring &&
+            p.stats?.pipeline?.completed > 0 && p.stats.money > 0 && Number.isFinite(p.stats.lastHackAt) &&
+            now >= p.stats.lastHackAt && now - p.stats.lastHackAt < Math.max(120000, (p.runtime?.plan?.times?.W || 0) * 2));
+    const claimed = [...state.jobs.values()].some(job => excluded.has(job.target));
+    if (claimed || cutover.length || moneyWork.length && !endgameBorrow) {
 		reclaimXpRam(ns, state);
 		state.status = enabled ? "WAITING_MONEY" : "DISABLED";
-		state.reason = "money preparation, tuning or recovery has priority";
+        state.reason = claimed ? "money work claimed the XP target" : "money work has priority: " + moneyWork.map(p =>
+            `${p.name || "money"} ${p.recovery ? "RECOVERING" : p.drain ? "DRAINING" : p.swap?.restoring ? "RESTORING" : p.shadow?.state === "PREFLIGHT" ? "CUTOVER_PREFLIGHT" : p.mode}`).join(" | ");
 		return;
 	}
 	if (!enabled) {
@@ -270,14 +324,18 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 		state.samples.length = 0; state.cycle = null; state.scan = null; state.nextScore = 0;
 		return;
 	}
-	if (state.jobs.size) return;
+	if (state.jobs.size) {
+		joinXpCapacity(ns, pool, launchBudget, now, options);
+		return;
+	}
 	if (now < state.retryAt) return;
 	// The explicit --target flag pins the money lane. XP needs a separate target.
 	const cfg = { ...pool.cfg, requestedTarget: "auto" };
-	const hosts = xpCapacity(ns, pool.network, cfg).map(host => ({ ...host,
+	const hosts = xpCapacity(ns, pool.network, cfg, pool.running).map(host => ({ ...host,
 		free: Math.min(host.free, pool.api.availableRam(ns, host, cfg, pool.running,
 			pool.reservations, now, Infinity, pool.foreign)) })).filter(h => h.free > 0);
-	state.ramConstrained = hosts.reduce((n, h) => n + h.free, 0) + 1 < state.desiredRam;
+	state.availableRam = hosts.reduce((n, h) => n + h.free, 0);
+	state.ramConstrained = state.availableRam + 1 < state.desiredRam;
 	if (!hosts.length) {
 		state.status = "WAITING_RAM"; state.reason = "no RAM left after money reservations";
 		state.samples.length = 0; state.cycle = null; return;
@@ -315,9 +373,24 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 		if (state.samples.length > options.stableSamples) state.samples.shift();
 		state.cycle = { at: now, exp };
 	}
-	const context = { cfg,
+	const context = xpLaunchContext(ns, pool, launchBudget, cfg);
+	let result;
+	try { result = launchXpWave(ns, context, state.choice, hosts, state.jobs, ++state.serial, false, options); }
+	catch (error) { result = { blocker: "exec", reason: `XP wave unavailable: ${String(error?.message ?? error).slice(0, 160)}` }; state.nextScore = 0; }
+	state.wave = result?.launched ? result : null;
+	state.waveCapacity = new Map(pool.network.hosts.map(h => [h.name, h.maxRam]));
+	state.availableRam = Math.max(0, state.availableRam - [...state.jobs.values()].reduce((n, job) => n + job.ram, 0));
+	state.status = state.jobs.size ? state.wave?.preparing ? "PREPARING" : "RUNNING" :
+		({ workers: "WAITING_WORKERS", launches: "WAITING_LAUNCH", exec: "WAITING_EXEC", home: "WAITING_RAM" }[result?.blocker] || "WAITING_RAM");
+	state.reason = state.jobs.size ? "borrowing unreserved RAM; yields to money" : result?.reason || "XP action duration or executor unavailable";
+	if (!state.jobs.size) { state.samples.length = 0; state.cycle = null; }
+}
+
+function xpLaunchContext(ns, pool, launchBudget, cfg) {
+	return { cfg,
 		reclaimShare: host => pool.api.reclaimFleetShare(ns, host),
 		canLaunch: () => launchBudget.canLaunch(),
+		launchBlocker: () => launchBudget.blocker?.(),
 		onLaunch(pid, job) {
 			Object.assign(job, { chunkId: job.id, batchId: job.id, phase: `XP-${job.action}`,
 				launchAt: Date.now(), landAt: Infinity, status: "running", launchIssued: true });
@@ -325,11 +398,32 @@ export function tickXpPipeline(ns, pool, launchBudget) {
 			pool.api.trackRunning(pool.running, pid, job); pool.runningByChunk.set(job.id, pid);
 			launchBudget.record(job);
 		} };
-	try { state.wave = launchXpWave(ns, context, state.choice, hosts, state.jobs, ++state.serial, false, options); }
-	catch { state.wave = null; state.nextScore = 0; }
-	state.status = state.jobs.size ? state.wave?.preparing ? "PREPARING" : "RUNNING" : "WAITING_RAM";
-	state.reason = state.jobs.size ? "borrowing unreserved RAM; yields to money" : "waiting for spare RAM or worker/launch slots";
-	if (!state.jobs.size) { state.samples.length = 0; state.cycle = null; }
+}
+
+// New/upgraded cloud RAM joins a prepared G/W wave without restarting workers
+// or waiting for every long action to finish. Existing host allocations are
+// untouched, and the same reservation, launch, worker and home guards apply.
+function joinXpCapacity(ns, pool, launchBudget, now, options) {
+	const state = pool.xp;
+	if (now < state.capacityJoinRetry || state.status !== "RUNNING" || !state.wave || state.wave.preparing ||
+		!["G", "W"].includes(state.wave.action)) return;
+	const changed = pool.network.hosts.filter(h => h.maxRam > (state.waveCapacity.get(h.name) || 0));
+	if (!changed.length) return;
+	state.capacityJoinRetry = now + 10000;
+	try {
+		const server = ns.getServer(state.choice.name);
+		if (server.hackDifficulty > server.minDifficulty + .001 || server.moneyAvailable < server.moneyMax) return;
+		const cfg = { ...pool.cfg, requestedTarget: "auto" }, names = new Set(changed.map(h => h.name)), before = new Set(state.jobs.keys());
+		const hosts = xpCapacity(ns, pool.network, cfg, pool.running).filter(h => names.has(h.name)).map(host => ({ ...host,
+			free: Math.min(host.free, pool.api.availableRam(ns, host, cfg, pool.running, pool.reservations, now, Infinity, pool.foreign)) }));
+		const result = launchXpWave(ns, xpLaunchContext(ns, pool, launchBudget, cfg), state.choice, hosts,
+			state.jobs, ++state.serial, false, options);
+		if (result?.launched) {
+			state.wave.launched += result.launched; state.capacity = null;
+			state.reason = "new fleet RAM joined prepared XP work; yields to money";
+		}
+		for (const h of changed) if ([...state.jobs].some(([pid, j]) => !before.has(pid) && j.host === h.name)) state.waveCapacity.set(h.name, h.maxRam);
+	} catch { /* Deployment may still be catching up; retry without disturbing the current wave. */ }
 }
 
 export function xpPipelineStatus(ns, pool) {
@@ -337,12 +431,18 @@ export function xpPipelineStatus(ns, pool) {
 	if (!state) return {};
 	// Both lanes contribute to the player's level: use the stable combined rate,
 	// never present money-lane XP as XP-lane-only throughput.
-	const rate = state.status === "RUNNING" ? stableXpRate(state.samples, null, pool.cfg.policyOptions || HACKING_POLICY) : null;
+	const evidence = pool.cfg.milestoneEvidence, now = Date.now();
+	const measured = evidence?.safe && evidence.key === milestoneKey(pool.cfg.progressionObjective) &&
+		Number.isFinite(evidence.generatedAt) && now >= evidence.generatedAt && now - evidence.generatedAt <= 15000 &&
+		evidence.xp?.source === "measured" && Number.isFinite(evidence.xp.rate) && evidence.xp.rate > 0;
+	const rate = evidence ? measured ? evidence.xp.rate : null : state.status === "RUNNING" ?
+		stableXpRate(state.samples, null, pool.cfg.policyOptions || HACKING_POLICY) : null;
 	return { operationalMode: state.jobs.size ? "MONEY+XP" : pool.cfg.hackingPolicy?.mode === "MONEY" ? "MONEY" : "NORMAL",
 		progress: pool.cfg.hackingPolicy?.mode === "XP" ? hackingXpProgress(ns, pool.cfg.hackingPolicy, rate, pool.cfg.policyOptions || HACKING_POLICY) : null,
 		xp: { target: state.choice?.name || "", action: state.wave?.action || state.choice?.action || "",
 			state: state.status, reason: state.reason, ram: [...state.jobs.values()].reduce((n, j) => n + j.ram, 0),
 			workers: state.jobs.size, estimatedXpPerSecond: state.choice?.score || null,
+			availableRam: state.availableRam ?? null,
 			observedTotalXpPerSecond: rate, samples: state.samples.length, allocation: pool.cfg.hackingPolicy?.xpAllocation ? "progression admission spacing" : "spare" } };
 }
 

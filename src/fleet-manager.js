@@ -141,7 +141,7 @@ async function manageOneCloudAction(ns, cfg, state) {
 	const ramLimit = ns.cloud.getRamLimit();
 	const names = ns.cloud.getServerNames();
     state.capitalRequest = null;
-    const objective = readProgressionSnapshot(ns), blocker = fleetProgressionBlocker(objective, liveScheduler(ns));
+    const snapshot = liveScheduler(ns), objective = readProgressionSnapshot(ns), blocker = fleetProgressionBlocker(objective, snapshot);
     if (blocker) { state.investment = blocker; return; }
     state.capitalRequest = planFleetCapital(ns, cfg, state, names, limit, ramLimit, objective);
 	const cashAvailable = ns.getServerMoneyAvailable(HOME);
@@ -171,7 +171,7 @@ async function manageOneCloudAction(ns, cfg, state) {
 
 	if (actionBudget <= 0) { state.investment = "Saving cash / reserve protected"; return; }
 
-	if (cfg.cloud.roi && names.length > 0) {
+	if (cfg.cloud.roi && names.length > 0 || fleetCapacityPolicy(snapshot, objective).xp || fleetCapacityPolicy(snapshot, objective).scaling) {
 		await buyBestInvestment(ns, cfg, state, names, limit, ramLimit, actionBudget);
 		return;
 	}
@@ -212,8 +212,11 @@ async function manageOneCloudAction(ns, cfg, state) {
 
 function fleetProgressionBlocker(objective, snapshot = null) {
     if (objective?.resetImminent || objective?.redPill === "queued") return "Augmentation installation is imminent; fleet capital retained";
-    if (objective?.limitingResource === "hacking" && objective.moneyCovered && !fleetCapacityPolicy(snapshot, objective).xp)
-        return "Skill bottleneck: retain capital; no usable XP RAM pressure";
+    if (objective?.resetPending) return "Augmentation reset advantage is being observed; fleet capital retained";
+    if (objective?.limitingResource === "hacking" && objective.moneyCovered) {
+        const policy = fleetCapacityPolicy(snapshot, objective);
+        if (!policy.xp) return policy.ok ? "Skill bottleneck: retain capital; no usable XP RAM pressure" : `Skill bottleneck: ${policy.reason}`;
+    }
     return "";
 }
 
@@ -225,25 +228,33 @@ function liveScheduler(ns) {
 
 function planFleetCapital(ns, cfg, state, names, limit, ramLimit, objective) {
     if (cfg.cloud.enabled === false || !(cfg.cloud.maxAction > 0) || Date.now() < (state.nextCapitalAt || 0)) return null;
+    const snapshot = liveScheduler(ns), policy = fleetCapacityPolicy(snapshot, objective), bounded = policy.xp || policy.scaling;
     const candidates = [];
     if (names.length < limit && cfg.cloud.minRam <= ramLimit) {
-        candidates.push({ram:cfg.cloud.minRam, added:cfg.cloud.minRam, cost:ns.cloud.getServerCost(cfg.cloud.minRam)});
+        for (let ram = cfg.cloud.minRam; ram <= ramLimit; ram *= 2) {
+            candidates.push({ram, added:ram, cost:ns.cloud.getServerCost(ram)});
+            if (!bounded) break;
+        }
     }
     for (const name of names) {
-        const current = ns.getServerMaxRam(name), ram = current * 2;
-        if (current > 0 && ram <= ramLimit) candidates.push({name, ram, added:current, cost:ns.cloud.getServerUpgradeCost(name, ram)});
+        const current = ns.getServerMaxRam(name);
+        if (!(current > 0)) continue;
+        for (let ram = current * 2; ram <= ramLimit; ram *= 2) {
+            candidates.push({name, ram, added:ram-current, cost:ns.cloud.getServerUpgradeCost(name, ram)});
+            if (!bounded) break;
+        }
     }
     const available = candidates.filter(c => Number.isFinite(c.cost) && c.cost > 0).sort((a,b) => a.cost-b.cost);
     let selected = null, reason = "", economics = null;
-    if (!names.length && !objective?.queuedDistinct?.length) {
+    if (!names.length && !objective?.queuedDistinct?.length && !bounded) {
         selected = available[0]; reason = "Bootstrap the first small cloud server";
     } else {
-        const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek(), now = Date.now();
-        if (snapshot?.type !== "jit-status" || !Number.isFinite(snapshot.generatedAt) || snapshot.generatedAt > now ||
-            now-snapshot.generatedAt > 15000 || !ns.isRunning(snapshot.pid)) return null;
+        if (!snapshot) return null;
         for (const candidate of available) {
             const evidence = evaluateFleetInvestment(snapshot,candidate.added,candidate.cost,Math.min(cfg.cloud.payback || 1800,300),objective);
-            if (evidence.ok && (!selected || evidence.payback < economics.payback)) { selected=candidate; economics={...evidence, resource:"cloud-ram", confidence:"conservative"}; reason=`Productive cloud expansion: ${evidence.reason}`; }
+            const better = !selected || (bounded ? candidate.added > selected.added || candidate.added === selected.added && candidate.cost < selected.cost
+                : evidence.payback < economics.payback);
+            if (evidence.ok && better) { selected={...candidate, adaptiveRam:Boolean(policy.scaling)}; economics={...evidence, resource:"cloud-ram", confidence:"conservative"}; reason=`Productive cloud expansion: ${evidence.reason}`; }
         }
     }
     if (!selected) return null;
@@ -544,7 +555,7 @@ async function buyBestInvestment(ns, cfg, state, names, limit, ramLimit, budget)
             if (Number.isFinite(cost) && cost > 0 && cost <= budget) candidates.push({ name, ram, added: ram - current, cost });
         }
     }
-    const surplus = objective?.queuedDistinct?.length || policy.xp ? null : chooseSurplusInvestment(candidates, budget);
+    const surplus = objective?.queuedDistinct?.length || policy.xp || policy.scaling ? null : chooseSurplusInvestment(candidates, budget);
     const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
     const now = Date.now();
     if (snapshot?.type !== "jit-status" || !Number.isFinite(snapshot.generatedAt) || now < snapshot.generatedAt ||
@@ -553,13 +564,14 @@ async function buyBestInvestment(ns, cfg, state, names, limit, ramLimit, budget)
         return;
     }
     const scored = candidates.map(c => ({ ...c, ...evaluateFleetInvestment(snapshot, c.added, c.cost, objective?.queuedDistinct?.length ? Math.min(cfg.cloud.payback, 300) : cfg.cloud.payback, objective) }));
-    const roiBest = scored.filter(c => c.ok).sort((a, b) => a.payback - b.payback || a.cost - b.cost)[0];
+    const roiBest = scored.filter(c => c.ok).sort((a, b) => policy.xp || policy.scaling
+        ? b.added - a.added || a.cost - b.cost : a.payback - b.payback || a.cost - b.cost)[0];
     const best = roiBest || surplus;
     state.investment = roiBest?.reason || (surplus
         ? `Surplus cash override: ${formatRam(surplus.added)} added for ${cash(surplus.cost)}`
         : scored[0]?.reason || "Waiting for an affordable RAM upgrade");
     if (!best) return;
-    await executeInvestment(ns, cfg, state, best);
+    await executeInvestment(ns, cfg, state, { ...best, adaptiveRam: Boolean(policy.scaling) });
 }
 
 function chooseSurplusInvestment(candidates, budget) {
@@ -586,13 +598,16 @@ async function executeInvestment(ns, cfg, state, best) {
     if (currentBlocker) { state.investment = currentBlocker; return; }
     // Re-read evidence at the transaction. Bootstrap keeps its capability-free
     // path; subsequent purchases cannot bypass a known throughput ceiling.
-    if (ns.cloud.getServerNames().length) {
-        const latest = liveScheduler(ns), policy = fleetCapacityPolicy(latest, currentObjective);
+    const latest = liveScheduler(ns), policy = fleetCapacityPolicy(latest, currentObjective);
+    if (best.adaptiveRam && !policy.scaling) {
+        state.investment = "Adaptive RAM demand changed; purchase deferred"; return;
+    }
+    if (ns.cloud.getServerNames().length || policy.xp || policy.scaling) {
         if (!policy.ok || cfg.cloud.roi && !latest) {
             state.investment = policy.ok ? "Waiting for fresh live scheduler evidence" : policy.reason; return;
         }
-        if (policy.xp && !evaluateFleetInvestment(latest, best.added, cost, cfg.cloud.payback, currentObjective).ok) {
-            state.investment = "XP demand or capital recovery evidence changed"; return;
+        if ((policy.xp || policy.scaling) && !evaluateFleetInvestment(latest, best.added, cost, cfg.cloud.payback, currentObjective).ok) {
+            state.investment = "RAM demand or capital recovery evidence changed"; return;
         }
         if (goal.owner === "supervisor" && goal.target === target && cfg.cloud.roi &&
             !evaluateFleetInvestment(latest, best.added, cost, Math.min(cfg.cloud.payback || 1800,300), currentObjective).ok) {

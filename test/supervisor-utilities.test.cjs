@@ -40,6 +40,43 @@ test('one-shot diagnostics completes once; planner runs periodically with no dup
     f.clock.now++; f.api.tickUtilityJob(f.ns, planner); assert.equal(f.launched.length, 3);
 });
 
+test('startup PID warnings refresh after a minute and stop repeating once the check is ready', () => {
+    const f = fixture(), job = f.api.createUtilityJob('doctor.js', 'diag', 'diagnostics', [], 0);
+    f.api.tickUtilityJob(f.ns, job); publish(f, job, { state: 'WARN', summary: 'Snapshot belongs to another PID' });
+    f.processes.clear(); f.api.tickUtilityJob(f.ns, job);
+    assert.equal(job.state, 'WARN');
+    f.clock.now += 59999; f.api.tickUtilityJob(f.ns, job); assert.equal(f.launched.length, 1);
+    f.clock.now++; f.api.tickUtilityJob(f.ns, job); assert.equal(f.launched.length, 2);
+    publish(f, job); f.processes.clear(); f.api.tickUtilityJob(f.ns, job);
+    f.clock.now += 600000; f.api.tickUtilityJob(f.ns, job);
+    assert.equal(job.state, 'READY'); assert.equal(f.launched.length, 2);
+});
+
+test('doctor reads the repository dependency graph without treating dashboard prose as an import', () => {
+    const f = fixture(), doctor = loadScript('doctor.js', f.clock), { root } = require('./helpers.cjs');
+    const fs = require('node:fs'), path = require('node:path');
+    f.ns.fileExists = file => fs.existsSync(path.join(root, 'src', file));
+    f.ns.read = file => f.ns.fileExists(file) ? fs.readFileSync(path.join(root, 'src', file), 'utf8') : '';
+    f.processes.set(1, { pid: 1, filename: 'supervisor.js', args: [] });
+    const report = doctor.diagnoseAutomation(f.ns);
+    assert.ok(report.summary.includes('files checked'));
+    assert.deepEqual(Array.from(report.issues), []);
+});
+
+test('doctor recognizes static imports and re-exports while skipping comments, strings and templates', () => {
+    const doctor = loadScript('doctor.js', new Clock());
+    const source = [
+        'import {', '  foo, bar as baz', '} from "lib/named.js";',
+        'import thing from "lib/default.js";', 'import "lib/side-effect.js";',
+        'export * from "lib/export.js";', 'export { item } from "lib/re-export.js";',
+        '// import { foo } from "lib/comment.js";', '/*', 'import "lib/block-comment.js";', '*/',
+        'const message = " from " + p.selectedPlan.next.faction + " | ";',
+        'const sample = `', 'import "lib/template.js";', '`;',
+    ].join('\n');
+    assert.deepEqual(Array.from(doctor.scriptDependencies(source)),
+        ['lib/named.js', 'lib/default.js', 'lib/side-effect.js', 'lib/export.js', 'lib/re-export.js']);
+});
+
 test('utilities wait for RAM or capabilities without killing workers or launching duplicates', () => {
     const f = fixture(), job = f.api.createUtilityJob('augmentation-planner.js', 'aug', 'augmentation-plan');
     f.api.tickUtilityJob(f.ns, job, 'Singularity is locked'); assert.equal(job.state, 'BLOCKED');

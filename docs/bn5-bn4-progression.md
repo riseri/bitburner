@@ -92,7 +92,8 @@ BN4.3; it is not a strategy for every BitNode or every optional subsystem.
   buys and immediately installs it, then trains toward the final server's live
   hacking requirement. The fleet roots the final server. Training also evaluates
   another useful hacking/XP augmentation package, including repeated NeuroFlux
-  Governor levels from existing faction reputation. See [endgame upgrades](endgame-upgrades.md).
+  Governor levels, acquiring reputation by donation or owned faction work when
+  the package projects a faster finish. See [endgame upgrades](endgame-upgrades.md).
 
 The augmentation manager publishes one versioned progression snapshot containing
 installed/queued ownership, live requirements, its selected basket, capabilities,

@@ -80,8 +80,8 @@ require choosing a different mode.
 **Augmentation installation is always automatic while the augmentation service
 runs.** At five queued augmentations by default, it installs and restarts the
 supervisor using saved settings. A queued **The Red Pill** bypasses the threshold.
-Once installed, the loop stops buying/installing to preserve progress toward the
-final server. It still waits for unrelated manual activity
+Once installed, the loop evaluates further hacking upgrades and NeuroFlux against
+the projected time to finish the final server, including reset recovery. It still waits for unrelated manual activity
 and requires a valid restart script and saved configuration. There is no
 `--auto-install` switch.
 
@@ -131,7 +131,8 @@ run supervisor.js
 ```
 
 Other managers can remain running and be adopted. A running process keeps its old
-code until restarted. `supervisor-restart.js` restores saved settings instead:
+code until restarted. `supervisor-restart.js` reloads the supervisor, daemon, and
+fleet manager with the saved settings:
 old profiles are converted to explicit service toggles, preserving disabled
 services. Saved `--auto-install` arguments are removed. An old `assist` setup
 therefore installs automatically once the new augmentation manager is running.
@@ -151,8 +152,13 @@ can launch more work.
 | `Model` | Estimated income from current plans. Warmup, Hack chance, rejected batches, and recovery can reduce actual income. |
 | `Potential` | An estimate for a candidate after preparation; it is not income being earned now. |
 | `Targets 1 / AUTO (max 6)` | One useful lane is running. Automatic mode adds one trial at a time when global capacity and marginal income justify it. Explicit `--max-targets 1` or `2` remains supported. |
+| `Batch headroom 0.050/s free; next target needs 0.250/s` | The current budget cannot admit another target. Automatic rate control can test more headroom after stable paid work and timing observations. Numeric limits remain fixed. |
+| `Scaling AUTO batches; AUTO launches` | Recent timing and useful demand control both budgets. The scale reason explains observation, increases, verification, backoff, or a bounded RAM request. |
+| `Target work 1 running/committed; 1 waiting` | An empty tuning plan occupies a target slot but does not consume batch capacity or block scaling evidence from healthy paid work. |
+| `XP expansion ... bounded growth; MODEL (warmup)` | Prepared G/W work fills usable home/remote RAM and has 60 seconds of allocator and timing evidence. A bounded cloud step can proceed while long XP waves warm up, subject to live capital and shared limits. |
+| `Background none selected; PAUSED` | No next target is being prepared; the prep note names the current admission gate. A handed-off candidate is now owned by its target pipeline. |
 | `LIVE` / `WARMUP` / `TRIAL` | Recent Hacks are completing / waiting for initial landings / evaluating a newly admitted second target. |
-| `waiting for two productive minutes` | Adds each safely completed batch's own plan period until it reaches 120 seconds, and requires a recent Hack. Generation swaps preserve earned progress; deferrals can make this take longer than two wall-clock minutes. |
+| `waiting for two productive minutes` | Adds each safely completed batch's actual admitted interval, including XP allocation and global pacing, until it reaches 120 seconds; also requires a recent Hack. Generation swaps preserve earned progress; deferrals can make this take longer than two wall-clock minutes. |
 | `shared launch budget / fragmented batch` | A complete batch still exceeds the process-launch budget after retrying placement on fewer hosts. Free RAM does not remove this limit. |
 | `WAITING_RAM` | A service or helper cannot fit its required RAM yet. |
 | `gen 1 ACTIVE` and `gen 2 SHADOW` | The current plan keeps earning while a replacement is being built. |
@@ -165,6 +171,21 @@ With the default threshold, its candidate model needs to reach 25% of existing
 modeled income (the primary model in explicit two-target mode). Already-prepared
 targets can start sooner. Once all slots are occupied and stable, promotion can
 replace the weakest lane. See [elastic throughput](docs/elastic-throughput.md).
+
+Shared budgets default to `--max-batch-rate auto --max-launches auto`. The daemon
+starts conservatively at up to 4 batches/s and 32 launches/s, tests higher budgets
+after stable timing and paid work, and compares measured throughput after warmup.
+Recent timing pressure or widespread faults reduce future admissions. Recent
+paid work and healthy timing can restore pre-backoff budgets while a trial
+validates; new speculative growth still needs validated lanes. All money lanes
+share the full launch ledger. Productive
+remote RAM pressure can request bounded cloud growth when the scheduler has
+headroom; cash-covered final-server goals prioritize XP capacity. Numeric values
+keep fixed ceilings: batches in (0,8], launches in 4..128. Settings persist across
+resets. Follow [Changing settings](#changing-settings) once to load the new code;
+omit old numeric budget flags to use automatic scaling. A plain
+`run supervisor.js` enables it by default. See
+[capacity control](docs/scheduler-capacity.md) for the evidence and bounds.
 
 Formula, skill, and fleet-capacity changes use background plan tuning. If a safe
 overlap cannot fit, the old plan continues earning. Safety faults can still pause

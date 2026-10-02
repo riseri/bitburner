@@ -26,7 +26,9 @@ installing. Extra levels count toward the existing installation threshold but ad
 no distinct augmentation; this pre-install pass never triggers or delays that
 installation decision. After The Red Pill is installed, a separate
 [endgame upgrade policy](endgame-upgrades.md) can acquire hacking augments and
-NeuroFlux when measured completion and recovery estimates justify another reset.
+NeuroFlux and fund their reputation when completion estimates justify another
+reset. Measured recovery is preferred; the first cycles can use a labeled
+conservative recovery allowance with stricter approval criteria.
 Shadows of Anarchy's separate inflation system is excluded from default baskets;
 an explicit single augmentation target from that faction is supported.
 

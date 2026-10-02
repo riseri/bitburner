@@ -59,6 +59,8 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | --- | --- | --- |
 | `--progression-actions` | `true` | Buy programs and install faction backdoors when Singularity is unlocked |
 | `--max-targets` | `auto` | Automatic admission up to 6; explicit integer 1..6 remains available. Capacity and marginal value determine actual lane count. |
+| `--max-batch-rate` | `auto` | Adaptive shared admission rate, starting at up to 4/s. Ceiling follows target cadence and the launch envelope. Numeric (0,8] keeps a fixed budget. |
+| `--max-launches` | `auto` | Adaptive shared planned launches/s, starting at 32 with a 128/s safety envelope. Numeric integer 4..128 keeps a fixed budget. Split chunks and 250 ms buckets count. |
 | `--background-prep` | `true` | Prepare promising targets while the current target earns, subject to health and resource gates |
 | `--dashboard-details` | `true` | Show detailed diagnostics; forwarded to a newly started daemon; adopted daemons keep their arguments |
 | `--open-dashboards` | `true` | Open only the supervisor and active daemon logs once per PID; `false` also disables layout |
@@ -174,7 +176,9 @@ crawler reports `WAIT` until its heartbeat arrives; missing heartbeats, exited
 crawlers, and zero active agents report `BLOCKED`. The detailed report retains the
 last agent error and counts home crawler restarts during this manager run.
 After syncing dashboard changes, use `run supervisor-restart.js` to reload the
-supervisor while preserving its saved command-line flags.
+supervisor, daemon, and fleet manager while preserving saved supervisor flags.
+The helper stops the supervisor first so its old controllers cannot be adopted
+or respawned during reload. Other services and unrelated scripts keep running.
 
 When `Formulas.exe` becomes available, active agents immediately use Darknet
 formulas to estimate authentication and Heartbleed timing, retry cooldowns, and
@@ -213,6 +217,10 @@ its first small server, or for one expansion with estimated payback within five
 minutes. Expansion requests require fresh scheduler evidence, stable earning lanes,
 and RAM pressure. These requests have priority 79: above ordinary augmentation and
 program savings, below TOR/the first opener, critical home RAM, Daedalus and Red Pill.
+Adaptive rate control can request one 25% remote RAM step after measured timing
+headroom and useful plan/lane demand. It selects larger qualifying server sizes
+within the request instead of repeating tiny purchases; the live transaction
+must still pass ROI and every reserve. See [capacity control](scheduler-capacity.md).
 Manual goals remain protected. The funding target includes the per-action cap and
 cash floors; the transaction rechecks live cost, reserves and reset conditions.
 After a prioritized purchase, the fleet yields capital priority for three minutes
@@ -284,8 +292,10 @@ installs immediately, subject
 to manual-work and restart checks. After The Red Pill is installed, the controller
 continues toward the final server and considers further hacking augments and
 NeuroFlux through the [endgame upgrade policy](endgame-upgrades.md). Another
-installation requires measured evidence that it can shorten completion enough to
-pay for rebuilding hacking and lost IPvGO bonuses. Donations retain
+installation requires live measured XP evidence and a projection that pays for
+reputation acquisition, rebuilding hacking and lost IPvGO bonuses. Without
+comparable recovery history, the controller uses a labeled 24-hour allowance
+and requires a projected finish at least 50% sooner. Donations retain
 enough cash for the planned purchase, the percentage reserve, and unrelated goals.
 
 Outside the BN4 route, automatic installation checks `--min-install` before

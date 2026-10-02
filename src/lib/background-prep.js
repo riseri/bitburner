@@ -12,7 +12,7 @@ const GROW = "background-grow.js";
 const WEAKEN = "background-weaken.js";
 
 export function recentPipelineIncome(stats, runtime, now = Date.now()) {
-	const period = Math.max(0, Number(runtime?.plan?.period) || 0);
+	const period = Math.max(0, Number(stats?.admissionPeriod) || Number(runtime?.plan?.period) || 0);
 	const tolerance = Math.max(10_000, period * 2 + 1_000);
 	return Number.isFinite(stats?.lastHackAt) && now - stats.lastHackAt < tolerance;
 }

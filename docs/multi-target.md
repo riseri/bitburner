@@ -19,7 +19,8 @@ background-prepared candidate. A newly started process does not inherit the old
 process's prepared-candidate state, so the ready scan also supports starting on
 the richer target and adding a useful smaller target later.
 
-Productive time is the sum of each safely completed batch's own plan period.
+Productive time is the sum of each safely completed batch's actual admitted
+interval, including XP allocation and global pacing.
 Generation changes preserve that progress, including old-generation batches
 finishing during a swap. Failed or skipped batches receive no credit. Background
 prep and admission use this same total; recent-Hack and health checks still apply.
@@ -34,8 +35,12 @@ timing and shared resource constraints. The scouting upper bound is never treate
 as an earning rate. Live tuning yields
 between small search steps rather than running the entire search in the hot loop.
 Peers keep earning during tuning and initial warmup. Once the configured slots
-are occupied and all lanes are stable and productive, spare RAM can prepare a
-replacement candidate. A stronger ready candidate replaces the weakest lane
+are full and all lanes are stable and productive, spare RAM can prepare a
+replacement candidate. The same applies below AUTO's six-target ceiling when
+the shared batch budget is full and fixed, at its safety ceiling, or held for
+the final-server XP goal. Cheap bootstrap lanes must not prevent a richer target
+from being compared. Ordinary money AUTO can grow the rate budget first.
+A stronger ready candidate replaces the weakest lane
 after its owned work drains; unrelated lanes continue earning.
 
 A target that has stopped earning for ten minutes can also be replaced when its
@@ -69,18 +74,39 @@ Default combined limits are:
 
 | Limit | Default | Meaning |
 | --- | ---: | --- |
-| Active targets | 2 | Hard rollout limit, including warming or draining lanes |
-| Modeled batch rate | 4 batches/s | Sum of the two tuned batch rates |
-| Worker commitments | 6,000 | Queued plus running chunks across both targets |
-| Planned worker launches | 32/s | Shared rolling-window admission budget |
+| Active targets | AUTO, max 6 | Ceiling including warming or draining lanes; admission still needs capacity |
+| Admission batch rate | AUTO, starts at up to 4/s | Shared rate; automatically paced when budgets decrease |
+| Worker commitments | 6,000 | Queued plus running chunks across all targets |
+| Planned worker launches | AUTO, starts at 32/s | Shared rolling-window admission budget; bounded at 128/s |
 
 The launch ledger uses 250 ms bins and conservatively checks every overlapping
 five-bin interval against the one-second budget. Split phases count every worker.
-An optional lane retains less of the launch budget than the priority lane. A
+All money lanes share the full global launch ledger. Optional XP/prep leave a
+quarter of the budget, capped at eight launches/s, for money, while keeping a
+minimum four-launch allowance so prep can progress at explicit tiny limits. A
 bounded launch loop services the earliest committed launches from both queues;
 rate limiting rejects **new reservations**, not already-committed due workers.
 These are planned-time limits, not a guarantee against an execution burst after
 game suspension or a long shared pause.
+
+Target AUTO sets the target-count ceiling. Rate budgets independently default
+to AUTO and adapt to measured timing and usable demand. New admission still
+requires at least 0.25 batches/s remaining. At a current 4/s budget, two plans
+totaling 3.95/s leave only 0.05/s; the controller can test a larger budget after
+stable paid work, using bounded scouting to calculate useful candidate headroom.
+Detailed capacity rows show this batch headroom separately from recent launches,
+future reserved launch peaks, shared money budget and current whole-batch demand. A modeled
+`Next candidate` is a scouting result, not a selected or admitted pipeline.
+
+The supervisor accepts `--max-batch-rate auto` and `--max-launches auto` by
+default, with fixed numeric overrides (batch rate in (0,8], launches in 4..128).
+It forwards settings to a new daemon and preserves AUTO and explicit values
+for reset bootstrap. Automatic budget decreases pace future admissions across
+lanes without cancelling their committed workers or changing their plans.
+Raising them permits further admission only when RAM, launch placement, income
+and trial health checks pass. An adopted daemon keeps its original arguments;
+stop the old supervisor and daemon before starting with changed settings.
+See [adaptive budgets and RAM](scheduler-capacity.md#adaptive-budgets-and-coordinated-ram).
 
 A new trial is initially sized against at most 25% of schedulable fleet RAM and
 the remaining batch/process budgets. The real shared allocator is still the final
@@ -115,6 +141,11 @@ that it earns, that the incumbent retains at least 70% of its admission baseline
 and that combined income remains at least 95% of that baseline. Sustained failure
 for 60 seconds winds down the optional target. These thresholds allow stochastic
 hack results; they are heuristics, not a mathematically optimal portfolio selector.
+Shared budget backoff or deliberate XP allocation adjusts the baseline to the
+same money pacing, with restoration following recent paid work rather than
+assuming an immediate income gain. A trial's own contention or weaker plan does
+not lower its admission baseline. Recent income checks also use the actual
+admission interval, avoiding false WARMUP labels between deliberately slow payouts.
 After a successful three-minute post-warmup trial, the higher measured earner
 gets priority. The smaller earner becomes optional and remains subject to the
 same shared-load/income protections. Retired targets keep their earned-money
@@ -143,6 +174,9 @@ The daemon shows combined *measured* income separately from summed active plan
 estimates, then per-target state, role, income, batch pace and recovery. Warmup,
 local recovery, drain, asynchronous prep, tuning and retired states are explicit.
 Session earnings include money from retired targets, without counting it twice.
+After handing a candidate to a pipeline, background prep returns to WAITING.
+When admission is held with no selected preparation target, it reports PAUSED
+and the current gate; it does not retain an old ADMITTED label on an empty target.
 The supervisor reads a versioned, PID-matched status snapshot on the existing JIT
 status port and falls back to legacy single-target log parsing when appropriate.
 Home cores, fleet capacity, progression and contract status remain available.
@@ -175,18 +209,23 @@ behavior on the next startup:
 run supervisor.js --max-targets 1
 ```
 
-The supervisor forwards `--max-targets` to a newly started daemon. Existing
-process arguments cannot be changed by starting another supervisor. The rollout
-rejects values above two. Advanced daemon-only limits are `--max-batch-rate`,
-`--max-workers`, and `--max-launches`; reducing them may reduce income or prevent
-second-target admission. `--target` selects the initial target, not necessarily
+The supervisor forwards `--max-targets`, `--max-batch-rate` and `--max-launches`
+to a newly started daemon. Existing process arguments cannot be changed by
+starting another supervisor. Target limits support AUTO and explicit 1..6;
+`--max-workers` remains a daemon-only setting. Reducing shared budgets may reduce
+income or prevent another target's admission. `--target` selects the initial target, not necessarily
 the only target; combine it with `--max-targets 1` to lock a single earning lane.
 `--background-prep false` disables new background preparation, not admission of
-an already-ready target. Progression actions remain opt-in and unchanged.
+an already-ready target. Existing progression action settings remain preserved.
 
 This is not a hot migration of running batches: deployment still requires one
 restart and initial warmup. Automatic admission of the next ready target then
 happens inside that same daemon, without another manual restart.
+
+After syncing code, `run supervisor-restart.js` reloads the supervisor, daemon,
+and fleet manager using the saved supervisor settings. This stops the existing
+scheduler before its replacement starts; already-running other services are
+adopted as usual.
 
 ## Validation
 

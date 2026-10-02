@@ -3,6 +3,9 @@
 The supervisor owns service lifecycle records, not the JIT scheduler. It adopts
 one existing process per service on `home`, retaining its actual arguments and
 thread count. An existing daemon is not replaced just to apply new CLI flags.
+New daemons receive AUTO batch and launch budgets by default. Numeric overrides
+stay fixed, and AUTO/fixed settings persist through bootstrap. See
+[capacity control](scheduler-capacity.md#adaptive-budgets-and-coordinated-ram).
 Duplicate services are shown as `CONFLICT`; they are not broadly killed.
 Only one supervisor may run on `home`. Newly launched dependents inherit the
 adopted fleet status port. Conflicting existing daemon/fleet port settings fail
@@ -327,8 +330,11 @@ The diagnostic/planner children are serialized, never heartbeat-killed, and retr
 RAM shortages or failed runs with bounded delays. Planner capability is checked
 before launch. Reports use files rather than new reserved ports, and are bound to
 the child PID, publication time and current reset. Stale advice is not used for
-savings. Diagnostics runs once per supervisor session; planning repeats about once
-per minute. New daemons reserve helper RAM automatically; adopted daemons retain
+savings. A successful diagnostic runs once per supervisor session. Startup warnings
+retry once per minute until the check is ready, so a stale PID warning can clear
+after the controller publishes its first snapshot. The doctor reads static module
+declarations and ignores dashboard prose, comments and strings. Planning repeats
+about once per minute. New daemons reserve helper RAM automatically; adopted daemons retain
 their old arguments. Use the root README for all flags and deployment instructions.
 
 An active bounded INT farming session prevents supervisor startup. The farmer

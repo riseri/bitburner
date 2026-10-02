@@ -1,8 +1,10 @@
-import { observeHomeCapacity, sampleHomeUsage } from "lib/home-capacity.js";
+import { observeHomeCapacity, sampleHomeUsage, homeProtectedRam } from "lib/home-capacity.js";
 import { createBackgroundPrep, tickBackgroundPrep, cancelBackgroundPrep, backgroundPrepRam, backgroundPrepJobs, emptySlotIncomeFloor, recentPipelineIncome } from "lib/background-prep.js";
-import { createXpPipeline, tickXpPipeline, consumeXpEvent, claimXpTarget, reclaimXpRam, refreshMilestoneEvidence } from "lib/hacking-xp.js";
-import { schedulerCapacity } from "lib/scheduler-capacity.js";
+import { createXpPipeline, tickXpPipeline, consumeXpEvent, claimXpTarget, reclaimXpRam, refreshMilestoneEvidence, sampleXpCapacity } from "lib/hacking-xp.js";
+import { schedulerCapacity, MIN_TARGET_BATCH_RATE } from "lib/scheduler-capacity.js";
 import { boundedXpAllocation } from "lib/milestone-balance.js";
+import { recordSchedulerTiming, tickSchedulerScaling, applySchedulerLimits, governedBatchScale, governedPeerRate, pipelineUsesBudget, pipelineAdmissionPeriod, refreshAdmissionCadence } from "lib/scheduler-scaling.js";
+import { launchBudgetDemand, optionalLaunchLimit } from "lib/launch-budget.js";
 
 // One event loop, one allocation ledger. A pipeline never owns the global ports,
 // process map, or reservation array. Changing its epoch cannot erase a peer.
@@ -29,7 +31,7 @@ export function createTargetPipeline(name, cfg, api, ownerPid, ordinal, runtime 
 		admissionSkips: 0, nextHealth: 0, tunedLevel: 0, tuner: null, tuneStarted: 0,
 		repair: null, control: null, note: "", nextRetry: 0, tunedCapacity: 0, lastCapacityRetune: 0,
 		idleSince: null, idleRetunes: 0, idleFailures: 0, idleRetryAt: 0, idleReplanning: false,
-		admissionReason: "", completedAtIdleReplan: 0, minimumExpected: 0,
+		admissionReason: "", admissionDemand: null, completedAtIdleReplan: 0, minimumExpected: 0,
 		stalledSince: null, tuningWaitSince: null, lastTuneStep: 0, trialNote: "",
 	};
 	pipeline.cfg.epoch = pipeline.epoch;
@@ -85,6 +87,7 @@ function activatePipeline(ns, pool, pipeline, runtime, rebuilt) {
 	pipeline.tunedLevel = ns.getHackingLevel();
 	pipeline.tunedCapacity = api.workerFleetCapacity(pool.network.hosts, pipeline.cfg);
 	pipeline.tunedHome = `${pool.cfg.homeGw?.maxRam || 0}:${pool.cfg.homeGw?.cores || 1}`;
+	pipeline.tunedBatchLimit = pool.cfg.maxBatchRate;
 	pipeline.lastCapacityRetune = Date.now();
 	// Activation follows reconciled ownership (initialization or safety recovery).
 	pipeline.generations.clear(); pipeline.shadow = null; pipeline.swap = null;
@@ -126,6 +129,7 @@ export async function runTargetPipelines(ns, setup, api) {
 		pool.wakeups++;
 		pool.lastLoop = now;
 		pool.lagMax = Math.max(pool.lagMax, lag);
+		recordSchedulerTiming(pool.cfg.schedulerScaling, "loop", lag, pool.cfg.gap);
 		if (lag > pool.cfg.gap * 0.6) pool.slowTicks.push(now);
 		for (const p of pool.pipelines.values()) {
 			p.stats.loopLagSum += lag; p.stats.loopLagCount++;
@@ -139,6 +143,7 @@ export async function runTargetPipelines(ns, setup, api) {
 
 		if (now - pool.lastNetwork >= 10_000) refreshPipelineNetwork(ns, pool, now);
 		serviceHackingPolicy(ns, pool);
+		serviceSchedulerScaling(ns, pool, now);
 		if (now - pool.lastReconcile >= 30_000) {
 			pool.lastReconcile = now;
 			api.reconcileRunning(ns, pool.running, pool.runningByChunk, 20);
@@ -240,17 +245,68 @@ export function schedulerSleep(pool, now = Date.now()) {
 }
 
 export function serviceHackingPolicy(ns, pool) {
+	refreshAdmissionCadence(pool);
 	refreshMilestoneEvidence(ns, pool);
 	pool.api.refreshHackingPolicy?.(ns, pool.cfg, pool.network);
+	refreshAdmissionCadence(pool);
+}
+
+// Scouting must remain possible while the current rate budget blocks admission.
+// Otherwise a missing candidate would hide the demand that justifies raising it.
+function scanScalingCandidates(ns, pool) {
+	const state = pool.cfg.schedulerScaling;
+	if (state.batchMode !== "auto" || pool.pipelines.size >= pool.cfg.maxTargets) return;
+	state.scan ||= { names: [...pool.network.servers], index: 0, candidates: new Map() };
+	const scan = state.scan;
+	for (let checked = 0; checked < 8 && scan.index < scan.names.length; checked++) {
+		const name = scan.names[scan.index++];
+		if (name === "home" || pool.pipelines.has(name) || (pool.blocked.get(name) || 0) > Date.now() ||
+			!ns.hasRootAccess(name) || ns.getServerRequiredHackingLevel(name) > ns.getHackingLevel()) continue;
+		const money = ns.getServerMaxMoney(name);
+		if (!(money > 0)) continue;
+		const perBatch = money * pool.cfg.maxSteal * .95 * ns.hackAnalyzeChance(name);
+		if (perBatch > 0) scan.candidates.set(name, { perBatch });
+	}
+	if (scan.index >= scan.names.length) { pool.scalingCandidates = scan.candidates; state.scan = null; }
+}
+
+export function serviceSchedulerScaling(ns, pool, now = Date.now()) {
+	const state = pool.cfg.schedulerScaling;
+	if (!state?.enabled || now < state.nextSample) return false;
+	scanScalingCandidates(ns, pool);
+	const lanes = [...pool.pipelines.values()], active = lanes.filter(pipelineUsesBudget), goal = pool.cfg.progressionObjective;
+	refreshAdmissionCadence(pool);
+	sampleXpCapacity(ns, pool, now);
+	const skillGoal = goal?.milestone === "FINAL_SERVER" && goal.limitingResource === "hacking" && goal.moneyCovered;
+	const xp = pool.xp, xpSamples = (xp?.samples || []).slice(-3);
+	const xpRate = xp?.status === "RUNNING" && !xp.wave?.preparing && xpSamples.length === 3 && xpSamples.every(n => n > 0) &&
+		Math.max(...xpSamples) / Math.min(...xpSamples) <= 1.25 ? xpSamples.reduce((n, x) => n + x, 0) / 3 : 0;
+	const changed = tickSchedulerScaling(state, {
+		gap: pool.cfg.gap, capacity: schedulerCapacity(pool, now), skillGoal,
+		goal: `${goal?.milestone || "MONEY"}:${goal?.limitingResource || "money"}`,
+		income: lanes.reduce((n, p) => n + pool.api.incomeRate(p.stats, 60_000, now), 0), xpRate,
+		xpWaitingLaunch: /LAUNCH/.test(xp?.status || ""), maxActionTime: Math.max(0, ...lanes.map(p => p.runtime?.plan.times.W || 0)),
+		stable: active.length > 0 && active.every(p => !p.trial && productive(p, now) && p.shadow?.state !== "PREFLIGHT" && !p.swap) && !pool.cfg.backgroundPrep?.active,
+		earningStable: active.some(p => !p.trial && productive(p, now)) && active.every(p => p.mode === "RUNNING" && !p.swap?.restoring) &&
+			!(pool.cfg.prepStates || []).some(p => p?.active),
+		blocker: active.some(p => p.trial) ? "Current target trial is collecting paid evidence; restoring reduced budgets does not require trial completion" :
+			active.find(p => p.shadow?.state === "PREFLIGHT" || p.swap) ? "Target plan transition is collecting evidence" : "Waiting for recent paid work and landing samples",
+		recovering: active.some(p => p.recovery || p.drain && !p.retiring), resetPending: goal?.resetPending || goal?.resetImminent,
+		faults: lanes.map(p => [p.epoch, Object.values(p.stats.misses).reduce((n, count) => n + count, 0) +
+			(p.retiring ? 0 : p.stats.recoveries + p.stats.restarts)]),
+	}, now);
+	if (changed) { applySchedulerLimits(pool.cfg, state); refreshAdmissionCadence(pool); }
+	return changed;
 }
 
 export function serviceXpPipeline(ns, pool) {
+	const blocker = () => {
+		const pending = [...pool.pipelines.values()].reduce((n, p) => n + p.queue.length, pool.running.size);
+		if (pending + prepWorkerCount(pool) >= pool.cfg.maxWorkers - 4) return "workers";
+		return fitsLaunchBudget(pool.launchBuckets, [{ launchAt: Date.now() }], optionalLaunchLimit(pool.cfg.maxLaunches)) ? "" : "launches";
+	};
 	tickXpPipeline(ns, pool, {
-		canLaunch() {
-			const pending = [...pool.pipelines.values()].reduce((n, p) => n + p.queue.length, pool.running.size);
-			return pending + prepWorkerCount(pool) < pool.cfg.maxWorkers - 4 && fitsLaunchBudget(pool.launchBuckets,
-				[{ launchAt: Date.now() }], Math.max(0, pool.cfg.maxLaunches - 8));
-		},
+		canLaunch: () => !blocker(), blocker,
 		record: job => recordLaunchBudget(pool, [job]),
 	});
 }
@@ -269,7 +325,7 @@ function prepLaunchHooks(pool) {
 				prepWorkerCount(pool);
 			return pool.port.empty() && nextPipelineLaunch(pool) - Date.now() > 50 &&
 				pending < pool.cfg.maxWorkers - 4 && fitsLaunchBudget(pool.launchBuckets,
-					[{ launchAt: Date.now() }], Math.max(4, pool.cfg.maxLaunches - 8));
+					[{ launchAt: Date.now() }], optionalLaunchLimit(pool.cfg.maxLaunches));
 		},
 		recordLaunch: job => recordLaunchBudget(pool, [job]),
 	};
@@ -414,7 +470,9 @@ function launchPipelineChunks(ns, pool) {
 				(!next || p.queue[0].launchAt < next.queue[0].launchAt)) next = p;
 		}
 		if (!next) return;
-		pool.launchDriftMax = Math.max(pool.launchDriftMax || 0, Date.now() - next.queue[0].launchAt);
+		const drift = Date.now() - next.queue[0].launchAt;
+		pool.launchDriftMax = Math.max(pool.launchDriftMax || 0, drift);
+		recordSchedulerTiming(pool.cfg.schedulerScaling, "launch", drift, pool.cfg.gap);
 		const r = pool.api.launchDueChunks(ns, next.queue, next.name, next.cfg, next.batches,
 			next.stats, pool.running, pool.runningByChunk, next.drain, 1);
 		next.queue = r.queue; next.drain = r.drain;
@@ -424,22 +482,7 @@ function launchPipelineChunks(ns, pool) {
 // Admission bins are conservative: 4 bins/sec, each at most floor(limit / 4).
 // Split phases count as multiple processes. Both targets consume this ledger.
 export function fitsLaunchBudget(buckets, chunks, maxLaunches) {
-	const proposed = new Map();
-	for (const chunk of chunks) {
-		const slot = Math.floor(chunk.launchAt / BUCKET_MS);
-		proposed.set(slot, (proposed.get(slot) || 0) + 1);
-		if (proposed.get(slot) + (buckets.get(slot) || 0) > Math.floor(maxLaunches / 4)) return false;
-	}
-	// Any rolling 1s interval can intersect five 250ms buckets. Counting the
-	// whole five is conservative and also covers bursts at bucket boundaries.
-	for (const slot of proposed.keys()) {
-		for (let start = slot - 4; start <= slot; start++) {
-			let count = 0;
-			for (let i = start; i <= start + 4; i++) count += (buckets.get(i) || 0) + (proposed.get(i) || 0);
-			if (count > maxLaunches) return false;
-		}
-	}
-	return true;
+	return launchBudgetDemand(buckets, chunks).requiredLimit <= maxLaunches;
 }
 
 function recordLaunchBudget(pool, chunks) {
@@ -466,8 +509,8 @@ function releaseCancelledLaunchBudget(pool) {
 function reserveBudgetedBatch(ns, pool, p, id, landing, plan, cfg, priorChunks = [], income = false) {
 	const { api } = pool, mark = pool.reservations.length;
 	const pending = [...pool.pipelines.values()].reduce((n, lane) => n + lane.queue.length, pool.running.size);
-	const limit = p.name === pool.anchor ? pool.cfg.maxLaunches : Math.max(4, pool.cfg.maxLaunches - 8);
-	let reason = "", ramFailure = false;
+	const limit = pool.cfg.maxLaunches;
+	let reason = "", ramFailure = false, demand = null;
 	for (const compact of [false, true]) {
 		const placement = compact ? { ...cfg, compactPlacement: true } : cfg;
 		const reserve = income && !compact ? api.reserveIncomeBatch : api.reserveBatch;
@@ -485,11 +528,15 @@ function reserveBudgetedBatch(ns, pool, p, id, landing, plan, cfg, priorChunks =
 		if (income && pending + chunks.length + prepWorkerCount(pool) > pool.cfg.maxWorkers)
 			cancelBackgroundPrep(ns, pool.cfg.backgroundPrep, "active hacking needs worker slots");
 		if (pending + chunks.length + prepWorkerCount(pool) > pool.cfg.maxWorkers) reason = "shared worker-commitment limit";
-		else if (!fitsLaunchBudget(pool.launchBuckets, chunks, limit)) reason = "shared launch budget / fragmented batch";
+		else if (!fitsLaunchBudget(pool.launchBuckets, chunks, limit)) {
+			reason = "shared launch budget / fragmented batch";
+			const proposal = { ...launchBudgetDemand(pool.launchBuckets, chunks), at: Date.now(), limit };
+			if (!demand || proposal.requiredLimit < demand.requiredLimit) demand = proposal;
+		}
 		else return { ...result, compact, reason: "", ramFailure: false };
 		api.rollbackReservations(pool.reservations, mark);
 	}
-	return { chunks: null, reason, ramFailure };
+	return { chunks: null, reason, ramFailure, demand };
 }
 
 export function planPipelineBatch(ns, pool) {
@@ -498,6 +545,8 @@ export function planPipelineBatch(ns, pool) {
 		const p = candidates[pool.planCursor++ % candidates.length];
 		if (p.mode !== "RUNNING" || p.recovery || p.drain || p.swap?.restoring) continue;
 		const now = Date.now(), plan = p.runtime.plan;
+		const admissionPeriod = pipelineAdmissionPeriod(pool, p);
+		p.stats.admissionPeriod = Math.max(p.stats.admissionPeriod || 0, admissionPeriod);
 		const earliest = now + plan.times.W + p.cfg.lead + 250;
 		if (p.nextLanding < earliest) {
 			const count = Math.ceil((earliest - p.nextLanding) / plan.period);
@@ -508,15 +557,16 @@ export function planPipelineBatch(ns, pool) {
 		const id = `${p.epoch}:${++p.serial}`;
 		const result = reserveBudgetedBatch(ns, pool, p, id, p.nextLanding, plan, p.cfg, [], true);
 		if (result.chunks) {
-			commitGenerationBatch(pool, p, id, result.chunks, p.generations.get(p.generation));
+			commitGenerationBatch(pool, p, id, result.chunks, p.generations.get(p.generation), admissionPeriod);
 			p.allocationStreak = 0;
-			p.idleSince = null; p.admissionReason = "";
+			p.idleSince = null; p.admissionReason = ""; p.admissionDemand = null; p.note = "Owned batches executing";
 		} else if (!result.ramFailure) {
-			p.admissionSkips++; p.admissionReason = result.reason;
+			p.admissionSkips++; p.admissionReason = result.reason; p.admissionDemand = result.demand;
 			p.note = `Batch admission blocked: ${p.admissionReason}`;
 		} else {
 			p.stats.allocationFails++; p.allocationStreak++;
 			p.admissionReason = "no whole HWGW batch fits host RAM reservations";
+			p.admissionDemand = null;
 			p.note = `Batch admission blocked: ${p.admissionReason}`;
 			p.stats.maxConsecutiveAllocationFails = Math.max(p.stats.maxConsecutiveAllocationFails, p.allocationStreak);
 			// Optional work yields instead of letting a RAM-constrained peer harm
@@ -526,8 +576,7 @@ export function planPipelineBatch(ns, pool) {
 		}
         // Change only future admission spacing. Existing reservations, HWGW timing,
         // ownership, repairs and hot swaps retain their safety rules.
-        const xpAllocation = boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation);
-        p.nextLanding += plan.period / (1 - xpAllocation);
+        p.nextLanding += admissionPeriod;
 		return; // exactly one batch admission attempt per controller tick
 	}
 }
@@ -559,30 +608,55 @@ function refreshPipelineNetwork(ns, pool, now) {
 function beginPipelineTuning(ns, pool, p) {
 	const { api } = pool;
 	const peers = [...pool.pipelines.values()].filter(other => other !== p && other.mode !== "RETIRED");
-	const peerRate = peers.reduce((n, other) => n + (other.runtime?.plan.batchRate || 0), 0);
+	const peerRate = governedPeerRate(pool, p);
 	const freeRate = pool.cfg.maxBatchRate - peerRate;
 	if (freeRate <= 0) { p.note = "Waiting for shared batch-rate capacity"; p.nextRetry = Date.now() + 30_000; return; }
 	const model = api.createPreppedModel(ns, p.name);
 	if (!model) { p.note = "Target is not modelable yet"; p.nextRetry = Date.now() + 30_000; return; }
 	const profile = api.poolProfile(ns, pool.network.hosts, pool.cfg, pool.running);
+	const budget = tuningRamBudget(pool, p, profile.capacity);
+	p.cfg.homeRamBudget = budget.home;
 	p.cfg.minimumPeriod = Math.max(1000 / freeRate, pool.cfg.minimumPeriod);
 	if (p.trial) {
 		// A trial is sized against a conservative capacity slice and a worst-case
 		// pending-chunk estimate, then admitted by the real shared allocator.
 		p.cfg.ramBudget = profile.capacity * 0.25;
-		if (pool.cfg.maxTargets > 2) p.cfg.ramBudget = Math.min(p.cfg.ramBudget, Math.max(0, profile.capacity -
-			peers.reduce((n, peer) => n + (peer.runtime?.plan.ramTime || 0) / (peer.runtime?.plan.period || 1) * 1.25, 0) -
-			(pool.xp?.desiredRam || 0)));
+		if (pool.cfg.maxTargets > 2) p.cfg.ramBudget = Math.min(p.cfg.ramBudget, Math.max(0, budget.remote -
+			Math.max(0, (pool.xp?.desiredRam || 0) - [...(pool.xp?.jobs.values() || [])]
+				.filter(j => j.host === "home").reduce((n, j) => n + j.ram, 0))));
 		const usedSlots = peers.reduce((n, peer) => n + 4 * (peer.runtime?.plan.times.W || 0) /
 			(peer.runtime?.plan.period || 1), 0);
 		p.cfg.minimumPeriod = Math.max(p.cfg.minimumPeriod, 4 * (model.times.W + p.cfg.lead + 1250) /
 			Math.max(4, pool.cfg.maxWorkers - usedSlots));
-	} else p.cfg.ramBudget = Math.max(0, profile.capacity - peers.reduce((n, peer) =>
-		n + (peer.runtime?.plan.ramTime || 0) / (peer.runtime?.plan.period || 1) * 1.25, 0));
+	} else p.cfg.ramBudget = budget.remote;
 	const acceptPlan = p.idleReplanning || p.trial && pool.cfg.maxTargets > 2 ? plan => idlePlanFits(ns, pool, p, plan) : null;
 	p.tuner = api.tuneTargetSteps(ns, p.name, pool.network.hosts, p.cfg, pool.running, model, acceptPlan);
 	p.tuneStarted = Date.now();
 	p.note = "Building a fresh plan with actual chance and shared capacity";
+}
+
+// RAM-time includes home G/W. Subtracting all of it from the remote-only pool
+// can make a small remote fleet permanently appear to have no tuning budget.
+// Actual committed placements provide the split; the allocator remains the
+// final whole-batch proof, including protected home services and overlap.
+function tuningRamBudget(pool, excluded, remoteCapacity) {
+	let remote = 0, home = 0;
+	for (const p of pool.pipelines.values()) {
+		if (p === excluded || !pipelineUsesBudget(p)) continue;
+		let placed = 0, placedHome = 0;
+		for (const b of p.batches?.values() || []) for (const c of b.chunks.values()) {
+			const ramTime = (c.ram || 0) * Math.max(0, c.landAt - c.launchAt);
+			placed += ramTime; if (c.host === "home") placedHome += ramTime;
+		}
+		const homeFraction = placed > 0 ? placedHome / placed : 0;
+		const demand = (p.runtime.plan.ramTime || 0) / (p.runtime.plan.period || 1) *
+			governedBatchScale(pool) * (1 - boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation)) * 1.25;
+		remote += demand * (1 - homeFraction); home += demand * homeFraction;
+	}
+	const state = pool.cfg.homeGw;
+	const homeCapacity = state?.host ? Math.max(0, state.host.maxRam - (state.unrelatedRam || 0) -
+		homeProtectedRam(pool.cfg) - backgroundPrepRam(pool.cfg.prepStates, "home")) : 0;
+	return { remote: Math.max(0, remoteCapacity - remote), home: Math.max(0, homeCapacity - home) };
 }
 
 // Probe one candidate at a time during the yielding tuner. Use the pure allocator,
@@ -678,15 +752,30 @@ function planningInputs(ns, pool, p) {
 		capacity: pool.api.workerFleetCapacity(pool.network.hosts, p.cfg),
 		gap: p.cfg.gap, lead: p.cfg.lead,
 		fleet: pool.network.hosts.map(h => `${h.name}:${h.maxRam}:${h.cores}`).join("|"),
-		homeGw: pool.cfg.homeGw?.host ? `${pool.cfg.homeGw.maxRam}:${pool.cfg.homeGw.cores}:${pool.cfg.homeGw.protectedRam}` : "",
-		peerRate: [...pool.pipelines.values()].filter(q => q !== p).reduce((n, q) => n + (q.runtime?.plan.batchRate || 0), 0) };
+		homeGw: pool.cfg.homeGw?.host ? `${pool.cfg.homeGw.maxRam}:${pool.cfg.homeGw.cores}` : "",
+		batchLimit: pool.cfg.maxBatchRate, launchLimit: pool.cfg.maxLaunches,
+		peerRate: governedPeerRate(pool, p) };
 }
 
-function commitGenerationBatch(pool, p, id, chunks, generation) {
+function planningFingerprint(inputs) {
+	const { level, times, ...structural } = inputs;
+	return JSON.stringify(structural);
+}
+
+function compatiblePlanningInputs(shadow, inputs) {
+	// Let a bounded upward skill change finish the yielding search. Preflight
+	// checks current durations and growth threads before any plan is committed.
+	return shadow.fingerprint === planningFingerprint(inputs) && inputs.level >= shadow.inputs.level &&
+		inputs.level <= shadow.inputs.level + Math.max(10, shadow.inputs.level * .01);
+}
+
+function commitGenerationBatch(pool, p, id, chunks, generation, admissionPeriod = generation.runtime.plan.period) {
 	for (const c of chunks) { c.owner = p; c.generation = generation.number; }
 	pool.api.enqueueChunks(p.queue, chunks);
 	const batch = pool.api.makeBatchState(id, chunks);
 	batch.plan = generation.runtime.plan; batch.cfg = generation.cfg; batch.generationState = generation;
+	batch.admissionPeriod = admissionPeriod;
+	batch.admissionPolicy = { batchLimit: pool.cfg.maxBatchRate, moneyAllocation: 1 - boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation) };
 	p.batches.set(id, batch); p.stats.scheduled++;
 	recordLaunchBudget(pool, chunks);
 }
@@ -706,12 +795,15 @@ export function serviceShadowTune(ns, pool, p) {
 function serviceShadowTuneStep(ns, pool, p) {
 	if (p.mode !== "RUNNING" || p.recovery || p.drain || p.retiring || p.swap || p.generations.size > 1) return;
 	if (!Number.isFinite(p.stats.lastHackAt)) return;
-	const now = Date.now(), inputs = planningInputs(ns, pool, p), fingerprint = JSON.stringify(inputs);
+	const now = Date.now(), inputs = planningInputs(ns, pool, p), fingerprint = planningFingerprint(inputs);
 	const trigger = inputs.formulas !== Boolean(p.runtime.formulas) ? "formulas" :
 		inputs.level >= Math.max(p.tunedLevel + 10, Math.ceil(p.tunedLevel * 1.10)) ? "skill" :
 		inputs.capacity >= Math.max(1, p.tunedCapacity) * 1.25 ? "capacity" :
-		p.tunedHome && p.tunedHome !== `${pool.cfg.homeGw?.maxRam || 0}:${pool.cfg.homeGw?.cores || 1}` ? "home G/W" : "";
-	if (p.shadow && p.shadow.fingerprint !== fingerprint) {
+		p.tunedHome && p.tunedHome !== `${pool.cfg.homeGw?.maxRam || 0}:${pool.cfg.homeGw?.cores || 1}` ? "home G/W" :
+		pool.cfg.schedulerScaling?.batchMode === "auto" && !pool.cfg.schedulerScaling.preferTargets &&
+		inputs.batchLimit > (p.tunedBatchLimit || inputs.batchLimit) * 1.1 ? "throughput" : "";
+	if (p.shadow && !compatiblePlanningInputs(p.shadow, inputs)) {
+		p.lastSwap = { state: "ABORTED", trigger: p.shadow.trigger, reason: "material planning inputs changed during search" };
 		p.shadow.state = "ABORTED"; p.hotSwaps.aborted++; p.shadow = null;
 	}
 	if (!p.shadow) {
@@ -731,9 +823,9 @@ function serviceShadowTuneStep(ns, pool, p) {
 		// Never mutate active cfg while the incremental search yields.
 		s.cfg = { ...p.cfg, generation: s.number,
 			minimumPeriod: Math.max(1000 / freeRate, pool.cfg.minimumPeriod),
-			ramBudget: Math.max(0, pool.api.poolProfile(ns, pool.network.hosts, pool.cfg, pool.running).capacity -
-				[...pool.pipelines.values()].filter(q => q !== p).reduce((n, q) => n +
-					(q.runtime?.plan.ramTime || 0) / (q.runtime?.plan.period || 1) * 1.25, 0)) };
+			ramBudget: 0 };
+		const budget = tuningRamBudget(pool, p, pool.api.poolProfile(ns, pool.network.hosts, pool.cfg, pool.running).capacity);
+		s.cfg.ramBudget = budget.remote; s.cfg.homeRamBudget = budget.home;
 		const accept = s.fitOverlap ? plan => transitionPlanFits(ns, pool, p, plan, s.cfg) : null;
 		s.tuner = pool.api.tuneTargetSteps(ns, p.name, pool.network.hosts, s.cfg, pool.running, model, accept);
 	}
@@ -763,9 +855,11 @@ function serviceShadowTuneStep(ns, pool, p) {
 export function preflightHotSwap(ns, pool, p) {
 	const s = p.shadow, now = Date.now(), api = pool.api;
 	if (!s?.runtime || p.swap || p.recovery || p.drain || !pool.port.empty()) return false;
-	if (s.fingerprint !== JSON.stringify(planningInputs(ns, pool, p))) return false;
+	if (!compatiblePlanningInputs(s, planningInputs(ns, pool, p))) return false;
 	const latestModel = api.createPreppedModel(ns, p.name);
-	if (!latestModel || JSON.stringify(modelAssumptions(latestModel)) !== JSON.stringify(s.modelInputs)) {
+	const modelBlocker = shadowModelBlocker(s, latestModel);
+	if (modelBlocker) {
+		p.lastSwap = { state: "ABORTED", trigger: s.trigger, reason: modelBlocker };
 		s.state = "ABORTED"; p.hotSwaps.aborted++; p.shadow = null;
 		p.shadowRetryAt = now + 2000; return false;
 	}
@@ -802,6 +896,7 @@ export function preflightHotSwap(ns, pool, p) {
 	p.generation = generation.number; p.runtime = generation.runtime; p.cfg = generation.cfg;
 	p.tunedLevel = s.inputs.level; p.tunedCapacity = s.inputs.capacity; p.lastCapacityRetune = now;
 	p.tunedHome = `${pool.cfg.homeGw?.maxRam || 0}:${pool.cfg.homeGw?.cores || 1}`;
+	p.tunedBatchLimit = pool.cfg.maxBatchRate;
 	p.shadow = null; p.serial += batches.length;
 	for (const b of batches) commitGenerationBatch(pool, p, b.id, b.chunks, generation);
 	p.nextLanding = firstH + batches.length * plan.period;
@@ -845,6 +940,31 @@ function modelAssumptions(model) {
 		maxMoney: model.maxMoney, minSecurity: model.minSecurity, formulas: Boolean(model.formulas) };
 }
 
+function shadowModelBlocker(shadow, latest) {
+	if (!latest) return "prepared model unavailable at cutover";
+	const before = shadow.modelInputs, after = modelAssumptions(latest), plan = shadow.runtime.plan;
+	if (before.maxMoney !== after.maxMoney || before.minSecurity !== after.minSecurity || before.formulas !== after.formulas)
+		return "target or Formulas assumptions changed during search";
+	// Faster live actions remain inside the duration already reserved. Workers
+	// add delay to retain the planned call/landing lattice; slower actions do not.
+	if (["H", "G", "W"].some(phase => !Number.isFinite(latest.times[phase]) || !(latest.times[phase] > 0) ||
+		latest.times[phase] > plan.times[phase])) return "action duration exceeds the candidate's reserved time";
+	for (const field of ["hackPercent", "chance"]) {
+		if (before[field] === after[field]) continue;
+		if (!Number.isFinite(before[field]) || !Number.isFinite(after[field]) || after[field] < before[field])
+			return `${field} weakened during search`;
+	}
+	if (typeof latest.growthAnalyze === "function") {
+		// Hack workers cap theft at this plan's steal budget even when skill rises.
+		// Prove the current one-core grow requirement still fits that entire budget.
+		const multiplier = 1 / (1 - Math.min(.89, plan.steal * 1.10));
+		const threads = latest.growthAnalyze(multiplier, 1);
+		if (!Number.isFinite(threads) || Math.ceil(threads) > plan.gEffective)
+			return "current growth requirement exceeds the candidate's restoration threads";
+	} else if (before.hackPercent !== after.hackPercent) return "current growth proof unavailable after skill change";
+	return "";
+}
+
 function transitionPeakRam(pool, now) {
 	const events = [];
 	for (const r of pool.reservations) {
@@ -866,7 +986,10 @@ function generationTerminal(pool, p, number) {
 
 export function serviceHotSwapHealth(ns, pool, p) {
 	const swap = p.swap;
-	if (!swap || p.drain) return false;
+	// A safety rebuild reconciles and prepares this epoch before activation
+	// clears its generations. A stale cutover must not reopen local recovery
+	// while that rebuilt target is still preparing or tuning.
+	if (!swap || p.drain || p.mode !== "RUNNING") return false;
 	const next = p.generations.get(swap.next), old = p.generations.get(swap.old), api = pool.api;
 	if (next.failed && !swap.aborted && !swap.restoring) {
 		const batches = [...p.batches.values()].filter(b => b.generation === next.number);
@@ -1013,7 +1136,7 @@ function updatePipelineProgress(pool, now) {
 
 function stalledPromotionSupport(pool, now) {
 	const lanes = [...pool.pipelines.values()];
-	if (pool.cfg.maxTargets <= 1 || lanes.length < pool.cfg.maxTargets ||
+	if (!promotionCapacityBound(pool) ||
 		lanes.some(p => p.retiring || p.drain)) return null;
 	const survivor = lanes.find(p => !p.trial && productive(p, now));
 	if (!survivor) return null;
@@ -1040,13 +1163,23 @@ function promotionBlockers(pool, now) {
 }
 
 function steadyPromotionSupport(pool, now) {
-	if (pool.cfg.maxTargets <= 1 || pool.pipelines.size < pool.cfg.maxTargets) return null;
+	if (!promotionCapacityBound(pool)) return null;
 	const lanes = [...pool.pipelines.values()];
 	if (lanes.some(p => p.retiring || p.trial || p.mode !== "RUNNING" || p.recovery || p.drain ||
-		!productive(p, now))) return null;
+		p.shadow?.state === "PREFLIGHT" || p.swap || !productive(p, now))) return null;
 	return lanes.reduce((weakest, p) =>
 		!weakest || (p.runtime?.plan.expected || Infinity) < (weakest.runtime?.plan.expected || Infinity)
 			? p : weakest, null);
+}
+
+function promotionCapacityBound(pool) {
+	// An AUTO target ceiling is not a prerequisite for replacing a weak lane.
+	// Two bootstrap lanes can already consume the entire shared batch budget.
+	const scaling = pool.cfg.schedulerScaling, goal = pool.cfg.progressionObjective;
+	const skillGoal = goal?.milestone === "FINAL_SERVER" && goal.limitingResource === "hacking" && goal.moneyCovered;
+	const boundedRate = skillGoal || !scaling || scaling.batchMode === "fixed" || scaling.batch >= scaling.batchCeiling;
+	return pool.cfg.maxTargets > 1 && (pool.pipelines.size >= pool.cfg.maxTargets || boundedRate &&
+		pool.pipelines.size >= 2 && remainingBatchRate(pool) < MIN_TARGET_BATCH_RATE);
 }
 
 function resetPreparedCandidate(prep, reason) {
@@ -1055,8 +1188,7 @@ function resetPreparedCandidate(prep, reason) {
 }
 
 export function remainingBatchRate(pool, excluded = null) {
-	return Math.max(0, pool.cfg.maxBatchRate - [...pool.pipelines.values()]
-		.filter(p => p !== excluded).reduce((n, p) => n + (p.runtime?.plan.batchRate || 0), 0));
+	return Math.max(0, pool.cfg.maxBatchRate - governedPeerRate(pool, excluded));
 }
 
 export function admissionIncomeFloor(pool, minimumExpected, replacing = false) {
@@ -1067,9 +1199,10 @@ export function admissionIncomeFloor(pool, minimumExpected, replacing = false) {
 
 export function elasticAdmissionBlocker(pool, now = Date.now()) {
 	const capacity = schedulerCapacity(pool, now);
-	const blocked = capacity.constraints.find(c => ["RECOVERY", "WORKER_LIMIT", "LAUNCH_RATE", "RAM", "XP_RAM"].includes(c));
+	const blocked = capacity.constraints.find(c => ["RECOVERY", "WORKER_LIMIT", "RAM", "XP_RAM"].includes(c));
 	if (blocked) return blocked;
-	if (remainingBatchRate(pool) < .25) return "BATCH_RATE";
+	if (remainingBatchRate(pool) < MIN_TARGET_BATCH_RATE) return "BATCH_RATE";
+	if (capacity.constraints.includes("LAUNCH_RATE")) return "LAUNCH_RATE";
 	if ([...pool.pipelines.values()].some(p => p.trial || !productive(p, now))) return "WAITING_STABLE_LANES";
 	return "";
 }
@@ -1137,7 +1270,7 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	updatePipelineProgress(pool, now);
 	const anchor = pool.pipelines.get(pool.anchor);
 	const full = pool.pipelines.size >= cfg.maxTargets;
-	if (cfg.maxTargets > 1 && full) {
+	if (promotionCapacityBound(pool)) {
 		const lanes = [...pool.pipelines.values()];
 		const retiring = lanes.find(p => p.retiring || p.mode === "DRAINING");
 		if (retiring) {
@@ -1178,6 +1311,8 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 		const target = prep.target ? ` ${prep.target}` : "";
 		pool.note = `${steady ? "Promotion" : "Stalled target replacement"} prep${target} over ${support.name}: ${prep.status || "WAITING"}` +
 			(prep.reason ? ` | ${prep.reason}` : "");
+		pool.admission = { decision: "PREP REPLACEMENT", candidate: prep.target || undefined, replacing: support.name,
+			expectedLanes: lanes.length, reason: full ? "target slots full" : "shared batch budget full; compare a replacement" };
 		if (prep.status !== "READY" || prep.active || !prep.target) return;
 		const candidatePotential = Number(prep.candidate?.potential) || 0;
 		if (!(candidatePotential > threshold)) {
@@ -1212,6 +1347,12 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			const trial = [...pool.pipelines.values()].find(p => p.trial);
 			pool.admission = { decision: trial ? "TRIAL" : "HOLD", reason: blocker, candidate: trial?.name,
 				marginalIncome: (trial?.runtime?.plan.expected || 0) - (trial?.replacedExpected || 0), expectedLanes: pool.pipelines.size };
+			const prep = cfg.backgroundPrep;
+			if (prep.enabled !== false && !prep.active && !prep.target && !prep.candidate) {
+				prep.status = "PAUSED";
+				prep.reason = `next target admission held: ${blocker}` + (blocker === "BATCH_RATE"
+					? `; ${remainingBatchRate(pool).toFixed(3)} batches/s available, ${MIN_TARGET_BATCH_RATE.toFixed(3)} required` : "");
+			}
 			pool.note = `Admission waiting: ${blocker}`;
 			return;
 		}
@@ -1257,7 +1398,7 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 		pool.pendingAdmission = "";
 		return;
 	}
-	if (remainingBatchRate(pool) < 0.25) {
+	if (remainingBatchRate(pool) < MIN_TARGET_BATCH_RATE) {
 		pool.note = "No spare combined batch-rate budget; prepared target remains READY"; return;
 	}
 	if (cfg.backgroundPrep.active && !allowPrepLaunch) {
@@ -1280,12 +1421,14 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 	pool.lastAdmission = now;
 	pool.note = `Admitting ${p.name}; ${anchor.name} keeps earning`;
 	const prep = cfg.backgroundPrep;
-	prep.status = "ADMITTED"; prep.reason = "handed off to an independent target pipeline";
+	prep.status = prep.enabled === false ? "DISABLED" : "WAITING";
+	prep.reason = prep.enabled === false ? "disabled" : `${p.name} handed off; waiting for the next admission opportunity`;
 	prep.target = ""; prep.candidate = null; prep.health = null; prep.readyAt = 0; prep.scan = null;
 }
 
 function incomeGuard(pool, incumbent, trial, now) {
 	return { incumbent: incumbent.name, trial: trial.name, admitted: now,
+		batchLimit: pool.cfg.maxBatchRate, moneyAllocation: 1 - boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation),
 		peers: [...pool.pipelines.values()].filter(p => p !== trial).map(p => ({ name: p.name,
 			baseline: pool.api.incomeRate(p.stats, 60_000, now), allocationFails: p.stats.allocationFails })),
 		baseline: pool.api.incomeRate(incumbent.stats, 60_000, now),
@@ -1295,6 +1438,20 @@ function incomeGuard(pool, incumbent, trial, now) {
 
 function sumMisses(stats) { return Object.values(stats.misses).reduce((n, value) => n + value, 0); }
 
+// A governor backoff or a deliberate shift to XP slows every lane. Compare the
+// trial against the same money allocation, while still charging it for any
+// throughput it takes from its peers. Never lower the hurdle for the trial's
+// own admission, contention, misses or a weaker plan.
+function trialBaselineScale(pool, guard, p, now) {
+	const scale = policy => (guard.batchLimit > 0 ? Math.min(1, policy.batchLimit / guard.batchLimit) : 1) *
+		(guard.moneyAllocation > 0 ? Math.min(1, policy.moneyAllocation / guard.moneyAllocation) : 1);
+	const current = scale({ batchLimit: pool.cfg.maxBatchRate, moneyAllocation: 1 - boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation) });
+	const paid = p?.stats.income.filter(s => s.time >= now - 60000 && s.money > 0 && s.admissionPolicy);
+	// Restoring a budget cannot raise the income hurdle before the previously
+	// admitted slower work lands. Follow the same rolling payout window.
+	return paid?.length ? Math.min(current, paid.reduce((n, s) => n + scale(s.admissionPolicy), 0) / paid.length) : current;
+}
+
 export function monitorPipelineLoad(ns, pool, now) {
 	updatePipelineProgress(pool, now);
 	pool.slowTicks = pool.slowTicks.filter(time => time >= now - 60_000);
@@ -1302,6 +1459,7 @@ export function monitorPipelineLoad(ns, pool, now) {
 	if (!guard) return;
 	const trial = pool.pipelines.get(guard.trial), incumbent = pool.pipelines.get(guard.incumbent);
 	if (!trial || !incumbent || trial.retiring) return;
+	const baselineScale = trialBaselineScale(pool, guard, incumbent, now), baseline = guard.baseline * baselineScale;
 	// Admission skips are scheduler backpressure, not evidence that a trial is
 	// damaging the incumbent. Near the global launch budget, a healthy incumbent
 	// can accumulate skips while still matching its income model. Kill a trial
@@ -1337,7 +1495,7 @@ export function monitorPipelineLoad(ns, pool, now) {
 		// continuous earning window, successful batches and enough measured income
 		// to replace the admission baseline or sustain its own model. Any new miss
 		// restarts the evidence; a dead richer incumbent cannot set an unreachable floor.
-		const incomeFloor = Math.min(guard.baseline * 0.95, trial.runtime?.plan.expected * 0.70);
+		const incomeFloor = Math.min(baseline * 0.95, trial.runtime?.plan.expected * 0.70);
 		const healthy = productive(trial, now) && !trial.repair?.active &&
 			Number.isFinite(income) && income > 0 && income >= incomeFloor;
 		if (!healthy || guard.takeoverMisses !== misses) {
@@ -1372,13 +1530,14 @@ export function monitorPipelineLoad(ns, pool, now) {
 	}
 	const a = pool.api.incomeRate(incumbent.stats, 60_000, now);
 	const b = pool.api.incomeRate(trial.stats, 60_000, now);
-	const peers = (guard.peers || []).map(before => ({ before, p: pool.pipelines.get(before.name) })).filter(v => v.p);
-	const peerBaseline = peers.reduce((n, v) => n + v.before.baseline, 0);
+	const peers = (guard.peers || []).map(before => ({ before, p: pool.pipelines.get(before.name) })).filter(v => v.p)
+		.map(v => ({ ...v, baseline: v.before.baseline * trialBaselineScale(pool, guard, v.p, now) }));
+	const peerBaseline = peers.reduce((n, v) => n + v.baseline, 0);
 	const peerIncome = peers.reduce((n, v) => n + pool.api.incomeRate(v.p.stats, 60_000, now), 0);
-	const minimumGain = trial.replacing ? trial.minimumExpected * .70 : peerBaseline * .05;
-	const peersPoor = pool.cfg.maxTargets > 2 && (peerIncome + b < peerBaseline + minimumGain || peers.some(({before,p}) =>
-		productive(p, now) && pool.api.incomeRate(p.stats, 60_000, now) < before.baseline * .70));
-	const poor = !(b > 0) || !Number.isFinite(b) || a < guard.baseline * 0.70 || a + b < guard.baseline * 0.95 || peersPoor;
+	const minimumGain = trial.replacing ? trial.minimumExpected * .70 * baselineScale : peerBaseline * .05;
+	const peersPoor = pool.cfg.maxTargets > 2 && (peerIncome + b < peerBaseline + minimumGain || peers.some(({baseline,p}) =>
+		productive(p, now) && pool.api.incomeRate(p.stats, 60_000, now) < baseline * .70));
+	const poor = !(b > 0) || !Number.isFinite(b) || a < baseline * 0.70 || a + b < baseline * 0.95 || peersPoor;
 	if (poor) guard.badSince ||= now;
 	else guard.badSince = 0;
 	if (trial.trial) trial.trialNote = poor ? "measured income below admission baseline"
@@ -1403,6 +1562,11 @@ export function monitorPipelineLoad(ns, pool, now) {
 	}
 	if (!trial.trial && now - guard.admitted >= 10 * 60_000 && !poor) {
 		guard.admitted = now; guard.baseline = a;
+		guard.batchLimit = pool.cfg.maxBatchRate; guard.moneyAllocation = 1 - boundedXpAllocation(pool.cfg.hackingPolicy?.xpAllocation);
+		for (const before of guard.peers || []) {
+			const peer = pool.pipelines.get(before.name);
+			if (peer) { before.baseline = pool.api.incomeRate(peer.stats, 60_000, now); before.allocationFails = peer.stats.allocationFails; }
+		}
 		guard.misses = sumMisses(incumbent.stats); guard.trialMisses = sumMisses(trial.stats); guard.fallbacks = incumbent.stats.recoveries;
 		guard.allocationFails = incumbent.stats.allocationFails;
 	}

@@ -69,6 +69,51 @@ test('dynamic XP ceiling still preserves tiny-fleet money reservations and publi
     assert.equal(capacity.xp.allocatedRam, 4);
 });
 
+test('read-only shadow tuning keeps XP running; actual cutover preflight still gets RAM priority', () => {
+    const f = fixture(), lane = f.pool.pipelines.get('money');
+    lane.name = 'money'; lane.shadow = { state: 'SHADOW' };
+    f.tick(); assert.equal(f.pool.xp.status, 'RUNNING'); assert.equal(f.launches.length, 1);
+    f.tick(); assert.deepEqual(f.kills, []);
+    lane.shadow.state = 'PREFLIGHT'; f.tick();
+    assert.equal(f.pool.xp.status, 'WAITING_MONEY'); assert.equal(f.kills.length, 1);
+    assert.match(f.pool.xp.reason, /money CUTOVER_PREFLIGHT/);
+});
+
+for (const mode of ['PREPARING', 'TUNING', 'RECOVERING', 'DRAINING']) {
+    test(`endgame XP uses unreserved RAM during peer ${mode} while a healthy money lane earns`, () => {
+        const f = fixture(), lane = f.pool.pipelines.get('money');
+        f.cfg.progressionObjective = { milestone: 'FINAL_SERVER', limitingResource: 'hacking', moneyCovered: true };
+        Object.assign(lane, { name: 'money', stats: { pipeline: { completed: 1 }, money: 1000, lastHackAt: f.clock.now } });
+        const peer = { name: 'clarkinc', mode, queue: [] };
+        if (mode === 'RECOVERING') { peer.mode = 'RUNNING'; peer.recovery = {}; }
+        if (mode === 'DRAINING') peer.drain = {};
+        f.pool.pipelines.set(peer.name, peer);
+        f.api.reserveChunk(f.pool.reservations, { host: 'remote', ram: 20, launchAt: f.clock.now + 5000,
+            landAt: f.clock.now + 10000, status: 'queued', phase: 'W' });
+        f.tick(); assert.equal(f.pool.xp.status, 'RUNNING'); assert.equal(f.launches[0].ram, 44);
+        assert.equal(f.available(), 0); assert.equal(f.launches[0].args[0], 'alpha');
+        f.tick(); assert.deepEqual(f.kills, [], 'a busy peer alone must not cancel independent XP');
+    });
+}
+
+for (const guard of ['ordinary-goal', 'cash', 'no-payout', 'stale-income', 'future-income', 'anchor-recovery', 'cutover']) {
+    test(`endgame borrowing still waits for money with ${guard}`, () => {
+        const f = fixture(), lane = f.pool.pipelines.get('money');
+        f.cfg.progressionObjective = { milestone: 'FINAL_SERVER', limitingResource: 'hacking', moneyCovered: true };
+        Object.assign(lane, { name: 'money', stats: { pipeline: { completed: 1 }, money: 1000, lastHackAt: f.clock.now } });
+        f.pool.pipelines.set('clarkinc', { name: 'clarkinc', mode: 'PREPARING', queue: [] });
+        if (guard === 'ordinary-goal') f.cfg.progressionObjective.milestone = 'DAEDALUS';
+        if (guard === 'cash') f.cfg.progressionObjective.moneyCovered = false;
+        if (guard === 'no-payout') lane.stats.money = 0;
+        if (guard === 'stale-income') lane.stats.lastHackAt -= 120001;
+        if (guard === 'future-income') lane.stats.lastHackAt++;
+        if (guard === 'anchor-recovery') lane.recovery = {};
+        if (guard === 'cutover') lane.shadow = { state: 'PREFLIGHT' };
+        f.tick(); assert.equal(f.pool.xp.status, 'WAITING_MONEY'); assert.equal(f.launches.length, 0);
+        assert.match(f.pool.xp.reason, /clarkinc PREPARING/);
+    });
+}
+
 test('money admission reclaims XP RAM and reserves the same batch without touching other processes', () => {
     const f = fixture(); f.tick(); assert.equal(f.available(), 0);
     const xpPid = f.launches[0].pid;
@@ -103,6 +148,45 @@ test('XP cannot use active, preparing or pending money targets, nor exceed share
         if (block === 'RAM') f.api.reserveChunk(f.pool.reservations, { host: 'remote', ram: 64,
             launchAt: f.clock.now + 5000, landAt: f.clock.now + 10000, status: 'queued', phase: 'G' });
         f.tick(); assert.equal(f.launches.length, 0, block);
+    }
+});
+
+test('XP distinguishes RAM reservations, worker commitments, launch budgets and failed execution', () => {
+    for (const blocker of ['RAM', 'workers', 'launches', 'exec']) {
+        const f = fixture();
+        if (blocker === 'RAM') f.api.reserveChunk(f.pool.reservations, { host: 'remote', ram: 64,
+            launchAt: f.clock.now + 5000, landAt: f.clock.now + 10000, status: 'queued', phase: 'G' });
+        if (blocker === 'workers') { f.cfg.maxWorkers = 16; f.pool.pipelines.get('money').queue = Array(12).fill({}); }
+        if (blocker === 'launches') f.pool.launchBuckets.set(Math.floor(f.clock.now / 250), 8);
+        if (blocker === 'exec') f.ns.exec = () => 0;
+        f.tick();
+        const status = f.xp.xpPipelineStatus(f.ns, f.pool).xp;
+        assert.equal(status.state, { RAM: 'WAITING_RAM', workers: 'WAITING_WORKERS', launches: 'WAITING_LAUNCH', exec: 'WAITING_EXEC' }[blocker]);
+        assert.equal(status.availableRam, blocker === 'RAM' ? 0 : 64);
+        assert.match(status.reason, { RAM: /money reservations/, workers: /worker commitments/, launches: /launch budget/, exec: /launch failed/ }[blocker]);
+        assert.equal(status.workers, 0); assert.equal(f.launches.length, 0);
+    }
+});
+
+test('waiting XP work can report a fresh measured total XP ETA from income and university work', () => {
+    const f = fixture(), balance = loadScript('lib/milestone-balance.js', f.clock);
+    const objective = { resetEpoch: '4:1:2', milestone: 'FINAL_SERVER', requiredHacking: 9000, requiredCash: 0 };
+    f.cfg.progressionObjective = objective;
+    f.cfg.hackingPolicy = { mode: 'XP', targetLevel: 9000, multipliers: { HackingLevelMultiplier: 1 } };
+    f.ns.formulas.skills = { calculateExp: () => 101000 };
+    f.pool.xp.status = 'WAITING_RAM';
+    f.cfg.milestoneEvidence = { key: balance.milestoneKey(objective), safe: true, generatedAt: f.clock.now,
+        xp: { source: 'measured', rate: 1000 } };
+    const status = f.xp.xpPipelineStatus(f.ns, f.pool);
+    assert.equal(status.xp.observedTotalXpPerSecond, 1000);
+    assert.equal(status.progress.etaMs, 100000); assert.equal(status.xp.workers, 0);
+    // No positive wave model may disguise unsafe, stale or noisy total evidence.
+    f.pool.xp.status = 'RUNNING'; f.pool.xp.samples = [1000, 1000, 1000];
+    for (const change of ['unsafe', 'stale', 'noisy']) {
+        f.cfg.milestoneEvidence.safe = change !== 'unsafe';
+        f.cfg.milestoneEvidence.generatedAt = f.clock.now - (change === 'stale' ? 15001 : 0);
+        f.cfg.milestoneEvidence.xp.source = change === 'noisy' ? 'UNKNOWN (unstable or zero)' : 'measured';
+        assert.equal(f.xp.xpPipelineStatus(f.ns, f.pool).progress.etaMs, null, change);
     }
 });
 
@@ -143,4 +227,24 @@ test('a due money launch can reclaim same-host XP RAM without poisoning the batc
         f.pool.running, f.pool.runningByChunk, null);
     assert.deepEqual(f.kills, [xpPid]); assert.equal(batch.poisoned, false); assert.equal(stats.execFails.H, 0);
     assert.ok(f.pool.runningByChunk.has('money-H'));
+});
+
+for(const guard of ['available','future-money','launch-limit','worker-limit']) test(`new cloud RAM joins prepared XP without restarting the wave: ${guard}`, () => {
+    const f=fixture();f.tick();const originalPid=f.launches[0].pid;
+    f.pool.network.hosts.push({name:'new-cloud',maxRam:64,cores:1});
+    f.pool.foreign.set('new-cloud',0);
+    if(guard==='future-money')f.api.reserveChunk(f.pool.reservations,{host:'new-cloud',ram:64,
+        launchAt:f.clock.now+1000,landAt:f.clock.now+10000,status:'queued',phase:'G'});
+    if(guard==='launch-limit')f.pool.launchBuckets.set(Math.floor(f.clock.now/250),8);
+    if(guard==='worker-limit')f.cfg.maxWorkers=4;
+    f.tick();
+    assert.ok(f.processes.has(originalPid));assert.deepEqual(f.kills,[]);
+    assert.equal(f.launches.length,guard==='available'?2:1);
+    if(guard==='available'){
+        const added=f.launches[1];assert.equal(added.host,'new-cloud');assert.equal(added.threads,32);
+        assert.ok(f.pool.running.has(added.pid));assert.equal(f.pool.xp.jobs.size,2);
+        assert.equal(f.api.availableRam(f.ns,f.pool.network.hosts[1],f.cfg,f.pool.running,
+            f.pool.reservations,f.clock.now,Infinity,f.pool.foreign),0);
+        f.tick();assert.equal(f.launches.length,2,'unchanged capacity cannot launch duplicate workers');
+    }
 });

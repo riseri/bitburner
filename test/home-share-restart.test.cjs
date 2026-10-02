@@ -5,7 +5,7 @@ const { Clock, loadScript } = require('./helpers.cjs');
 function fixture(maxRam = 128) {
     const clock = new Clock(), processes = new Map(), killed = [], launches = [], logs = [];
     const costs = { 'share-worker.js': 4, 'manual.js': 24, 'darknet-manager.js': 16,
-        'darknet-agent.js': 15.9, 'bootstrap.js': 4, 'supervisor.js': 32 };
+        'darknet-agent.js': 15.9, 'bootstrap.js': 4, 'supervisor.js': 32, 'daemon.js': 24, 'fleet-manager.js': 8 };
     let nextPid = 10;
     const add = (filename, threads = 1, args = [], host = 'home') => {
         const process = { filename, threads, args, host, pid: nextPid++ };
@@ -87,4 +87,29 @@ test('supervisor restart reserves enough sharing RAM for both bootstrap and rest
     assert.deepEqual(f.killed,[share.pid]); assert.ok(f.processes.has(manual.pid));
     assert.deepEqual(f.launches.map(p => p.filename),['bootstrap.js','supervisor.js']);
     assert.ok(!f.logs.some(line => line.startsWith('ERROR')));
+});
+
+test('supervisor restart reloads home scheduler controllers before bootstrap can adopt their old PIDs', async () => {
+    const f=fixture(512),saved=['--max-targets','auto','--max-batch-rate','auto','--max-launches','auto'];
+    const supervisor=f.add('supervisor.js',1,saved),daemon=f.add('daemon.js'),fleet=f.add('fleet-manager.js');
+    const manual=f.add('manual.js'),darknet=f.add('darknet-manager.js'),remote=f.add('daemon.js',1,[],'cloud-0');
+    f.ns.sleep=async ms=>{
+        if(ms===1000){assert.ok(!f.processes.has(supervisor.pid));assert.ok(f.processes.has(daemon.pid));}
+        if(ms===2000){
+            assert.ok(!f.processes.has(daemon.pid));assert.ok(!f.processes.has(fleet.pid));
+            const bootstrap=f.launches.find(p=>p.filename==='bootstrap.js');f.processes.delete(bootstrap.pid);
+            assert.ok(f.ns.run('supervisor.js',{threads:1},...saved));
+        }
+    };
+    await loadScript('supervisor-restart.js',f.clock).main(f.ns);
+    assert.deepEqual(f.killed,[supervisor.pid,daemon.pid,fleet.pid]);
+    for(const p of [manual,darknet,remote])assert.ok(f.processes.has(p.pid));
+    assert.deepEqual(f.launches.at(-1).args,saved);assert.ok(!f.logs.some(line=>line.startsWith('ERROR')));
+});
+
+for(const blocked of ['supervisor.js','daemon.js'])test(`failed ${blocked} stop prevents a stale-code reload`,async()=>{
+    const f=fixture(512);f.add('supervisor.js');f.add('daemon.js');f.add('fleet-manager.js');
+    const kill=f.ns.kill;f.ns.kill=pid=>f.processes.get(pid)?.filename===blocked?false:kill(pid);
+    await loadScript('supervisor-restart.js',f.clock).main(f.ns);
+    assert.equal(f.launches.length,0);assert.match(f.logs.join('\n'),/reload cancelled.*stale code/);
 });

@@ -2,7 +2,7 @@ import { augmentationContext, makeProgressionSnapshot } from "lib/augmentation-c
 import { observeProgress, progressionObjective } from "lib/progression-objective.js";
 import { bn4Route, routeCities } from "lib/bitnode-route.js";
 import { decideAugmentationReset, resetDecisionSummary } from "lib/augmentation-reset-policy.js";
-import { resetEconomics, recoveryResources } from "lib/augmentation-reset-context.js";
+import { resetEconomics, recoveryResources, observeEndgameXp } from "lib/augmentation-reset-context.js";
 import { migrateResetState, observeResetRecovery } from "lib/augmentation-recovery.js";
 import { routeSelectiveFaction, routeProgramCreation, routeOwnsWork, routeIntelligence, routeBackdoorYield, routeUnlock, routeEndgame, routeDaedalus, trainHacking } from "lib/route-actions.js";
 import { buildAugmentationPlan } from "lib/augmentation-plan.js";
@@ -14,7 +14,7 @@ import { PORTS } from "lib/ports.js";
 import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
 import { factionWorkAnalysis, formulaDonationForRep, formulaFavorProjection } from "lib/formulas.js";
 import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
-import { quoteEndgamePackage, purchaseEndgamePackage } from "lib/augmentation-endgame.js";
+import { quoteEndgamePackage, purchaseEndgamePackage, donateEndgameReputation } from "lib/augmentation-endgame.js";
 
 const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP = "bootstrap.js";
 const NEUROFLUX = "NeuroFlux Governor", MAX_NEUROFLUX_PURCHASES = 100;
@@ -53,6 +53,7 @@ export async function tickAugmentationLoop(ns, cfg, state) {
     state.resetDecision = null;
     if (!singularityAvailable(reset)) return tickAugmentationDecision(ns, cfg, state);
     const context = augmentationContext(ns, state);
+    observeEndgameXp(ns, context, state);
     if (state.recoveryBaseline) observeResetRecovery(state, context, recoveryResources(ns, context));
     state.currentIncome=context.income;
     const status = await tickAugmentationDecision(ns, cfg, state, context);
@@ -159,35 +160,102 @@ async function tickEndgame(ns, cfg, state, context, pending) {
             state.nextEndgameQuoteAt = 0; // Newly joined sellers can change the useful package.
         }
     }
-    const decisionFor = names => decideAugmentationReset({ ...resetEconomics(ns, context, plan, state, names),
+    const decisionFor = (names, acquisitionMs = 0) => decideAugmentationReset({ ...resetEconomics(ns, context, plan, state, names), acquisitionMs,
         completionGoal: true, installed: context.installed, pending: names, plan, minInstall: cfg.minInstall,
         mode: cfg.resetPolicy || "auto", resetEpoch: context.resetEpoch,
         objectiveKey: JSON.stringify(["FINAL_SERVER", objective.requiredHacking]), history: state.resetHistory });
-    let decision = decisionFor(pending), purchases = null;
-    if (decision.action !== "INSTALL" && cfg.purchase && state.endgameAcquired !== context.resetEpoch &&
+    let decision = decisionFor(pending), purchases = null, fundingStatus = null, projected = null;
+    const useful = d => d.advantage || cfg.resetPolicy === "threshold" && d.action === "INSTALL";
+    const qualified = decision.advantage || cfg.resetPolicy === "threshold" && pending.length >= cfg.minInstall;
+    if (state.endgameFunding && (!cfg.purchase || qualified)) state.endgameFunding = null;
+    if (state.endgameFunding && ns.singularity.getFactionRep(state.endgameFunding.faction) >= state.endgameFunding.requiredRep)
+        state.nextEndgameQuoteAt = 0;
+    if (decision.action !== "INSTALL" && cfg.purchase && !qualified &&
         Date.now() >= (state.nextEndgameQuoteAt || 0)) {
         state.nextEndgameQuoteAt = Date.now() + 30000;
         try {
-            const proposal = quoteEndgamePackage(ns, cfg, context);
-            const projected = decisionFor([...pending, ...proposal.purchases.map(item => item.name)]);
-            if (proposal.purchases.length && (projected.advantage || cfg.resetPolicy === "threshold" && projected.action === "INSTALL")) {
-                purchases = purchaseEndgamePackage(ns, cfg, context, proposal);
-                if (purchases.purchased) {
-                    state.endgameAcquired = context.resetEpoch;
-                    pending = queuedAugmentations(context.installed, ns.singularity.getOwnedAugmentations(true));
-                    decision = decisionFor(pending);
+            const options = { fundReputation: true, maxPurchases: state.endgameFunding?.purchaseLimit,
+                reserveFloor: state.endgameFundingFloor || 0, neurofluxOnly: state.endgameFunding?.neurofluxOnly || false };
+            let proposal = quoteEndgamePackage(ns, cfg, context, options);
+            projected = decisionFor([...pending, ...proposal.purchases.map(item => item.name)], proposal.acquisitionMs);
+            // A slow ordinary augmentation or oversized rep target must not hide
+            // a useful NeuroFlux cycle. Try NFG alone, then bounded smaller lots.
+            if (!useful(projected) && !state.endgameFunding) {
+                let limit = options.maxPurchases;
+                for (let attempt = 0; attempt < 8; attempt++) {
+                    const alternative = quoteEndgamePackage(ns, cfg, context, { ...options, neurofluxOnly: true, maxPurchases: limit });
+                    const alternativeDecision = decisionFor([...pending, ...alternative.purchases.map(item => item.name)], alternative.acquisitionMs);
+                    if (alternative.purchases.length && useful(alternativeDecision)) { proposal = alternative; projected = alternativeDecision; break; }
+                    if (alternative.purchases.length <= 1) break;
+                    limit = Math.floor(alternative.purchases.length / 2);
                 }
             }
-            state.endgameReason = projected.reason;
-        } catch (error) { state.endgameReason = `Endgame quote unavailable: ${String(error?.message ?? error)}`; }
+            state.endgameQuote = { neurofluxLevels: proposal.purchases.filter(item => item.name === NEUROFLUX).length,
+                augmentations: proposal.purchases.filter(item => item.name !== NEUROFLUX).map(item => item.name), cost: proposal.cost };
+            if (proposal.purchases.length && useful(projected)) {
+                state.endgameFundingFloor = Math.max(state.endgameFundingFloor || 0, proposal.floor);
+                const goal = proposal.funding[0];
+                if (goal) {
+                    state.endgameFunding = { ...goal, purchaseLimit: proposal.purchases.length, neurofluxOnly: proposal.neurofluxOnly };
+                    if (goal.strategy === "DONATE" && Date.now() >= (state.nextEndgameDonationAt || 0)) {
+                        const donation = donateEndgameReputation(ns, cfg, context, proposal, goal);
+                        state.nextEndgameQuoteAt = donation.donated ? 0 : Date.now() + 60000;
+                        state.nextEndgameDonationAt = donation.donated ? 0 : Date.now() + 60000;
+                        fundingStatus = { state: donation.donated ? "ACTIVE" : "BLOCKED", phase: "DONATE",
+                            action: donation.donated ? donation.reason : "", recommendation: donation.reason };
+                        if (donation.donated) state.endgameFunding = null;
+                    }
+                } else {
+                    state.endgameFunding = null;
+                    purchases = purchaseEndgamePackage(ns, cfg, context, proposal);
+                    if (purchases.purchased) {
+                        pending = queuedAugmentations(context.installed, ns.singularity.getOwnedAugmentations(true));
+                        decision = decisionFor(pending);
+                    }
+                }
+            } else {
+                state.endgameFunding = null;
+            }
+            state.endgameReason = proposal.purchases.length ? projected.reason : proposal.reason;
+        } catch (error) { state.endgameFunding = null; state.endgameReason = `Endgame quote unavailable: ${String(error?.message ?? error)}`; }
     }
+    if (!fundingStatus && state.endgameFunding) fundingStatus = handleEndgameReputation(ns, cfg, state, context, state.endgameFunding);
+    if (fundingStatus) state.endgameReason = fundingStatus.recommendation;
+    if (!pending.length) decision = { ...decision, reason: cfg.purchase ? state.endgameReason || decision.reason : "Endgame purchases disabled" };
     state.resetHistory = decision.history; state.resetDecision = decision;
     if (decision.action === "INSTALL") return handleInstallation(ns, cfg, state, null, pending.length, true);
-    return { ...routeEndgame(ns, cfg, state), queued: pending.length,
+    return { ...(fundingStatus || routeEndgame(ns, cfg, state)), queued: pending.length,
         ...(purchases?.purchased ? { action: `Queued ${purchases.purchased} endgame upgrades; measuring reset advantage` }
             : joined ? { action: `Joined ${joined} for endgame upgrade access` } : {}),
-        endgame: { reason: pending.length ? decision.reason : state.endgameReason || decision.reason,
-            continueEtaMs: decision.wait.totalMs, resetEtaMs: decision.installNow.etaMs, purchases } };
+        endgame: { reason: fundingStatus?.recommendation || (pending.length ? decision.reason : state.endgameReason || decision.reason),
+            continueEtaMs: projected?.wait.totalMs ?? decision.wait.totalMs,
+            resetEtaMs: projected?.installNow.etaMs ?? decision.installNow.etaMs,
+            recoverySource: projected?.recoverySource ?? decision.recoverySource,
+            funding: state.endgameFunding, purchases, xp: context.endgameXp, quote: state.endgameQuote,
+            neurofluxQueued: pending.filter(name => name === NEUROFLUX).length } };
+}
+
+function handleEndgameReputation(ns, cfg, state, context, goal) {
+    const rep = ns.singularity.getFactionRep(goal.faction), gap = Math.max(0, goal.requiredRep - rep);
+    goal.repGap = gap;
+    const note = `Earn ${Math.ceil(gap)} reputation with ${goal.faction} for the endgame upgrade package`;
+    if (goal.strategy === "DONATE") return { state: "WAITING", phase: "DONATE", recommendation: "Endgame donation retry cooling down" };
+    if (!cfg.work || !cfg.purchase) return { state: "WAITING", phase: "REPUTATION", recommendation: `${note}; automatic work/purchases disabled` };
+    if (resetEpoch(ns.getResetInfo()) !== context.resetEpoch || ns.getHackingLevel() >= context.finalRequirement ||
+        !ns.getPlayer().factions.includes(goal.faction)) return { state: "WAITING", phase: "REPUTATION", recommendation: "Endgame faction/reset state changed; replanning" };
+    const current = ns.singularity.getCurrentWork();
+    if (!current && ns.singularity.isBusy()) return { state: "BLOCKED", phase: "REPUTATION", recommendation: "Waiting for the current Singularity action before endgame faction work" };
+    if (current && !ownedCurrentWork(current, state)) return { state: "BLOCKED", phase: "REPUTATION", recommendation: `Preserving current ${current.type || "player"} activity; ${note}` };
+    if (matchingFactionWork(current, goal.faction, goal.workType)) return { state: "ACTIVE", phase: "REPUTATION", recommendation: note };
+    if (!ns.singularity.getFactionWorkTypes(goal.faction).includes(goal.workType)) return { state: "BLOCKED", phase: "REPUTATION", recommendation: `${goal.faction} work availability changed; replanning` };
+    const started = ns.singularity.workForFaction(goal.faction, goal.workType, cfg.focusWork);
+    if (started) {
+        state.ownedClass = null; state.ownedCompany = null; state.ownedCrime = null; state.ownedProgram = null;
+        state.ownedWork = { faction: goal.faction, workType: goal.workType };
+    }
+    return { state: started ? "ACTIVE" : "BLOCKED", phase: "REPUTATION",
+        action: started ? `Started ${goal.workType} work for ${goal.faction} to fund endgame upgrades` : "",
+        recommendation: started ? note : `Could not start endgame work for ${goal.faction}; retrying` };
 }
 
 async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold = false) {
@@ -229,7 +297,7 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
     // bounded, synchronous pass only after all installation checks have passed.
     // A failed installation retry must not spend another slice of the reserve.
     if (state.neurofluxPass?.epoch !== state.resetEpoch) {
-        state.neurofluxPass = { ...buyNeuroFluxBeforeInstall(ns, cfg), epoch: state.resetEpoch };
+        state.neurofluxPass = { ...buyNeuroFluxBeforeInstall(ns, cfg, state.endgameFundingFloor || 0), epoch: state.resetEpoch };
         if (state.neurofluxPass.purchased) ns.print?.(`NeuroFlux: bought ${state.neurofluxPass.purchased} levels for ${Math.ceil(state.neurofluxPass.spent)}; ${state.neurofluxPass.reason}`);
     }
     const neuroflux = state.neurofluxPass;
@@ -244,7 +312,7 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
     return { state: "RESETTING", phase: "INSTALL", plan, action: `Installing ${queued} augmentations`, recommendation: "", queued, neuroflux };
 }
 
-function buyNeuroFluxBeforeInstall(ns, cfg) {
+function buyNeuroFluxBeforeInstall(ns, cfg, protectedFloor = 0) {
     const result = { purchased: 0, spent: 0, reason: "Purchasing disabled" };
     if (!cfg.purchase) return result;
     const finish = reason => ({ ...result, reason });
@@ -252,7 +320,7 @@ function buyNeuroFluxBeforeInstall(ns, cfg) {
         const epoch = resetEpoch(ns.getResetInfo());
         // Keep the initial reserve for the whole pass, rather than reducing it
         // each time a level is bought. Every active savings goal also stays locked.
-        const reserveFloor = ns.getServerMoneyAvailable(HOME) * cfg.cashReserve;
+        const reserveFloor = Math.max(ns.getServerMoneyAvailable(HOME) * cfg.cashReserve, protectedFloor);
         if (!Number.isFinite(reserveFloor) || reserveFloor < 0) return finish("Invalid cash reserve");
         for (let attempt = 0; attempt < MAX_NEUROFLUX_PURCHASES; attempt++) {
             if (resetEpoch(ns.getResetInfo()) !== epoch) return finish("Reset epoch changed");

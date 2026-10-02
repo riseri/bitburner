@@ -115,6 +115,42 @@ test('reset policy override is validated, forwarded and survives bootstrap argum
     await assert.rejects(bad.api.main(bad.ns), /reset-policy must be auto or threshold/);
 });
 
+for(const settings of [null,{batch:'auto',launches:64},{batch:6,launches:'auto'},{batch:6,launches:64},{batch:8,launches:128}]) {
+    test(`supervisor forwards shared scheduler ceilings and restores them after reset: ${JSON.stringify(settings)}`,async()=>{
+        const f=supervisorFixture(5);
+        if(settings)f.ns.args=['--max-targets','auto','--max-batch-rate',settings.batch,'--max-launches',settings.launches];
+        await assert.rejects(f.api.main(f.ns),/end fixture/);
+        const daemon=f.launches.find(p=>p.filename==='daemon.js');
+        assert.equal(daemon.args[daemon.args.indexOf('--max-batch-rate')+1],settings?.batch??'auto');
+        assert.equal(daemon.args[daemon.args.indexOf('--max-launches')+1],settings?.launches??'auto');
+        const restored=supervisorFixture(5),bootstrap=loadScript('bootstrap.js',f.clock);
+        await bootstrap.main({getHostname:()=> 'home',read:()=>f.files.get('data/supervisor-bootstrap.json'),
+            tprint(){},spawn:(_file,_options,...args)=>{restored.ns.args=args;}});
+        await assert.rejects(restored.api.main(restored.ns),/end fixture/);
+        const rebooted=restored.launches.find(p=>p.filename==='daemon.js');
+        assert.equal(rebooted.args[rebooted.args.indexOf('--max-batch-rate')+1],settings?.batch??'auto');
+        assert.equal(rebooted.args[rebooted.args.indexOf('--max-launches')+1],settings?.launches??'auto');
+    });
+}
+
+for(const [flag,value] of [['--max-batch-rate',0],['--max-batch-rate',9],['--max-batch-rate','bad'],
+    ['--max-launches',3],['--max-launches',129],['--max-launches',32.5]]) {
+    test(`invalid scheduler ceiling fails before saving configuration or launching: ${flag}=${value}`,async()=>{
+        const f=supervisorFixture(5);f.ns.args=[flag,value];
+        await assert.rejects(f.api.main(f.ns),/max-batch-rate|max-launches/);
+        assert.equal(f.launches.length,0);assert.equal(f.files.has('data/supervisor-bootstrap.json'),false);
+    });
+}
+
+test('changing supervisor rate settings preserves an already running daemon and its explicit ceilings',async()=>{
+    const f=supervisorFixture(5);f.ns.args=['--max-batch-rate',6,'--max-launches',64];
+    const args=['--max-targets',2,'--max-batch-rate',3,'--max-launches',24];
+    f.processes.set(42,{filename:'daemon.js',pid:42,threads:1,args:[...args]});
+    await assert.rejects(f.api.main(f.ns),/end fixture/);
+    assert.deepEqual(f.processes.get(42).args,args);assert.ok(!f.killed.includes(42));
+    assert.ok(!f.launches.some(p=>p.filename==='daemon.js'));
+});
+
 test('detailed reset dashboard separates economic choice from blocked execution and compact mode stays concise', () => {
     const f = supervisorFixture(4), p = loadScript('lib/augmentation-reset-policy.js', f.clock);
     const d = p.decideAugmentationReset({ installed: [], pending: ['The Red Pill'], plan: { errors: [] }, minInstall: 5 });

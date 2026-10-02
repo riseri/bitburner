@@ -156,6 +156,143 @@ test('XP RAM pressure funds useful capacity under a cash recovery bound, without
     await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);assert.equal(f.actions.length,1);
     assert.match(f.state.investment,/no usable XP RAM pressure/);
 });
+
+for(const moneyLimit of ['BATCH_RATE','TARGET_SLOTS','NO_PROFITABLE_TARGET','PREPARATION']) {
+    test(`XP cloud investment bypasses money-only ${moneyLimit} and chooses useful capacity instead of tiny repeated buys`,async()=>{
+        const f=fixture();f.world.names=['cloud-00'];f.world.cash=1e6;
+        f.objective({milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true});
+        f.scheduler({pipelines:[{mode:'LIVE',modelBatchRate:4,running:30,queued:20}],
+            capacity:{limitingFactor:moneyLimit,constraints:[moneyLimit,'XP_RAM'],
+                preparation:{constrained:false},xp:{target:'xp',desiredRam:128,allocatedRam:32,constrained:true}}});
+        await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+        assert.deepEqual(f.actions,[['buy','cloud-01',64]]);
+        assert.match(f.state.investment,/XP pipeline is RAM constrained/);
+    });
+}
+
+for(const sharedLimit of ['LAUNCH_RATE','WORKER_LIMIT','RECOVERY']) {
+    test(`XP cloud investment retains shared ${sharedLimit} protection`,async()=>{
+        const f=fixture();f.world.names=['cloud-00'];f.world.cash=1e6;
+        f.objective({milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true});
+        f.scheduler({capacity:{limitingFactor:sharedLimit,constraints:[sharedLimit,'XP_RAM'],
+            xp:{target:'xp',desiredRam:128,allocatedRam:32,constrained:true}}});
+        await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+        assert.equal(f.actions.length,0);assert.equal(f.state.capitalRequest,null);
+        assert.match(f.state.investment,new RegExp(sharedLimit));
+    });
+}
+
+for(const existingCloud of [false,true]) {
+    test(`productive scheduler XP expansion reaches the cloud purchase actor with existing cloud=${existingCloud}`,async()=>{
+        const f=fixture();f.world.names=existingCloud?['cloud-00']:[];f.world.cash=1e6;
+        const objective={milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true};
+        f.objective(objective);
+        const jobs=new Map([[1,{host:'public-worker',ram:900}]]);
+        const pool={cfg:{maxTargets:6,maxBatchRate:4,maxLaunches:32,maxWorkers:6000,
+                hackingPolicy:{mode:'XP'},progressionObjective:objective},
+            pipelines:new Map([['money',{name:'money',mode:'RUNNING',queue:[],
+                stats:{pipeline:{}},runtime:{plan:{batchRate:4}}}]]),
+            network:{hosts:[{name:'public-worker',maxRam:1000}]},foreign:new Map(),running:jobs,
+            launchBuckets:new Map(),xp:{desiredRam:700,ramConstrained:false,status:'RUNNING',
+                samples:[1000,1000,1000],choice:{name:'joesguns',action:'G',score:1000},
+                wave:{action:'G',preparing:false},jobs}};
+        const capacity=loadScript('lib/scheduler-capacity.js',f.clock).schedulerCapacity(pool);
+        assert.equal(capacity.limitingFactor,'BATCH_RATE');assert.equal(capacity.xp.expansion,true);
+        assert.equal(capacity.xp.desiredRam-capacity.xp.allocatedRam,225);
+        f.scheduler({capacity});
+        await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+        assert.deepEqual(f.actions,[['buy',existingCloud?'cloud-01':'cloud-00',64]]);
+    });
+}
+
+test('a first cloud server for XP respects useful demand instead of taking the bootstrap sizing shortcut',async()=>{
+    const f=fixture();f.world.cash=1e6;
+    f.objective({milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true});
+    f.scheduler({capacity:{limitingFactor:'BATCH_RATE',constraints:['BATCH_RATE','XP_RAM'],
+        xp:{target:'xp',desiredRam:40,allocatedRam:32,constrained:true}}});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.deepEqual(f.actions,[['buy','cloud-00',16]]);
+});
+
+test('endgame cloud stays idle when public RAM is spare and XP is waiting for money work',async()=>{
+    const f=fixture();f.world.cash=1e9;
+    f.objective({milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true});
+    f.scheduler({totalRam:65536,usedRam:3000,capacity:{limitingFactor:'NONE',constraints:[],
+        xp:{target:'joesguns',desiredRam:45000,allocatedRam:0,constrained:false}}});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.equal(f.actions.length,0);assert.equal(f.state.capitalRequest,null);
+    assert.match(f.state.investment,/no usable XP RAM pressure/);
+});
+
+test('the reported home-heavy XP stall produces a real cloud purchase while the retained support plan is tuning', async()=>{
+    const f=fixture(), producer=require('./home-xp-fixture.cjs').fixture();
+    let capacity;for(let i=0;i<7;i++)capacity=producer.sample();
+    f.world.cash=476e12;f.ns.cloud.getRamLimit=()=>1048576;
+    f.objective(producer.goal);
+    f.scheduler({capacity,income60:28.04e9,totalRam:2775,usedRam:2400,maxBatchRate:3,
+        pipelines:[{mode:'LIVE',modelBatchRate:2.36,running:278,queued:148},
+            {mode:'TUNING',modelBatchRate:2.37,running:0,queued:0}]});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.deepEqual(f.actions,[['buy','cloud-00',16384]]);
+    assert.match(f.state.investment,/XP pipeline is RAM constrained/);
+    assert.equal(f.state.capitalRequest,null);
+});
+
+test('the reported earning trial and money launch constraint do not veto independently launchable home XP expansion', async()=>{
+    const f=fixture(),producer=require('./home-xp-fixture.cjs').fixture({trial:true});
+    let capacity;for(let i=0;i<7;i++)capacity=producer.sample({moneyAge:11000,blockedDemand:true});
+    assert.equal(producer.idle.trial,true);assert.equal(capacity.xp.launchable,true);
+    assert.ok(capacity.constraints.includes('LAUNCH_RATE'));
+    f.world.cash=476e12;f.ns.cloud.getRamLimit=()=>1048576;f.objective(producer.goal);
+    f.scheduler({capacity,income60:26.14e9,totalRam:3317.76,usedRam:2263.04,maxBatchRate:producer.cfg.maxBatchRate,
+        pipelines:[{mode:'LIVE',running:101,queued:0},{mode:'LIVE',role:'TRIAL',running:2,queued:0}]});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.deepEqual(f.actions,[['buy','cloud-00',16384]]);
+    assert.match(f.state.investment,/XP pipeline is RAM constrained/);
+});
+
+test('ordinary adaptive money RAM growth can fund memory while an empty retained lane is tuning', async()=>{
+    const f=fixture(), producer=require('./home-xp-fixture.cjs').fixture();
+    producer.cfg.hackingPolicy={mode:'MONEY'};producer.cfg.progressionObjective=null;
+    producer.pool.xp.status='DISABLED';producer.pool.targetAnalysis=[{name:'clarkinc',steady:50e9}];
+    let capacity;for(let i=0;i<14;i++)capacity=producer.sample();
+    assert.ok(capacity.scaling.ramRequest);
+    f.world.cash=1e12;f.ns.cloud.getRamLimit=()=>1048576;
+    f.scheduler({capacity,income60:28.04e9,totalRam:2775,usedRam:2400,maxBatchRate:producer.cfg.maxBatchRate,
+        pipelines:[{mode:'LIVE',modelBatchRate:2.36,running:278,queued:148},
+            {mode:'TUNING',modelBatchRate:2.37,running:0,queued:0}]});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.deepEqual(f.actions,[['buy','cloud-00',1024]]);
+});
+
+for(const guard of ['reset-pending','manual-reserve','overpriced','invalid-income']) {
+    test(`XP growth rechecks capital protection: ${guard}`,async()=>{
+        const f=fixture();f.world.names=['cloud-00'];f.world.cash=1e6;
+        f.objective({milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true,resetPending:guard==='reset-pending'});
+        if(guard==='manual-reserve')await f.savings.writeSavings(f.ns,f.world.cash,'Manual','manual','manual');
+        if(guard==='overpriced')f.world.unitCost=1e9;
+        f.scheduler({income60:guard==='invalid-income'?Infinity:1000,
+            capacity:{limitingFactor:'BATCH_RATE',constraints:['BATCH_RATE','XP_RAM'],
+                xp:{target:'xp',desiredRam:128,allocatedRam:32,constrained:true}}});
+        await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+        assert.equal(f.actions.length,0);
+        if(guard==='reset-pending')assert.match(f.state.investment,/reset advantage is being observed/);
+    });
+}
+
+test('an approved reset arriving at the live cloud quote defers an otherwise useful XP purchase',async()=>{
+    const f=fixture();f.world.names=['cloud-00'];f.world.cash=20000;
+    f.objective({milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true});
+    f.scheduler({capacity:{limitingFactor:'XP_RAM',constraints:['XP_RAM'],
+        xp:{target:'xp',desiredRam:128,allocatedRam:32,constrained:true}}});
+    const quote=f.ns.cloud.getServerUpgradeCost;
+    f.ns.cloud.getServerUpgradeCost=(...args)=>{
+        f.objective({milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true,resetPending:true});
+        return quote(...args);
+    };
+    await f.fleet.executeInvestment(f.ns,f.cfg,f.state,{name:'cloud-00',ram:64,added:32,cost:3200});
+    assert.equal(f.actions.length,0);assert.match(f.state.investment,/reset advantage is being observed/);
+});
 test('prepared capacity alone does not justify cloud RAM unless preparation is constrained',()=>{
     const api=loadScript('lib/fleet-economics.js',new Clock());
     assert.equal(api.fleetCapacityPolicy({capacity:{limitingFactor:'PREPARATION',preparation:{constrained:false}}}).ok,false);
@@ -177,4 +314,49 @@ test('purchase rechecks scheduler and installation after the live cost quote',as
         await f.fleet.executeInvestment(f.ns,f.cfg,f.state,{name:'cloud-00',ram:64,added:32,cost:3200});
         assert.equal(f.actions.length,0);assert.match(f.state.investment,reset?/imminent/:/TARGET_SLOTS/);
     }
+});
+
+function adaptiveCapacity(f) {
+    const scaler=loadScript('lib/scheduler-scaling.js',f.clock),reader=loadScript('lib/scheduler-capacity.js',f.clock);
+    const cfg={maxTargets:6,gap:100,maxWorkers:6000,maxSteal:.5,switchThreshold:1.25};
+    const state=scaler.createSchedulerScaling(cfg);
+    const pool={cfg,pipelines:new Map([['money',{name:'money',mode:'RUNNING',queue:[],stats:{pipeline:{}},
+            runtime:{plan:{batchRate:1,period:1000,expected:1000}}}]]),
+        network:{hosts:[{name:'public-worker',maxRam:1000}]},foreign:new Map(),
+        running:new Map([[1,{host:'public-worker',ram:900}]]),launchBuckets:new Map()};
+    for(let i=0;i<7;i++) {
+        f.clock.now+=10000;
+        for(const kind of ['loop','launch','landing'])for(let j=0;j<20;j++)scaler.recordSchedulerTiming(state,kind,1,100);
+        scaler.tickSchedulerScaling(state,{gap:100,income:1000,stable:true,goal:'MONEY',maxActionTime:10000,
+            faults:[['money:1',0]],capacity:reader.schedulerCapacity(pool)},f.clock.now);
+    }
+    return reader.schedulerCapacity(pool);
+}
+
+for(const existingCloud of [false,true])test(`measured adaptive RAM request reaches the purchase actor, existing cloud=${existingCloud}`,async()=>{
+    const f=fixture();f.world.names=existingCloud?['cloud-00']:[];f.world.cash=1e6;
+    const capacity=adaptiveCapacity(f);
+    assert.equal(capacity.scaling.ramRequest.addedRam,250);
+    f.scheduler({capacity});await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.deepEqual(f.actions,[['buy',existingCloud?'cloud-01':'cloud-00',64]],'productive sizing replaces tiny bootstrap/ROI quotes');
+});
+
+for(const guard of ['manual-reserve','reset-pending','stale-snapshot','overpriced','shared-limit'])test(`adaptive RAM growth respects ${guard}`,async()=>{
+    const f=fixture();f.world.names=['cloud-00'];f.world.cash=1e6;
+    const capacity=adaptiveCapacity(f);
+    if(guard==='manual-reserve')await f.savings.writeSavings(f.ns,f.world.cash,'Manual','manual','manual');
+    if(guard==='reset-pending')f.objective({resetPending:true});
+    if(guard==='overpriced')f.world.unitCost=1e9;
+    if(guard==='shared-limit'){capacity.constraints=['LAUNCH_RATE'];capacity.limitingFactor='LAUNCH_RATE';}
+    f.scheduler({capacity,generatedAt:f.clock.now-(guard==='stale-snapshot'?16000:0)});
+    await f.fleet.manageOneCloudAction(f.ns,f.cfg,f.state);
+    assert.equal(f.actions.length,0);
+});
+
+test('a disappearing adaptive RAM request at the live quote cannot take the first-server bootstrap shortcut',async()=>{
+    const f=fixture();f.world.cash=1e6;const capacity=adaptiveCapacity(f);f.scheduler({capacity});
+    const quote=f.ns.cloud.getServerCost;
+    f.ns.cloud.getServerCost=ram=>{f.scheduler({capacity:{...capacity,scaling:{...capacity.scaling,ramRequest:null}}});return quote(ram);};
+    await f.fleet.executeInvestment(f.ns,f.cfg,f.state,{ram:64,added:64,cost:6400,adaptiveRam:true});
+    assert.equal(f.actions.length,0);assert.match(f.state.investment,/Adaptive RAM demand changed/);
 });

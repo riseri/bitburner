@@ -59,12 +59,34 @@ test('secondary W2 invocation miss recovers locally without pausing or cancellin
 });
 
 test('a hard secondary fault rebuilds only that target while peer income continues',{timeout:180000},async()=>{
-    const sim=new NetscriptSimulation(profile);
+    // Fixed rate budgets can admit a larger plan now that money peers share the
+    // full launch ledger. Bound the rebuilt lane by its actual action time;
+    // adaptive cutovers and their restoration tails are exercised separately.
+    const sim=new NetscriptSimulation({...profile,flags:{...profile.flags,'max-batch-rate':4,'max-launches':32}});
     sim.clock.timer(720000,()=>{sim.servers.get('the-hub').sec=100;});
-    sim.run();await sim.clock.runUntil(sim.start+20*60000);assertSound(sim);
+    sim.run();await sim.clock.runUntil(sim.start+26*60000);assertSound(sim);
     const a=lane(sim,'phantasy'),b=lane(sim,'the-hub');
     assert.ok(a&&b,JSON.stringify(state(sim)));assert.equal(a.restarts,0);assert.equal(a.fallback,0);
     assert.equal(b.restarts,1);assert.equal(b.resyncs,1);assert.ok(income(sim,'the-hub')>1e8);
+    assert.equal(b.mode,'LIVE');
+    const warmup=sim.snapshots.find(s=>s.generatedAt>sim.start+720000&&s.pipelines.some(p=>p.target==='the-hub'&&p.restarts===1&&p.mode==='WARMUP'));
+    assert.ok(warmup,'recovery returns to admitting a prepared pipeline');
+    const resumed=sim.paid.find(p=>p.target==='the-hub'&&p.at>=warmup.generatedAt);
+    assert.ok(resumed&&resumed.at<=warmup.generatedAt+profile.backgroundTargets['the-hub'].weakenTime+20000,
+        'rebuilt work must pay within its modeled first landing plus bounded admission time');
+    assert.equal(sim.killed.filter(p=>p.target==='phantasy'&&p.phase==='H').length,0);
+    paidEveryMinute(sim,'phantasy',sim.start+650000,sim.clock.now);
+});
+
+test('a hard fault during an adaptive rate cutover reconciles once and preserves the earning peer',{timeout:180000},async()=>{
+    const sim=new NetscriptSimulation(profile);
+    sim.clock.timer(720000,()=>{sim.servers.get('the-hub').sec=100;});
+    sim.run();await sim.clock.runUntil(sim.start+30*60000);assertSound(sim);
+    assert.ok(sim.snapshots.some(s=>s.generatedAt<sim.start+720000 && s.pipelines.some(p=>p.target==='the-hub'&&p.cutover)),
+        'fault follows a real adaptive throughput cutover');
+    const a=lane(sim,'phantasy'),b=lane(sim,'the-hub');assert.ok(a&&b,JSON.stringify(state(sim)));
+    assert.equal(a.restarts,0);assert.equal(a.fallback,0);assert.equal(b.restarts,1);assert.equal(b.resyncs,1);
+    assert.ok(income(sim,'the-hub')>1e8);assert.equal(b.mode,'LIVE');
     assert.equal(sim.killed.filter(p=>p.target==='phantasy'&&p.phase==='H').length,0);
     paidEveryMinute(sim,'phantasy',sim.start+650000,sim.clock.now);
 });

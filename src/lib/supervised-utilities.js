@@ -29,7 +29,10 @@ export function tickUtilityJob(ns, job, gate = "", now = Date.now()) {
         job.pid = 0;
         if (complete && job.report.state !== "ERROR") {
             job.state = job.report.state; job.message = job.report.summary; job.failures = 0;
+            // A startup race must not leave a PID warning on the dashboard for
+            // the whole session. Successful startup checks still run only once.
             job.nextAt = job.interval === 0 ? Infinity : now + job.interval;
+            if (job.interval === 0 && job.type === "diagnostics" && job.report.state === "WARN") job.nextAt = now + 60000;
         } else {
             job.state = "ERROR"; job.message = complete ? job.report.summary : "Exited without a valid report";
             job.failures++; job.nextAt = now + Math.min(300000, 15000 * 2 ** Math.min(5, job.failures - 1));

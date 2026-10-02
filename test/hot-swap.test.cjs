@@ -66,7 +66,7 @@ test('level 10 to 3000 is debounced and fingerprint invalidation consumes no num
 
 test('faster generation preserves earned time and old completions retain their original period',()=>{
     const f=fixture();
-    f.old.plan.period=6000;f.p.stats.pipeline.completed=19;f.p.stats.pipeline.productiveMs=114000;
+    f.old.plan.period=6000;f.old.admissionPeriod=6000;f.p.stats.pipeline.completed=19;f.p.stats.pipeline.productiveMs=114000;
     f.replacement.plan.period=2000;
     f.setLevel(3000);f.tune();
     assert.equal(f.p.generation,2);assert.equal(f.p.runtime.plan.period,2000);
@@ -97,6 +97,18 @@ test('slower generation cannot retroactively turn unfinished productive time int
     f.finish(next);
     assert.equal(f.p.stats.pipeline.productiveMs,20500);
     assert.equal(f.multi.productive(f.p,f.clock.now),false);
+});
+
+test('paced completions credit the committed interval and preserve the policy that produced their income',()=>{
+    const f=fixture(),chunks=f.old.chunks;
+    f.old.admissionPeriod=12000;
+    f.old.admissionPolicy={batchLimit:2.25,moneyAllocation:.15};
+    f.p.runtime.plan.period=2000;f.pool.cfg.maxBatchRate=4;
+    f.finish(f.old);
+    assert.equal(f.p.stats.pipeline.productiveMs,12000);
+    const paid=f.p.stats.income.find(s=>s.money>0);
+    assert.deepEqual({...paid.admissionPolicy},{batchLimit:2.25,moneyAllocation:.15});
+    assert.ok([...chunks.values()].every(c=>c.status==='done'));
 });
 
 for(const block of ['RAM','launch','workers','foreign','prep']) test(`${block} preflight rejection leaves old admission and reservations intact`,()=>{
@@ -187,6 +199,30 @@ test('fingerprint changes during a yielding search discard its intermediate mode
     assert.equal(f.p.generationSerial,1);assert.equal(f.p.shadow.inputs.level,3000);
     f.clock.now+=2001;for(let i=0;i<4;i++)f.multi.serviceShadowTune(f.ns,f.pool,f.p);
     assert.equal(f.calls,2);assert.equal(f.p.generationSerial,2);assert.equal(f.p.swap.newLevel,3000);
+});
+
+test('small skill increases and faster live durations finish one search without restarting or losing old work',()=>{
+    const f=fixture();f.setLevel(7814);let revision=0;
+    f.api.createPreppedModel=()=>({times:{H:250-revision*.01,G:800-revision*.032,W:1000-revision*.04}});
+    f.multi.serviceShadowTune(f.ns,f.pool,f.p);f.clock.now+=2001;
+    for(let i=0;i<4;i++){
+        revision++;f.setLevel(7814+i);f.multi.serviceShadowTune(f.ns,f.pool,f.p);
+    }
+    assert.equal(f.calls,1);assert.equal(f.p.generation,2);assert.equal(f.p.hotSwaps.aborted,0);
+    assert.ok(f.p.batches.has(f.old.id));assert.deepEqual(f.killed,[]);
+    assert.equal(f.pool.controlPort.peek().targets.alpha.paused,false);
+});
+
+test('live growth deterioration rejects a candidate even when durations are faster',()=>{
+    const f=fixture();f.setLevel(7814);let growth=8;
+    f.api.createPreppedModel=()=>({times:f.replacement.plan.times,maxMoney:10000,minSecurity:1,
+        hackPercent:.01,chance:1,growthAnalyze:()=>growth});
+    f.multi.serviceShadowTune(f.ns,f.pool,f.p);f.clock.now+=2001;
+    for(let i=0;i<2;i++)f.multi.serviceShadowTune(f.ns,f.pool,f.p);
+    growth=11;f.multi.serviceShadowTune(f.ns,f.pool,f.p);
+    assert.equal(f.p.shadow,null);assert.equal(f.p.generation,1);
+    assert.match(f.p.lastSwap.reason,/growth requirement/);
+    assert.ok(f.p.batches.has(f.old.id));assert.deepEqual(f.killed,[]);
 });
 
 test('old completion spacing uses the old batch configuration after the displayed runtime changes',()=>{

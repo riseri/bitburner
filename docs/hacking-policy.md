@@ -32,9 +32,24 @@ zero samples produce UNKNOWN instead of being hidden behind a positive model.
 If no XP lane is running, total XP from money scripts or university work can
 establish evidence before XP admission starts.
 
+Measured milestone rates and their timestamps refresh on the one-second policy
+cadence, including between the thirty-second capability scoring passes. The XP
+progress dashboard consumes these fresh total XP measurements while dedicated XP
+workers wait. Unsafe, stale or noisy measurements still produce an unknown ETA.
+Read-only shadow searches preserve the active plan's evidence and XP allocation;
+actual cutover preflight, recovery and preparation retain their safety priority.
+Small upward skill changes and faster live action times may finish a yielding
+search after current duration and growth requirements pass preflight. Slower
+actions, insufficient restoration threads, and material input changes reject it.
+This avoids repeatedly suspending XP merely because a background retune is active.
+The model row is labeled as potential when no XP workers run. Admission diagnostics
+distinguish future money RAM reservations, worker commitments, launch budgets and
+executor failures; low physical RAM usage alone does not identify the blocker.
+
 Total player XP is used only for milestone timing. `scriptXpRate` is separately
 modeled from XP work actually occupying RAM. University XP is never attributed
-to fleet RAM. Existing XP target scoring and fleet capital logic remain intact.
+to fleet RAM. XP target scoring remains unchanged; productive final-server XP
+can request bounded fleet expansion as described below.
 
 All control tuning lives in `MILESTONE_BALANCE`:
 
@@ -214,17 +229,54 @@ Configured fleet sharing is disposable filler: XP can reclaim that RAM after
 checking money reservations; home sharing remains untouched.
 
 Policy changes let the current XP wave finish without restarting or draining money.
-Money tuning and recovery take priority over XP. Candidate scoring is incremental
+Read-only shadow tuning keeps the old money plan live and no longer pauses XP.
+For a cash-covered final-server hacking goal, a healthy income lane with recent
+paid batches permits XP on unreserved RAM while another lane prepares, tunes or
+recovers. Actual cutover preflight or restoration still pauses XP globally, and
+money target claims, RAM reservations, launch requests and prep retain priority.
+Without that healthy endgame income evidence, busy money lanes still pause XP;
+`WAITING_MONEY` names the lane and operation causing the hold.
+Candidate scoring is incremental
 and runs only between due money launches. New XP G/W jobs use the existing
-owner-tagged background orphan cleanup. An XP lane may report `WAITING_RAM` or
-`WAITING_TARGET` indefinitely when money needs all resources or no independent
-target exists; money continues normally.
+owner-tagged background orphan cleanup. An XP lane may report `WAITING_RAM`,
+`WAITING_WORKERS`, `WAITING_LAUNCH` or `WAITING_TARGET` while money commitments or
+the available target set prevent admission; money continues normally. `WAITING_EXEC`
+reports a failed executor launch and its reason, rather than claiming a RAM shortage.
 
 HOSTILE does not stop the scheduler. If no money batch can be built (including a
 zero hack-money multiplier), existing weaken workers keep usable remote RAM
 working and the daemon retries money planning after at least 30 seconds. This
 fallback may include zero-money normal servers; it does not become XP mode or
 claim useful XP when the multipliers make XP worthless.
+
+## Endgame cloud expansion
+
+An allocation expressed only as a fraction of existing RAM stops asking for
+capacity once filled. At a cash-covered final-server hacking goal, the scheduler
+can instead request 25% more RAM for an active prepared grow/weaken XP wave.
+A filled remote fleet with three positive completed-wave XP observations within
+25% supports measured expansion. Fresh whole-fleet allocator evidence also
+recognizes home XP filling capacity while money work occupies the small remote
+fleet. After 60 seconds of healthy paid work and timing, at most 2% of current XP
+RAM remaining allocatable and a positive Formulas model permit one bounded
+warmup step. The dashboard labels this `MODEL (warmup)`; mature zero/noisy rates
+cannot be replaced by the model. University-only XP, spare eligible RAM, prep,
+hack thread caps, missing models and pending resets do not authorize extra demand.
+
+Money batch-rate and target-slot ceilings do not veto usable `XP_RAM`. Worker
+and recovery constraints still veto purchases. A money-specific split-batch
+launch rejection can be bypassed only with fresh whole-fleet XP proof and actual
+headroom for the new G/W launch; it does not override a full shared launch ledger.
+A running money trial does not block this independent proof when the incumbent
+and recent global timing are healthy. Each candidate may
+add at most twice unmet XP demand, with cost recoverable from finite current
+income within five minutes or the configured shorter horizon. The fleet selects
+the largest qualifying capacity, including for the first XP cloud server, and
+retains savings, stock reserves and per-action cash limits. A qualified reset
+package holds cloud spending while its advantage is being observed. Cloud hosts
+join the same worker fleet as public hosts. Newly added or upgraded remote RAM
+can join the running prepared G/W wave immediately, preserving its existing PIDs
+and the shared reservation/launch/worker guards.
 
 ## Status and future integration
 

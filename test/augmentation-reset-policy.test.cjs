@@ -28,6 +28,42 @@ test('economic reset pays two recovery costs to reach the same installed reputat
     assert.match(api.resetDecisionSummary(d), /INSTALL: break-even/);
 });
 
+function completionFacts() {
+    const day = 86400000;
+    return { completionGoal: true, pending: ['NeuroFlux Governor'], package: { complete: true }, mode: 'auto',
+        now: clock.now, resetEpoch: '4:1:900000', objectiveKey: 'FINAL_SERVER:9000', acquisitionMs: 0,
+        evidence: { reliable: true, recoveryMs: day, recoverySource: 'conservative', benefit: 4,
+            lanes: [{ remainingMs: day * 10, lostMs: 0, benefit: 4 }] } };
+}
+
+test('conservative endgame recovery requires a sustained 50 percent advantage and remains LOW confidence', () => {
+    const f = completionFacts(), d = observed(f);
+    assert.equal(d.action, 'INSTALL'); assert.equal(d.confidence, 'LOW');
+    assert.equal(d.recoverySource, 'conservative'); assert.match(d.reason, /conservative 24h/);
+    assert.equal(d.installNow.etaMs, 86400000 * 3.5);
+    f.evidence.benefit = f.evidence.lanes[0].benefit = 2;
+    assert.equal(observed(f).action, 'WAIT');
+});
+
+test('first-reset allowance refuses a short horizon and charges reputation acquisition time', () => {
+    const f = completionFacts(); f.evidence.lanes[0].remainingMs = 86400000 * 3;
+    assert.equal(observed(f).action, 'WAIT');
+    f.evidence.lanes[0].remainingMs = 86400000 * 10; f.acquisitionMs = 86400000 * 2;
+    assert.equal(observed(f).action, 'WAIT');
+    for (const invalid of [NaN, Infinity, -1]) {
+        f.acquisitionMs = invalid; const d = observed(f);
+        assert.equal(d.action, 'WAIT'); assert.match(d.reason, /acquisition time unavailable/);
+    }
+});
+
+test('changing from assumed to measured recovery restarts endgame observation', () => {
+    const f = completionFacts(), d = observed(f);
+    f.evidence.recoverySource = 'measured'; f.now += 65000;
+    const fresh = api.decideCompletionReset({ ...f, history: { ...d.history, at: f.now } });
+    assert.equal(fresh.action, 'WAIT'); assert.equal(fresh.history.since, f.now);
+    assert.equal(fresh.confidence, 'MEDIUM');
+});
+
 test('five queued wait for a valuable augmentation 45 seconds away; utility score is irrelevant', () => {
     const f = facts(); f.pending.push('D', 'E'); f.plan.next.etaMs = 45000;
     f.plan.next.benefitAfterInstall = 1e99;

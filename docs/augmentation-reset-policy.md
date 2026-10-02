@@ -64,8 +64,14 @@ NeuroFlux purchase pass and install through `bootstrap.js` in the same tick.
 Ordinary basket purchases retain their existing order and reset timing. This
 pre-install pass cannot initiate a reset from an empty or waiting queue. After
 The Red Pill is installed, the separate [endgame upgrade policy](endgame-upgrades.md)
-can acquire further hacking upgrades and NeuroFlux when measured recovery and XP
-data show that another installation can materially shorten node completion.
+can acquire further hacking upgrades and NeuroFlux, including reputation funding,
+when the completion projection justifies another installation. It prefers measured
+recovery; without history, a conservative 24-hour allowance requires a stronger
+advantage. Live measured XP evidence remains required. The augmentation manager
+can measure actual player XP itself, so the daemon's prep/allocation safety gates
+do not indefinitely prevent endgame evaluation. Three stable positive 20-second
+windows are required, and reset/activity changes or stale samples discard them.
+The endgame dashboard distinguishes proposed NeuroFlux levels from queued levels.
 
 The pass honors `--purchase`, uses only joined factions whose live offerings include
 NeuroFlux, and chooses an eligible seller with the highest current reputation.

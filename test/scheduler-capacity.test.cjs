@@ -48,6 +48,39 @@ test('capacity identifies real limits independently of low RAM utilization',()=>
     f.p.recovery={};assert.equal(read().limitingFactor,'RECOVERY');
     assert.ok(read().constraints.includes('BATCH_RATE'));
 });
+
+test('a current split-batch demand explains launch pressure and expires instead of retaining stale text',()=>{
+    const f=fixture();f.pool.cfg.maxLaunches=16;
+    f.p.admissionReason='shared launch budget / fragmented batch';
+    f.p.admissionDemand={at:f.clock.now,requiredLimit:24,peakBucket:6,peakReserved:12,limit:16};
+    f.pool.launchBuckets.set(Math.floor(f.clock.now/250)+40,1);
+    let c=f.capacity.schedulerCapacity(f.pool);
+    assert.ok(c.constraints.includes('LAUNCH_RATE'));assert.equal(c.launches.requiredLimit,24);
+    assert.match(c.reasons.join(' '),/requires 24 launches\/s; budget 16/);
+    assert.equal(c.launches.moneyLimit,16);assert.equal(c.launches.optionalLimit,12);
+    f.clock.now+=15001;c=f.capacity.schedulerCapacity(f.pool);
+    assert.ok(!c.constraints.includes('LAUNCH_RATE'));assert.equal(c.launches.requiredLimit,0);
+    assert.equal(f.p.admissionReason,'shared launch budget / fragmented batch');
+});
+
+test('two lanes at 3.95 of 4 report the batch budget that blocks a third even with recent launches below the cap',()=>{
+    const f=fixture();f.pool.cfg.maxTargets=6;
+    f.p.runtime.plan.batchRate=2.36;
+    f.pool.pipelines.set('peer',{...f.p,name:'peer',runtime:{plan:{batchRate:1.59}},
+        admissionReason:'shared launch budget / fragmented batch'});
+    const slot=Math.floor(f.clock.now/250);
+    f.pool.launchBuckets=new Map([[slot-3,5],[slot-2,5],[slot-1,5],[slot,4],
+        [slot+40,8],[slot+41,8],[slot+42,8],[slot+43,8]]);
+    const c=f.capacity.schedulerCapacity(f.pool);
+    assert.equal(c.targets.active,2);assert.equal(c.targets.limit,6);
+    assert.equal(c.launches.recent,19);assert.equal(c.launches.peakReserved,32);
+    assert.equal(c.launches.peakBucket,8);assert.equal(c.launches.bucketLimit,8);
+    assert.equal(c.launches.optionalLimit,24);
+    assert.ok(Math.abs(c.batchRate.remaining-.05)<1e-9);assert.equal(c.batchRate.nextRequired,.25);
+    assert.equal(c.batchRate.nextBlocked,true);assert.ok(c.constraints.includes('LAUNCH_RATE'));
+    assert.ok(!c.constraints.includes('BATCH_RATE'),'next-target headroom must not invent a global money ceiling for fleet investment');
+    assert.equal(f.api.elasticAdmissionBlocker(f.pool),'BATCH_RATE');
+});
 test('RAM, preparation and proven XP pressure are distinct from missing capabilities',()=>{
     const f=fixture(), read=()=>f.capacity.schedulerCapacity(f.pool);f.pool.cfg.maxTargets=2;
     f.p.admissionReason='no whole HWGW batch fits host RAM reservations';assert.equal(read().limitingFactor,'RAM');
@@ -58,10 +91,64 @@ test('RAM, preparation and proven XP pressure are distinct from missing capabili
     f.pool.cfg.backgroundPrep.active={jobs:[{ram:30}]};assert.equal(read().limitingFactor,'PREPARATION');
     assert.equal(read().workers.preparation,1);assert.equal(read().ram.used,30);
 });
+
+function endgameXpFixture() {
+    const f=fixture();f.pool.cfg.hackingPolicy={mode:'XP'};
+    f.pool.cfg.progressionObjective={milestone:'FINAL_SERVER',limitingResource:'hacking',moneyCovered:true};
+    f.pool.xp={desiredRam:700,ramConstrained:false,status:'RUNNING',samples:[1000,1000,1000],
+        choice:{name:'xp',action:'G',score:1000},wave:{action:'G',preparing:false},
+        jobs:new Map([[1,{host:'cloud',ram:900}]])};
+    return f;
+}
+
+test('fully utilized endgame XP requests bounded cloud growth after stable productive waves',()=>{
+    const f=endgameXpFixture(), c=f.capacity.schedulerCapacity(f.pool);
+    assert.equal(c.xp.allocatedRam,900);assert.equal(c.xp.desiredRam,1125);
+    assert.equal(c.xp.expansion,true);assert.equal(c.xp.constrained,true);assert.ok(c.constraints.includes('XP_RAM'));
+    assert.ok(c.reasons.some(reason=>reason.includes('bounded expansion')));
+});
+
+for(const guard of ['idle-RAM','no-workers','home-only','unknown-model','zero-XP','noisy-XP','warmup','prep','hack','waiting','ordinary-goal','uncovered-cash','reset-pending','installing']) {
+    test(`XP cloud growth requires useful endgame capacity: ${guard}`,()=>{
+        const f=endgameXpFixture(),xp=f.pool.xp,goal=f.pool.cfg.progressionObjective;
+        if(guard==='idle-RAM')xp.jobs.get(1).ram=600;
+        if(guard==='no-workers')xp.jobs.clear();
+        if(guard==='home-only')xp.jobs.get(1).host='home';
+        if(guard==='unknown-model')xp.choice.score=0;
+        if(guard==='zero-XP')xp.samples=[0,0,0];
+        if(guard==='noisy-XP')xp.samples=[1000,2000,1000];
+        if(guard==='warmup')xp.samples=[1000,1000];
+        if(guard==='prep')xp.wave.preparing=true;
+        if(guard==='hack')xp.wave.action='H';
+        if(guard==='waiting')xp.status='WAITING_MONEY';
+        if(guard==='ordinary-goal')goal.milestone='DAEDALUS';
+        if(guard==='uncovered-cash')goal.moneyCovered=false;
+        if(guard==='reset-pending')goal.resetPending=true;
+        if(guard==='installing')goal.resetImminent=true;
+        const c=f.capacity.schedulerCapacity(f.pool);
+        assert.equal(c.xp.expansion,false);assert.equal(c.xp.constrained,false);assert.equal(c.xp.desiredRam,700);
+    });
+}
 test('tiny fleet and missing candidate evidence need no advanced APIs',()=>{
     const f=fixture();f.pool.network.hosts[0].maxRam=8;f.pool.targetAnalysis=[];
     assert.equal(f.capacity.schedulerCapacity(f.pool).limitingFactor,'NONE');
     f.pool.nextReadyScan=f.clock.now+100;assert.equal(f.capacity.schedulerCapacity(f.pool).limitingFactor,'NO_PROFITABLE_TARGET');
+});
+
+test('automatic cloud demand distinguishes useful RAM from cadence and steal saturation',()=>{
+    const f=fixture();f.pool.cfg.maxTargets=6;f.pool.cfg.maxSteal=.5;f.pool.targetAnalysis=[];
+    const scaler=loadScript('lib/scheduler-scaling.js',f.clock);scaler.createSchedulerScaling(f.pool.cfg);
+    Object.assign(f.p.runtime.plan,{batchRate:1000/423,period:423,steal:.4988});
+    f.pool.running.set(1,{host:'cloud',ram:900});
+    assert.equal(f.capacity.schedulerCapacity(f.pool).ram.scalable,false);
+    const economics=loadScript('lib/fleet-economics.js',f.clock);
+    assert.equal(economics.fleetCapacityPolicy({capacity:f.capacity.schedulerCapacity(f.pool)}).ok,false);
+    f.p.runtime.plan.steal=.25;assert.equal(f.capacity.schedulerCapacity(f.pool).ram.scalable,true);
+    f.p.runtime.plan.steal=.4988;f.p.runtime.plan.period=1000;f.p.runtime.plan.batchRate=1;
+    assert.equal(f.capacity.schedulerCapacity(f.pool).ram.scalable,true);
+    f.p.runtime.plan.period=423;f.p.runtime.plan.batchRate=1000/423;
+    f.pool.targetAnalysis=[{name:'b',steady:1000}];
+    assert.equal(f.capacity.schedulerCapacity(f.pool).ram.scalable,true,'useful open lane may need memory even when incumbent is capped');
 });
 
 test('multiple close launches are ordered across lanes without a UI sleep crossing them',()=>{

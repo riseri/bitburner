@@ -112,11 +112,16 @@ export function refreshHackingPolicy(ns, cfg, network, force = false) {
     const signature = JSON.stringify([milestoneKey(objective), objective?.limitingResource, objective?.moneyCovered, objective?.resetImminent]);
     if (cfg.objectiveSignature !== signature) { force = true; cfg.objectiveSignature = signature; }
 	const targetReached = cfg.hackingPolicy?.mode === "XP" && level >= (cfg.hackingPolicy?.targetLevel ?? options.xpTargetLevel);
-	if (!force && !targetReached && now < (cfg.nextPolicyScore || 0)) return cfg.hackingPolicy;
-	cfg.nextPolicyScore = now + options.rescoreMs;
-	const capabilities = detectHackingCapabilities(ns);
-	const bootstrap = capabilities.formulas && (capabilities.bitNodeMultipliers || objective) ? bootstrapReasons(ns, network, cfg, options, objective) : [];
-	cfg.hackingPolicy = { ...evaluateHackingPolicy({ capabilities, level, bootstrap, objective, options }), generatedAt: now };
+	if (force || targetReached || !cfg.hackingBaseline || now >= (cfg.nextPolicyScore || 0)) {
+		cfg.nextPolicyScore = now + options.rescoreMs;
+		const capabilities = detectHackingCapabilities(ns);
+		const bootstrap = capabilities.formulas && (capabilities.bitNodeMultipliers || objective) ? bootstrapReasons(ns, network, cfg, options, objective) : [];
+		cfg.hackingBaseline = evaluateHackingPolicy({ capabilities, level, bootstrap, objective, options });
+	}
+	// Capability scoring is slow-cadence; measured rates and their producer
+	// timestamps must refresh on every policy tick, including between rescoring.
+	cfg.hackingPolicy = { ...cfg.hackingBaseline, generatedAt: now };
+	const capabilities = cfg.hackingPolicy.capabilities, bootstrap = cfg.hackingPolicy.bootstrap;
 	if (objective && cfg.milestoneEvidence) {
 		const policy = cfg.hackingPolicy, evidence = cfg.milestoneEvidence;
 		const fresh = evidence.key === milestoneKey(objective) && now >= evidence.generatedAt && now - evidence.generatedAt <= MILESTONE_BALANCE.staleMs;
@@ -125,13 +130,15 @@ export function refreshHackingPolicy(ns, cfg, network, force = false) {
 			remainingXp: progress?.remaining ?? null, cash: fresh ? evidence.cash : null, xp: fresh ? evidence.xp : null,
 			scriptXpRate: fresh ? evidence.scriptXpRate : null, baseline: policy.xpAllocation,
 			safe: !bootstrap.length && fresh && evidence.safe,
-			enabled: capabilities.formulas && (!capabilities.multipliers || capabilities.multipliers.HackExpGain > 0),
+			enabled: capabilities.formulas && (!policy.multipliers || policy.multipliers.HackExpGain > 0),
 			now });
 		policy.balance = balance;
 		policy.xpAllocation = balance.xpAllocation;
 		if (balance.xpAllocation > 0) {
 			policy.mode = "XP"; policy.operationalMode = "MONEY+XP";
 			policy.reason = `${objective.milestone}: ${balance.reason}`;
+		} else if (policy.mode === "XP" && balance.requestedXpAllocation > 0) {
+			policy.reason = `${objective.milestone}: XP allocation suspended; ${balance.reason}`;
 		}
 	} else if (!objective) cfg.milestoneController = null;
 	if (objective?.resetImminent || objective?.redPill === "queued") {
@@ -173,7 +180,9 @@ export function renderHackingPolicy(ns, policy, details = false) {
 		const xp = policy.xp;
 		dashboardRow(ns, "XP pipeline", `${xp.target || "waiting"} | ${xp.action || "-"} | ${xp.state} | unreserved RAM`);
 		if (xp.reason) dashboardRow(ns, "XP note", xp.reason);
-		if (xp.estimatedXpPerSecond > 0) dashboardRow(ns, "XP model", `${xp.estimatedXpPerSecond.toPrecision(3)}/s | ${xp.ram.toFixed(1)} GB`);
+		if (Number.isFinite(xp.availableRam)) dashboardRow(ns, "XP capacity", `${xp.availableRam.toFixed(1)} GB unreserved | ${xp.workers} workers`);
+		if (xp.estimatedXpPerSecond > 0) dashboardRow(ns, "XP model", `${xp.estimatedXpPerSecond.toPrecision(3)}/s | ${xp.ram.toFixed(1)} GB${xp.workers ? "" : " | potential only"}`);
+		if (xp.observedTotalXpPerSecond > 0) dashboardRow(ns, "Total XP rate", `${xp.observedTotalXpPerSecond.toPrecision(3)}/s observed from scripts and player work`);
 	}
 	if (details) {
 		dashboardRow(ns, "Viability", `money ${policy.moneyViability} | XP ${policy.xpViability} | ${policy.overallViability}`);

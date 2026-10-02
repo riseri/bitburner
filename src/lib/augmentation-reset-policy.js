@@ -92,6 +92,7 @@ export function decideCompletionReset(input) {
     const { pending = [], now = Date.now(), history } = input, evidence = input.evidence || {};
     const result = { action: "WAIT", confidence: "UNKNOWN", reason: "Endgame recovery/XP evidence unavailable",
         completionGoal: true, queued: pending.length, recoveryMs: evidence.recoveryMs ?? null, package: input.package,
+        recoverySource: evidence.recoverySource || null, acquisitionMs: input.acquisitionMs ?? 0,
         installNow: { packageBenefit: evidence.benefit ?? null, breakEvenMs: null, etaMs: null },
         wait: { nextAugmentation: null, etaMs: null, incrementalBenefit: null, totalMs: null },
         fallback: { action: "WAIT", minInstall: input.minInstall, reason: "Preserve final-server progress" }, history: null };
@@ -104,20 +105,25 @@ export function decideCompletionReset(input) {
             l.remainingMs < 0 || l.lostMs < 0 || l.benefit <= 0))
         return { ...result, reason: evidence.reason || result.reason };
     const continued = Math.max(...lanes.map(l => l.remainingMs));
-    const reset = recovery + Math.max(...lanes.map(l => (l.remainingMs + l.lostMs) / l.benefit));
+    const acquisition = input.acquisitionMs ?? 0;
+    if (!Number.isFinite(acquisition) || acquisition < 0) return { ...result, reason: "Endgame reputation acquisition time unavailable" };
+    const reset = acquisition + recovery + Math.max(...lanes.map(l => (l.remainingMs + l.lostMs) / l.benefit));
     result.wait.etaMs = result.wait.totalMs = continued;
     result.installNow.etaMs = reset;
     result.installNow.resources = lanes;
-    result.confidence = "MEDIUM";
+    const conservative = evidence.recoverySource === "conservative";
+    result.confidence = conservative ? "LOW" : "MEDIUM";
     const benefit = evidence.benefit;
     const loss = Math.max(...lanes.map(l => l.lostMs / l.benefit));
     result.installNow.lostProgressMs = loss;
-    result.installNow.breakEvenMs = benefit > 1 ? (recovery + loss) / (1 - 1 / benefit) : null;
+    result.installNow.breakEvenMs = benefit > 1 ? (acquisition + recovery + loss) / (1 - 1 / benefit) : null;
+    const margin = conservative ? .50 : RESET_POLICY.margin;
     result.advantage = Number.isFinite(reset) && Number.isFinite(continued) && benefit >= RESET_POLICY.minBenefit &&
-        reset <= continued * (1 - RESET_POLICY.margin) && continued - reset >= RESET_POLICY.minSavingMs;
+        (!conservative || continued >= recovery * 4) &&
+        reset <= continued * (1 - margin) && continued - reset >= RESET_POLICY.minSavingMs;
     if (!result.advantage) return { ...result, reason: "Finishing with current multipliers beats rebuilding after a reset" };
-    const key = JSON.stringify([input.resetEpoch, input.objectiveKey, [...pending].sort(), "FINAL_SERVER"]);
-    const values = [recovery, ...lanes.flatMap(l => [l.remainingMs + l.lostMs, l.benefit])];
+    const key = JSON.stringify([input.resetEpoch, input.objectiveKey, [...pending].sort(), "FINAL_SERVER", evidence.recoverySource]);
+    const values = [recovery, acquisition, ...lanes.flatMap(l => [l.remainingMs + l.lostMs, l.benefit])];
     const stable = history?.key === key && Number.isFinite(history.since) && history.since <= history.at &&
         history.at <= now && now - history.at <= RESET_POLICY.staleMs && Array.isArray(history.values) &&
         history.values.length === values.length && values.every((v, i) => Number.isFinite(history.values[i]) &&
@@ -125,8 +131,9 @@ export function decideCompletionReset(input) {
     result.history = { key, since: stable ? history.since : now, at: now, values: stable ? history.values : values };
     const ready = now - result.history.since >= RESET_POLICY.observationMs;
     return { ...result, action: ready ? "INSTALL" : "WAIT", reason: ready
-        ? "Endgame upgrades finish the node sooner after accounting for lost hacking and measured recovery"
-        : "Observing the endgame reset advantage for 60 seconds" };
+        ? conservative ? "Endgame upgrades project at least 50% faster completion with a conservative 24h recovery allowance"
+            : "Endgame upgrades finish the node sooner after accounting for lost hacking and measured recovery"
+        : `Observing the endgame reset advantage for 60 seconds${conservative ? "; conservative 24h recovery allowance (LOW confidence)" : ""}` };
 }
 
 export function resetDecisionSummary(d) {
