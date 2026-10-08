@@ -46,14 +46,24 @@ logs open automatically.
 ### 3. Let it get established
 
 - **New 8 GB home:** starter mode roots accessible servers and fills their free
-  RAM with n00dles workers. It also uses spare home RAM and expands when you obtain
+  RAM with income workers. It starts on n00dles, then a small analysis helper
+  chooses richer targets as hacking skill and port access improve. Target ranking
+  accounts for hack time, growth, and preparation; a cooldown prevents repeated
+  switches from interrupting income. It also uses spare home RAM and expands when you obtain
   port-opening programs. You can earn even when home cannot fit a worker beside
-  the supervisor. In the planned BN4 runs, home RAM upgrades are automatic; elsewhere upgrade it
-  manually. The supervisor clears its starter
-  pool when daemon, fleet, enabled progression and home-upgrade headroom fit,
-  then admits other enabled services in priority order.
-  Early progression services may run during bootstrap. Upgrade quotes are cached,
-  and home RAM can continue growing when enabled services/helpers are blocked.
+  the supervisor. Cloud service hosting is enabled by default: an isolated helper
+  reuses purchased-server capacity or quotes the smallest purchase that makes
+  daemon, fleet and enabled progression fit across home and cloud servers.
+  This avoids waiting for an expensive home upgrade just to start the money engine.
+  The dashboard shows target-check reasons, the cloud quote and each service's host.
+  Set `--cloud-services false` to retain home placement for new services.
+  The supervisor clears its starter pool once the assigned servers are ready,
+  then admits other enabled services in priority order. Augmentation management
+  and home-specific actors stay on home; automatic home upgrades fund their RAM
+  when Singularity and progression/augmentation actions are enabled (BN4 or SF4).
+  Early progression services may run during bootstrap. Early augmentation work
+  yields RAM when the money engine can start. Upgrade quotes are cached, and home
+  RAM can continue growing when enabled services/helpers are blocked.
 - **Full hacking stack:** a target may need preparation, followed by an initial
   warmup before the first Hack lands. A startup income gap is normal.
 - **Spare RAM:** JIT and preparation workers run only on rooted remote servers.
@@ -131,8 +141,8 @@ run supervisor.js
 ```
 
 Other managers can remain running and be adopted. A running process keeps its old
-code until restarted. `supervisor-restart.js` reloads the supervisor, daemon, and
-fleet manager with the saved settings:
+code until restarted. `supervisor-restart.js` reloads the supervisor, daemon,
+fleet manager, progression reader, and augmentation manager on their current home/cloud hosts with the saved settings:
 old profiles are converted to explicit service toggles, preserving disabled
 services. Saved `--auto-install` arguments are removed. An old `assist` setup
 therefore installs automatically once the new augmentation manager is running.
@@ -246,10 +256,10 @@ On `home`, run:
 run supervisor-restart.js
 ```
 
-This reloads the supervisor with its saved arguments. Existing managers keep
-running and are adopted again; this does **not** reload their code or change their
-arguments. If you updated both daemon and supervisor helpers, restart both using
-the steps above.
+This reloads the supervisor, daemon, fleet manager, progression reader, and
+augmentation manager with saved settings. Both managers retain their current arguments and thread
+count. Other managers keep running and are adopted again; their code is reloaded
+when their own processes restart.
 
 For Darknet coordinator updates, use `run darknet-restart.js` while the supervisor
 is running. For other manager updates, stop that manager's PID and let the

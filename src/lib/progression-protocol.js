@@ -21,6 +21,12 @@ export function singularityAvailable(reset) {
 	return reset?.currentNode === 4 || Number(reset?.ownedSF?.get?.(4) ?? 0) > 0;
 }
 
+// Waiting for a larger queue or another faction does not approve an installation.
+export function augmentationInstallationPending(status) {
+	return status?.phase === "INSTALL" && ["BLOCKED", "RESETTING"].includes(status.state) &&
+		Number.isFinite(status.queued) && status.queued > 0;
+}
+
 export function freshStatus(value, type, now = Date.now()) {
 	return Boolean(value && typeof value === "object" && value.type === type && !value.error &&
 		(type !== "progression-status" || (Number.isFinite(value.plannedAt) && value.plannedAt <= now && now - value.plannedAt <= REQUEST_TTL_MS)) &&

@@ -1,14 +1,26 @@
 import { reclaimHomeShare } from "lib/home-share.js";
+import { serviceProcesses, readServiceHosts, readServiceSettings, saveServiceHosts } from "lib/service-hosts.js";
 
 const HOME = "home", SUPERVISOR = "supervisor.js", BOOTSTRAP = "bootstrap.js";
-const CONTROLLERS = ["daemon.js", "fleet-manager.js"];
+const CONTROLLERS = ["daemon.js", "fleet-manager.js", "progression-manager.js", "augmentation-manager.js"];
 
-/** Reload supervisor and its scheduling controllers, preserving saved arguments. @param {NS} ns */
+/** Reload supervisor and core controllers, preserving saved arguments. @param {NS} ns */
 export async function main(ns) {
 	if (ns.getHostname() !== HOME) throw new Error("Run supervisor-restart.js on home");
 	if (!stopControllers(ns, [SUPERVISOR])) return;
 	await ns.sleep(1_000);
-	// A new supervisor adopts existing service PIDs. Stop the old scheduling
+	const hosts = readServiceHosts(ns), settings = readServiceSettings(ns);
+	let changed = false;
+	for (const name of ["progression-manager.js", "augmentation-manager.js"]) {
+		const matches = serviceProcesses(ns, name);
+		if (matches.length !== 1) continue;
+		const process = matches[0];
+		if (name === "progression-manager.js") hosts[name] = process.host;
+		settings[name] = { args: [...process.args], threads: Math.max(1, process.threads || 1) };
+		changed = true;
+	}
+	if (changed) await saveServiceHosts(ns, hosts, settings);
+	// A new supervisor adopts existing service PIDs. Stop the old
 	// controllers after the supervisor so it cannot respawn them during reload.
 	if (!stopControllers(ns, CONTROLLERS)) return;
 	reclaimHomeShare(ns, Math.max(ns.getScriptRam(BOOTSTRAP, HOME), ns.getScriptRam(SUPERVISOR, HOME)));
@@ -22,9 +34,9 @@ export async function main(ns) {
 }
 
 function stopControllers(ns, filenames) {
-	for (const process of ns.ps(HOME).filter(p => filenames.includes(p.filename))) {
+	for (const process of filenames.flatMap(name => serviceProcesses(ns, name))) {
 		const stopped = ns.kill(process.pid);
-		if (!stopped && ns.ps(HOME).some(p => p.pid === process.pid)) {
+		if (!stopped && ns.ps(process.host).some(p => p.pid === process.pid)) {
 			ns.tprint(`ERROR: could not stop ${process.filename} PID ${process.pid}; reload cancelled to avoid adopting stale code`);
 			return false;
 		}

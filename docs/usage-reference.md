@@ -1,6 +1,6 @@
 # Usage reference
 
-See [Dynamic progression policy](progression-planning.md) for shared objectives, automatic inflation, staged bootstrap, and the supervisor’s `--go-opponent auto` default. Ports 6 and 8 are reserved for home capacity policy and home-upgrade quotes; choose another unreserved port for custom fleet status. [Home G/W and capital](home-gw.md) explains opportunistic execution and evidence-based RAM/core purchases.
+See [Dynamic progression policy](progression-planning.md) for shared objectives, automatic inflation, staged bootstrap, and the supervisor’s `--go-opponent auto` default. Ports 4, 5, 6 and 8 are reserved for cloud service hosting, starter target selection, home capacity policy and home-upgrade quotes; choose another unreserved port for custom fleet status. [Home G/W and capital](home-gw.md) explains opportunistic execution and evidence-based RAM/core purchases.
 
 Start with the [README](../README.md) for setup, automation settings, dashboard help, and restart instructions. This page keeps the full feature requirements and advanced options in one place.
 
@@ -81,6 +81,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--save-amount` | unset | Set a fixed manual goal instead of automatic savings; no Singularity required |
 | `--save-label` / `--save-target` | `Savings` / empty | Label and optional allowed program purchase for a fixed goal |
 | `--cloud-roi` / `--cloud-payback` | `true` / `1800` | Fleet investment policy for newly started fleet managers |
+| `--cloud-services` | `true` | Reuse or buy cloud RAM for daemon, fleet and progression when home placement is blocked; live costs, cash protection and recursive dependency copies govern admission. Set false for home placement of new services. |
 | `--cloud-min-ram` | `8` | Smallest cloud server purchase in GB; power of two, at least 2; existing fleet arguments remain preserved |
 | `--telemetry` | `true` | Record history and show a rolling one-hour summary |
 | `--home-reserve` | `8` | Minimum home RAM kept out of sharing for utilities and service starts |
@@ -176,7 +177,8 @@ crawler reports `WAIT` until its heartbeat arrives; missing heartbeats, exited
 crawlers, and zero active agents report `BLOCKED`. The detailed report retains the
 last agent error and counts home crawler restarts during this manager run.
 After syncing dashboard changes, use `run supervisor-restart.js` to reload the
-supervisor, daemon, and fleet manager while preserving saved supervisor flags.
+supervisor, daemon, fleet manager, progression reader, and augmentation manager on their current home/cloud hosts while preserving saved supervisor flags.
+The progression and augmentation managers retain their current arguments and thread count.
 The helper stops the supervisor first so its old controllers cannot be adopted
 or respawned during reload. Other services and unrelated scripts keep running.
 
@@ -209,7 +211,10 @@ arguments when adopted; see [changing settings](../README.md#changing-settings).
 
 Home RAM hosts the controllers; cloud RAM supplies hacking workers. Cloud purchases
 cannot resolve a home service-admission shortage, so essential home upgrades come
-first. New fleets default to an 8 GB minimum instead of 32 GB, reducing the first
+first. Automatic home upgrades run in BN4 or with SF4 when progression and
+augmentation actions are enabled. RAM blocked by core services or progression
+actors takes priority over unfunded ordinary programs such as SQLInject.
+New fleets default to an 8 GB minimum instead of 32 GB, reducing the first
 purchase threshold. The existing 25% per-action cash cap and 10% reserve remain.
 
 In automatic savings mode, the fleet publishes a current-reset capital request for

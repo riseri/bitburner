@@ -5,6 +5,7 @@ import { readSavings } from "lib/savings.js";
 import { singularityAvailable } from "lib/progression-protocol.js";
 import { SERVICES, selectedServices, supervisorServiceConfig, supervisorFiles, supervisorRamBudget } from "lib/service-catalog.js";
 import { readArgument } from "lib/service-lifecycle.js";
+import { CLOUD_SERVICES, serviceProcesses, readServiceHosts } from "lib/service-hosts.js";
 
 /** Read-only startup diagnostics; --report publishes for the supervisor. @param {NS} ns */
 export async function main(ns) {
@@ -22,7 +23,9 @@ export async function main(ns) {
 
 export function diagnoseAutomation(ns) {
     const lines = [];
-    const processes = ns.ps("home"), issues = [], visited = new Set();
+    const processes = [...new Map([...ns.ps("home"), ...CLOUD_SERVICES.flatMap(name => serviceProcesses(ns, name))]
+        .map(process => [process.pid, process])).values()], issues = [], visited = new Set();
+    const serviceHosts = readServiceHosts(ns);
     const supervisor = processes.find(process => process.filename === "supervisor.js");
     const cfg = supervisorServiceConfig(supervisor?.args || []);
     const reset = ns.getResetInfo();
@@ -47,10 +50,10 @@ export function diagnoseAutomation(ns) {
         const ram = ns.getScriptRam(file, "home");
         if (!ram) issues.push(`RAM analysis failed or missing: ${file}`);
         if (active.length > 1 && !file.startsWith("jit-")) issues.push(`Duplicate ${file}: PIDs ${active.map(p => p.pid).join(", ")}`);
-        lines.push(`${file}: ${ram.toFixed(2)} GB | ${active.length ? active.map(p => `PID ${p.pid} ${JSON.stringify(p.args)}`).join("; ") : "stopped"}`);
+        lines.push(`${file}: ${ram.toFixed(2)} GB | ${active.length ? active.map(p => `PID ${p.pid} on ${p.host || "home"} ${JSON.stringify(p.args)}`).join("; ") : `stopped; assigned ${serviceHosts[file] || "home"}`}`);
     }
     const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
-    const missingRam = services => services.filter(service => !processes.some(process => process.filename === service.name))
+    const missingRam = services => services.filter(service => (serviceHosts[service.name] || "home") === "home" && !processes.some(process => process.filename === service.name))
         .reduce((sum, service) => sum + ns.getScriptRam(service.name, "home"), 0);
     const coreRam = missingRam(available.filter(service => service.core)) + (supervisor ? 0 : ns.getScriptRam("supervisor.js", "home"));
     const optionalRam = missingRam(available.filter(service => !service.core));
@@ -62,7 +65,7 @@ export function diagnoseAutomation(ns) {
     for (const service of SERVICES.filter(service => !available.includes(service))) {
         lines.push(`${service.name}: ${enabled.includes(service) ? `LOCKED (${service.capability})` : "DISABLED"}; excluded from launch RAM budget`);
     }
-    if (afterReport < coreRam) issues.push("Full hacking stack needs more home RAM; starter mode can keep earning until it fits");
+    if (afterReport < coreRam) issues.push("Core service placement needs more RAM; cloud hosting or a home upgrade can admit it");
     else if (afterReport < coreRam + optionalRam + helperRam) issues.push("Enabled services/helpers need more home RAM; lower-priority services will wait while hacking continues");
     const customPort = process => Number(readArgument(process.args || [], process.filename === "daemon.js" ? "--fleet-port" : "--port", PORTS.FLEET_STATUS));
     const fleet = processes.find(p => p.filename === "fleet-manager.js"), daemon = processes.find(p => p.filename === "daemon.js");

@@ -1,4 +1,5 @@
 import { withoutAutoInstall } from "lib/supervisor-migration.js";
+import { serviceProcesses } from "lib/service-hosts.js";
 
 const STARTUP_GRACE_MS = 60_000;
 const STALE_CONFIRM_MS = 15_000;
@@ -6,7 +7,7 @@ const STABLE_MS = 120_000;
 
 /** One record per service, including adopted process arguments and restart history. */
 export function createService(name, args = [], heartbeatType = "", port = 0, heartbeatRequired = true) {
-	return { name, args: [...args], threads: 1, heartbeatType, port, heartbeatRequired, pid: 0,
+	return { name, host: "home", args: [...args], threads: 1, heartbeatType, port, heartbeatRequired, pid: 0,
 		state: "STOPPED", startedAt: 0, healthySince: null, staleSince: null,
 		nextStartAt: 0, failures: 0, restarts: 0, lastEvent: "", adopted: false };
 }
@@ -23,7 +24,7 @@ function backoff(service, now, reason) {
 
 /** Check liveness with startup grace; never use dashboard age as daemon health. */
 export function tickService(ns, service, now = Date.now()) {
-	const matches = ns.ps("home").filter(process => process.filename === service.name);
+	const matches = serviceProcesses(ns, service.name);
 	if (matches.length > 1) {
 		service.state = "CONFLICT";
 		service.lastEvent = "Multiple matching processes; refusing to kill or start another";
@@ -34,6 +35,7 @@ export function tickService(ns, service, now = Date.now()) {
 	if (process && service.pid !== process.pid) {
 		// Adopt the command line; only the removed augmentation install switch is discarded.
 		service.pid = process.pid;
+		service.host = process.host;
 		service.args = service.name === "augmentation-manager.js" ? withoutAutoInstall(process.args) : [...process.args];
 		if (service.port) service.port = Number(readArgument(service.args, "--port", service.port));
 		service.threads = process.threads || 1;
@@ -50,13 +52,15 @@ export function tickService(ns, service, now = Date.now()) {
 			backoff(service, now, "Process exited; restart scheduled with preserved arguments");
 		}
 		if (now < service.nextStartAt) return service;
-		if (!ns.fileExists(service.name, "home")) {
+		const host = service.host || "home";
+		if (!ns.fileExists(service.name, host)) {
 			backoff(service, now, `Missing script: ${service.name}`);
 			return service;
 		}
 		// No worker cancellation to make room for a supervisor child.
 		let pid = 0;
-		try { pid = ns.run(service.name, service.threads, ...service.args); }
+		try { pid = host === "home" ? ns.run(service.name, service.threads, ...service.args)
+			: ns.exec(service.name, host, service.threads, ...service.args); }
 		catch (error) { backoff(service, now, `Start failed: ${String(error?.message ?? error)}`); return service; }
 		if (!pid) {
 			backoff(service, now, "Start failed (check free RAM and script imports)");
@@ -109,7 +113,7 @@ export function tickService(ns, service, now = Date.now()) {
 export function serviceLabel(service, now = Date.now()) {
 	if (!service) return "Disabled";
 	if (service.state === "BACKOFF") return `BACKOFF (${Math.max(0, Math.ceil((service.nextStartAt - now) / 1000))}s)`;
-	if (["WAITING_RAM", "WAITING_PRIORITY"].includes(service.state)) return `${service.state.replace("WAITING_", "WAITING ")} (${service.waitReason || "admission deferred"})`;
+	if (["WAITING_RAM", "WAITING_PRIORITY", "WAITING_FILES"].includes(service.state)) return `${service.state.replace("WAITING_", "WAITING ")} (${service.waitReason || "admission deferred"})`;
 	if (service.state === "BLOCKED" && service.waitReason) return `BLOCKED (${service.waitReason})`;
 	return service.state;
 }

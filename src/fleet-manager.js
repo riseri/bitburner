@@ -1,4 +1,4 @@
-import { readSavings } from "lib/savings.js";
+import { readSavings, refreshRemoteSavings } from "lib/savings.js";
 import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { evaluateFleetInvestment, fleetCapacityPolicy } from "lib/fleet-economics.js";
 import { fleetInvestmentTarget } from "lib/fleet-capital.js";
@@ -137,6 +137,7 @@ function createState(cfg) {
 }
 
 async function manageOneCloudAction(ns, cfg, state) {
+	if (!await refreshRemoteSavings(ns)) { state.investment = "Home savings refresh failed; cloud spending deferred"; return; }
 	const limit = ns.cloud.getServerLimit();
 	const ramLimit = ns.cloud.getRamLimit();
 	const names = ns.cloud.getServerNames();
@@ -582,6 +583,7 @@ function chooseSurplusInvestment(candidates, budget) {
 }
 
 async function executeInvestment(ns, cfg, state, best) {
+    if (!await refreshRemoteSavings(ns)) { state.investment = "Home savings refresh failed; cloud spending deferred"; return; }
     const objective=readProgressionSnapshot(ns);
     const snapshot = liveScheduler(ns), blocker = fleetProgressionBlocker(objective, snapshot);
     if(blocker) { state.investment=blocker; return; }

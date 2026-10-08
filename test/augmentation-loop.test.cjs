@@ -70,6 +70,30 @@ test('locked loop gives an actionable Singularity recommendation without calling
     assert.match(status.recommendation, /BitNode 4/);
 });
 
+for (const queued of [0, 1, 4]) test(`${queued} queued augmentations below the install threshold keep progression spending enabled`, async () => {
+    const f = fixture();
+    f.reset.currentNode = 5; f.reset.ownedSF.set(4, 3);
+    f.world.installed = ['Installed A', 'Installed B', 'Installed C', 'Installed D', 'Installed E'];
+    f.world.purchased = Array.from({ length: queued }, (_, i) => 'Pending ' + i);
+    f.world.factions = [];
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.state, 'WAITING');
+    assert.equal(status.phase, queued ? 'QUEUE' : 'UNLOCK');
+    assert.equal(status.queued, queued);
+    assert.equal(status.progression.resetImminent, false);
+    assert.equal(f.world.installs.length, 0);
+});
+
+test('an emptied installation queue releases reset protection after the state save', async () => {
+    const f = fixture();
+    f.world.purchased = ['A', 'B', 'C', 'D', 'E'];
+    f.ns.write = async () => { f.world.purchased = []; };
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'UNLOCK');
+    assert.equal(status.progression.resetImminent, false);
+    assert.equal(f.world.installs.length, 0);
+});
+
 test('loop joins safe invitations, works for reputation, then purchases the augmentation', async () => {
     const f = fixture(); f.world.factions = []; f.world.invitations = ['CyberSec'];
     let status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
@@ -122,6 +146,7 @@ test('the loop installs at the threshold with expensive upgrades and invitations
 
     const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
     assert.equal(status.state, 'RESETTING');
+    assert.equal(status.progression.resetImminent, true);
     assert.deepEqual(f.world.installs, ['bootstrap.js']);
     assert.equal(f.world.works.length + f.world.joins.length + f.world.buys.length, 0);
 });
@@ -156,6 +181,7 @@ test('automatic reset still respects manual work, busy actions, bootstrap and fa
         if (reason === 'install') f.ns.singularity.installAugmentations = () => false;
         const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
         assert.equal(status.state, 'BLOCKED', reason);
+        assert.equal(status.progression.resetImminent, true, reason);
         assert.equal(f.world.installs.length, 0, reason);
     }
 });

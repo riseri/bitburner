@@ -100,11 +100,30 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
             target:"augmentation:"+plan.next.name,label:plan.next.name,priority:plan.next.name === "The Red Pill" || plan.next.chainTarget === "The Red Pill"?100:70,
             reputationStrategy:augmentationReputationStrategy(plan.next),
             liquidity:plan.next.repGap===0,reason:"Selected achievable augmentation chain"});
-        if(cfg.homeInvestment) requests.push(cfg.homeInvestment);
+        if(cfg.serviceInvestment) requests.push(cfg.serviceInvestment);
+        if(cfg.homeInvestment && !cfg.serviceInvestment) requests.push(cfg.homeInvestment);
         // Service admission is evaluated before performance candidates exist.
         if(!cfg.homeInvestment) requests.push(...(cfg.homePerformanceInvestments || []));
         const cloud = readFleetCapitalRequest(ns, fleet);
         if (cloud) requests.push(cloud);
+        // A small, already-funded root unlock can expand earning RAM while a
+        // much larger service admission goal is still saving. Keep it below
+        // Daedalus/Red Pill and leave manual goals authoritative above.
+        const admission = cfg.serviceInvestment || cfg.homeInvestment;
+        const endgameGoal = requests.some(r => r.priority >= 95 && Number.isFinite(r.amount) && r.amount > 0 && r.available !== false);
+        const openers = progressionPrograms({ darknet: false, formulas: false });
+        const rootUnlocks = requests.filter(r => r.target === "TOR" || openers.some(p => p.name === r.target));
+        if (admission?.amount > 0 && admission.priority <= 90 && !endgameGoal && rootUnlocks.length) {
+            const cash = ns.getServerMoneyAvailable("home");
+            const purchaseRam = ns.getScriptRam("progression-purchase.js", "home");
+            const purchaseFits = purchaseRam > 0 && purchaseRam <= ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
+            for (const request of rootUnlocks) {
+                if (purchaseFits && request.amount <= cash && request.amount <= admission.amount * .1) {
+                    request.priority = Math.max(request.priority, 94);
+                    request.reason = "Affordable root unlock before service RAM; " + request.reason;
+                }
+            }
+        }
         const decision=chooseInvestment(requests,current.target); desired=decision.chosen;
         cfg.savingsStatus=desired ? desired.reason + (decision.deferred.length ? "; deferred " + decision.deferred.join(", ") : "") : "No justified capital request";
     } else if (cfg.savingsMode === "programs") {

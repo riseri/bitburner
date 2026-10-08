@@ -427,7 +427,7 @@ test('persistent service admission leaves upgrade helper space and preserves the
         run: (filename) => { launched.push(filename); processes.push({filename, pid: 11, args: [], threads: 1}); return 11; },
         kill: pid => { killed.push(pid); return false; } };
     const services = ['daemon.js', 'fleet-manager.js'].map(name => lifecycle.createService(name));
-    assert.match(api.tickServicePriority(ns, services, '', 10), /upgrade reserve/);
+    assert.match(api.tickServicePriority(ns, services, '', 10), /helper reserve/);
     assert.equal(services[1].state, 'WAITING_RAM'); assert.deepEqual(launched, []); assert.deepEqual(killed, []);
     assert.equal(services[0].pid, 10);
     api.tickServicePriority(ns, services, '', 7.25);

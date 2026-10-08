@@ -2,6 +2,15 @@ import { isProgressionProgram } from "lib/programs.js";
 
 export const SAVINGS_FILE = "data/savings.json";
 
+export async function refreshRemoteSavings(ns) {
+    if (typeof ns.getHostname !== "function" || ns.getHostname() === "home") return true;
+    if (ns.fileExists(SAVINGS_FILE, "home")) return Boolean(await ns.scp(SAVINGS_FILE, ns.getHostname(), "home"));
+    // Remove a previous local goal when home has none; do not manufacture a
+    // savings goal on home or retain an obsolete remote floor.
+    if (ns.read(SAVINGS_FILE)) await ns.write(SAVINGS_FILE, "", "w");
+    return true;
+}
+
 // A durable goal is shared by all home spenders. No port or heartbeat is needed.
 export function savingsEpoch(ns) {
     const r = ns.getResetInfo();
@@ -23,8 +32,9 @@ export function readSavings(ns, spendingTarget = "") {
             return { ...goal, floor: 0, inactive: "Goal purchased" };
         }
         const fleet = goal.owner === "supervisor" && goal.target.startsWith("fleet:");
+        const serviceCloud = goal.owner === "supervisor" && goal.target === "services:cloud";
         const homePerformance = goal.owner === "supervisor" && ["home:cores", "home:performance-ram"].includes(goal.target);
-        const authorizedPurchase = (program || goal.target === "TOR" || goal.target === "home:ram" || homePerformance || fleet) && spendingTarget === goal.target;
+        const authorizedPurchase = (program || goal.target === "TOR" || goal.target === "home:ram" || homePerformance || fleet || serviceCloud) && spendingTarget === goal.target;
         return { ...goal, floor: authorizedPurchase ? 0 : goal.amount };
     } catch (error) {
         // Test/legacy hosts without file APIs have no configured goal.

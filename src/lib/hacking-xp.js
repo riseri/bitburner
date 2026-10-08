@@ -449,7 +449,7 @@ export function xpPipelineStatus(ns, pool) {
 function publishFallbackStatus(ns, ctx, choice, running) {
 	const policy = { ...ctx.cfg.hackingPolicy, operationalMode: "NORMAL",
 		transition: "no batch fits; safe weaken fallback while retrying money planning" };
-	const snapshot = { type: "jit-status", version: 2, pid: ns.pid, generatedAt: Date.now(), mode: "fallback",
+	const snapshot = { type: "jit-status", version: 2, pid: ns.pid, host: typeof ns.getHostname === "function" ? ns.getHostname() : "home", generatedAt: Date.now(), mode: "fallback",
 		policy, income60: 0, target: choice?.name || "",
 		earned: ctx.earned || 0, model: 0, pipelines: [],
 		usedRam: [...running.values()].filter(j => j.host !== "home").reduce((n, job) => n + job.ram, 0),

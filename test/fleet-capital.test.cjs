@@ -31,6 +31,22 @@ function fixture() {
     return {clock,ns,world,cfg,state,savings,fleet,supervisor,reader,status,policy,goal,scheduler,objective,reset,actions,copies};
 }
 
+test('an actual BN5 augmentation observation with five installed and zero queued permits fleet purchases', async () => {
+    const f = fixture(), api = loadScript('augmentation-manager.js', f.clock);
+    f.reset.currentNode = 5; f.reset.ownedSF = new Map([[4, 3], [5, 1]]);
+    f.ns.getPlayer = () => ({ factions: [], skills: { hacking: 256 } });
+    f.ns.singularity = { getOwnedAugmentations: () => ['A', 'B', 'C', 'D', 'E'],
+        getCurrentWork: () => null, checkFactionInvitations: () => [] };
+    const producer = { ...f.ns, pid: 10 }, cfg = { minInstall: 5, route: true, focus: 'hacking', cashReserve: .1, interval: 5000 };
+    const status = await api.tickAugmentationLoop(producer, cfg, {});
+    api.publish(f.ns.getPortHandle(11), producer, cfg, status);
+    assert.equal(status.queued, 0);
+    assert.equal(status.progression.resetImminent, false);
+    await f.savings.writeSavings(f.ns, 3200, 'Fleet', 'fleet:new:8', 'supervisor');
+    await f.fleet.manageOneCloudAction(f.ns, f.cfg, f.state);
+    assert.deepEqual(f.actions, [['buy', 'cloud-00', 8]]);
+});
+
 test('first small server competes with ordinary savings, buys the exact goal, then yields priority', async()=>{
     const f=fixture(), plan={errors:[],next:{name:'BitWire',price:10000}};
     await f.savings.writeSavings(f.ns,10000,'Augmentation','augmentation:BitWire','supervisor');

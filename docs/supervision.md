@@ -1,7 +1,7 @@
 # Supervision and progression execution
 
 The supervisor owns service lifecycle records, not the JIT scheduler. It adopts
-one existing process per service on `home`, retaining its actual arguments and
+one existing process per service, retaining its actual arguments, execution host and
 thread count. An existing daemon is not replaced just to apply new CLI flags.
 New daemons receive AUTO batch and launch budgets by default. Numeric overrides
 stay fixed, and AUTO/fixed settings persist through bootstrap. See
@@ -18,19 +18,59 @@ through `lib/service-catalog.js`.
 On the initial 8 GB home, `supervisor.js` remains the resident controller. Its
 starter pool scans the network, roots zero-port servers (and more servers using
 programs already owned), then copies `starter-worker.js` into free remote RAM.
-Workers run a small multithreaded weaken/grow/hack loop against rooted `n00dles`.
+Workers run a small multithreaded weaken/grow/hack loop, initially against `n00dles`.
+The short-lived `starter-target.js` helper evaluates rooted, hackable money
+servers using hack time, growth, repair costs, and preparation amortized over
+fifteen minutes, with a thirty-minute maximum initial preparation estimate.
+The old ten-minute cutoff could assign a zero score to a much richer target.
+Live `hackAnalyze` and `growthAnalyze` values carry BitNode money/growth effects
+into the ranking; the heuristic estimate is used when those values are unavailable.
+A new target must beat
+the incumbent's steady estimate by 25%; temporary money/security debt does not
+trigger a switch. Checks run at most once per minute, and switches hold the new
+target for at least two minutes or its estimated preparation plus a weaken cycle.
+The helper uses spare RAM or the smallest owned starter allocation; analysis
+APIs are kept outside the resident supervisor so its RAM cost stays unchanged.
 Spare home RAM is used too, but earning no longer depends on fitting a home worker.
 No Formulas, Singularity, purchased servers, or program purchases are required.
 
 The pool rescans every five seconds, adopts its marked workers after supervisor
 restarts, and preserves unrelated processes. Healthy workers keep their current
 actions while their allocation stays unchanged. Failed copies, launches and PID
-cancellations are retried. The dashboard shows active threads and worker hosts.
-BN4 route automation quotes and funds home upgrades when enabled services need
-RAM; other capability configurations retain their existing upgrade policy.
-Once supervisor, daemon and fleet manager fit in
-actually available home RAM, all owned starter workers are stopped before the
-ordinary managed-service lifecycle begins. Failed cleanup delays that handoff.
+cancellations are retried. The dashboard shows active threads, worker hosts and
+the selector's reason for keeping or changing targets. Missing scripts, insufficient
+helper RAM, failed starts and unanswered analysis requests are visible.
+
+`--cloud-services true` is the default. `service-cloud.js` isolates cloud purchase
+APIs from the supervisor and packs daemon, fleet and enabled progression across
+home and purchased servers. It measures current RAM, reuses available purchased
+capacity, preserves unrelated allocations, and buys at most one server per pass
+using the cheapest live quote that admits the core set. New servers use a `core-`
+prefix. Existing daemon/fleet controllers remain pinned. A unique early progression
+reader may move by exact PID with its arguments and thread count preserved,
+including when adopted from a previous supervisor. Unrelated processes and manual
+daemon/fleet placements are retained. A full server limit or unavailable API reports a fallback reason.
+The explicit opt-out retains home admission for new processes; existing remote
+controllers are still adopted.
+
+For example, the startup simulation with a 64 GB home, a 46.05 GB daemon, a
+10.50 GB fleet manager, a 6.05 GB progression manager and 8.05 GB helper allowance
+buys 32 GB for $1.76m at the fixture's $55k/GB price. Daemon stays on home and
+fleet/progression use cloud RAM, instead of waiting for home to reach 128 GB.
+Actual choices use the game's measured costs and quotes, not these fixture prices.
+
+Before handoff the supervisor copies each remote script's recursive imports and
+the shared cash goal, checks actual available RAM on every assigned host, and stops
+all owned starter workers. Failed copies or cleanup delay handoff. Placements persist
+in reset-bound `data/service-hosts.json`; lifecycle restart and duplicate checks cover
+both home and direct neighbours. Dashboard service rows include execution hosts.
+Priority and preemption apply to each host separately, so a home blocker does not
+prevent a controller using independent cloud RAM from starting.
+An early augmentation manager yields its exact PID if needed for that handoff;
+its RAM no longer increases the minimum home tier. Augmentation management,
+optional managers and home-specific actors remain on home. When Singularity and
+progression/augmentation actions are enabled, the supervisor quotes and funds
+home upgrades for those services in BN4 and other BitNodes with SF4 access.
 
 A local run of the official upstream RAM calculator reports 7.70 GB for the
 supervisor and 2.50 GB per starter thread. This checks source RAM against upstream
@@ -53,18 +93,28 @@ never grants permission to launch a duplicate. Startup/launch failures and the l
 recovery remain visible after the dashboard clears its log.
 
 On a fresh reset, the daemon and fleet manager get the first opportunity to claim
-home RAM, with the income-producing daemon first. Diagnostic/planning helpers and
+their assigned RAM, with the income-producing daemon first. Diagnostic/planning helpers and
 new optional managers wait until both core processes have started. If an existing
 fleet manager is the only thing preventing a missing daemon from fitting, the
 supervisor stops that exact manager PID and retries it later; remote workers and
 unrelated processes are untouched. Already-running optional services are adopted
 and monitored. The complete admission order is daemon, fleet, progression,
-contracts, augmentation loop, stocks, IPvGO, Darknet, then one-shot planning and
+augmentation loop, contracts, stocks, IPvGO, Darknet, then one-shot planning and
 diagnostic jobs. If a higher-priority manager needs RAM held by lower-priority
 managed services, the supervisor stops only enough of those exact PIDs (least
 important first), starts the higher-priority manager, and admits the others again
 as RAM becomes available. Capability-locked services are skipped rather than
 blocking the queue.
+
+Purchase and backdoor actor RAM is held before admitting optional managers, using
+the current `getScriptRam` costs. This reserve does not block the initial daemon,
+fleet, or progression reader. The home upgrade helper uses rooted network RAM
+when available; its home reserve is retained when no remote host fits. Only
+supervisor-owned starter workers count as reclaimable remote RAM. Actor RAM
+shortages also request a critical home upgrade, even when every manager is running.
+Critical service/actor RAM has priority 90, ahead of an unfunded SQLInject or other
+ordinary program goal. Program savings resumes after the shortage is resolved;
+manual goals, Daedalus and Red Pill cash remain protected.
 
 The compact `Automation priority` dashboard lists that admission order explicitly,
 including disabled and capability-locked entries. `Next up` shows the current actor
@@ -73,7 +123,9 @@ purchase or backdoor no longer hides the following objective.
 
 The daemon is checked for process existence only. Preparation, recovery and slow
 log refreshes are not heartbeat failures. Its bootstrap now leaves an existing
-fleet manager and its budget flags alone. Its startup port validation derives
+fleet manager and its budget flags alone, including one running on cloud.
+A newly supervised daemon receives `--managed-services true` so only the supervisor
+launches its fleet manager. Its startup port validation derives
 reserved channels from `PORTS`, including augmentation and Darknet channels.
 Allocation, timing, event consumption and background preparation are unchanged.
 
@@ -95,6 +147,12 @@ relaunch it while the capability remains unavailable.
 The stock heartbeat advertises an absolute cash reserve floor. Fleet cloud
 spending preserves the maximum of its own reserve policy and this fresh stock
 floor. Dry-run, blocked, malformed and stale stock heartbeats do not reserve cash.
+Cloud hosting also preserves this floor and manual cash goals. A remote fleet
+manager refreshes `data/savings.json` from home before planning and immediately
+before a transaction; a failed copy defers spending. The supervisor refreshes
+remote strategy readers' copies each tick. Only a supervisor-owned
+`services:cloud` goal releases its own floor for a hosting purchase. Hosting
+requests/results use reserved port 4 with owner, timestamp and reset checks.
 This coordination is budget-only: stocks do not own JIT RAM, fleet allocation,
 worker ports or target selection.
 
@@ -318,6 +376,15 @@ reserve when Singularity and progression actions are enabled. Without Singularit
 it protects the manual purchase price instead. Completed program goals advance
 to a ready Daedalus cash milestone or Red Pill quote before other augmentations;
 manual goals remain authoritative. See [BN5/BN4 progression](bn5-bn4-progression.md).
+
+While a service RAM upgrade is pending, an already-funded TOR or port-opening
+program costing at most 10% of that upgrade receives priority 94 if its purchase
+actor fits on home. This lets inexpensive root unlocks expand income before a
+large RAM bill. Cheap openers ($5m or less) that unlock worker RAM also rank ahead
+of Navigator, so enabling Darknet cannot hide the FTP/SMTP bootstrap path.
+The usual cash percentage reserve still applies, and Daedalus (95),
+Red Pill (100), and manual goals remain protected. Navigator, Formulas, unfunded
+purchases, and purchases without actor RAM retain their ordinary priorities.
 
 With augmentation actions enabled, `--savings auto` advances from completed port
 programs to the next augmentation. Fleet and stock entries protect that goal; only

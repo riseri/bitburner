@@ -1,10 +1,11 @@
 import { readSavings } from "lib/savings.js";
 import { PORTS } from "lib/ports.js";
+import { singularityAvailable, augmentationInstallationPending } from "lib/progression-protocol.js";
 
 /** Quotes are cheap to consume; expensive Singularity stays in this short-lived helper. */
 export async function main(ns) {
     const [epoch,target,floor,quoteOnly=false]=ns.args, r=ns.getResetInfo();
-    if(r.currentNode!==4 || [r.currentNode,r.lastNodeReset,r.lastAugReset].join(":")!==epoch ||
+    if(!singularityAvailable(r) || [r.currentNode,r.lastNodeReset,r.lastAugReset].join(":")!==epoch ||
         !Number.isFinite(target) || target<8 || !Number.isFinite(floor) || floor<0) return;
     const ram=ns.getServerMaxRam("home");
     if(ram>=target) return;
@@ -24,7 +25,7 @@ export async function main(ns) {
     if (typeof ns.getPortHandle === "function") {
         const status=ns.getPortHandle(PORTS.AUGMENTATION_STATUS).peek();
         if (status?.resetEpoch === epoch && (status.progression?.resetImminent || status.progression?.redPill === "queued" ||
-            ["INSTALL", "RESET", "COMPLETE_NODE"].includes(status.phase))) return;
+            augmentationInstallationPending(status) || ["RESET", "COMPLETE_NODE"].includes(status.phase))) return;
     }
     const current=ns.getResetInfo();
     if([current.currentNode,current.lastNodeReset,current.lastAugReset].join(":")!==epoch) return;

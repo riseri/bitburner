@@ -219,3 +219,101 @@ test('home upgrade helper rechecks its reset, cost, goal floor, and RAM target',
         assert.equal(upgrades, reason === 'ok' ? 1 : 0, reason);
     }
 });
+
+test('target analysis runs remotely on an 8 GB home and safely retargets marked workers', async () => {
+    const f = fixture(), selector = loadScript('starter-target.js', f.clock), state = {}, ports = new Map();
+    f.costs['starter-target.js'] = 5.35;
+    const stats = host => ({ hasAdminRights: f.hosts[host].root, moneyMax: host === 'foodnstuff' ? 50e6 : 1e6,
+        moneyAvailable: host === 'foodnstuff' ? 50e6 : 1e6, requiredHackingSkill: 1,
+        minDifficulty: 1, hackDifficulty: 1, serverGrowth: host === 'n00dles' ? 3000 : 50 });
+    Object.assign(f.ns, { pid: 1, getResetInfo: () => ({ currentNode: 4, lastNodeReset: 1, lastAugReset: 2 }),
+        getPortHandle: n => { if (!ports.has(n)) ports.set(n, new Port()); return ports.get(n); },
+        getHackingLevel: () => 246, getHackingMultipliers: () => ({ chance: 1, money: 1, growth: 1 }),
+        getServer: stats, getHackTime: () => 1000, isRunning: () => true });
+    f.processes.set(999, { pid: 999, host: 'foodnstuff', filename: 'starter-worker.js', threads: 1, args: ['foodnstuff'] });
+    const hosts = f.api.starterHosts(f.ns), copied = new Set();
+    await f.api.tickStarterPool(f.ns, hosts, copied, state);
+    const helper = f.launches.find(process => process.filename === 'starter-target.js');
+    assert.equal(helper.host, 'foodnstuff');
+    assert.equal(f.hosts.home.ram, 8);
+    await selector.main({ ...f.ns, args: helper.args });
+    f.processes.delete(helper.pid); f.clock.now += 5000;
+    const pool = await f.api.tickStarterPool(f.ns, hosts, copied, state);
+    assert.equal(pool.target, 'foodnstuff');
+    for (const host of hosts) for (const process of f.api.starterWorkers(f.ns, host)) assert.equal(process.args[0], pool.target);
+    assert.ok(f.processes.has(999), 'manually launched worker retained');
+    const launches = f.launches.length, kills = f.killed.length;
+    f.clock.now += 60000;
+    await f.api.tickStarterPool(f.ns, hosts, copied, state);
+    assert.equal(f.launches.length, launches, 'cooldown avoids extra helpers and worker restarts');
+    assert.equal(f.killed.length, kills);
+    assert.ok(f.api.stopStarterPool(f.ns, hosts));
+    assert.deepEqual([...f.processes.keys()], [999]);
+});
+
+test('supervisor restart adopts marked workers on an advanced target without restarting them', async () => {
+    const f = fixture(), hosts = f.api.starterHosts(f.ns);
+    await f.api.tickStarterPool(f.ns, hosts);
+    for (const process of f.processes.values()) process.args[0] = 'foodnstuff';
+    const state = {}, launches = f.launches.length;
+    const pool = await f.api.tickStarterPool(f.ns, hosts, new Set(), state);
+    assert.equal(state.target, 'foodnstuff');
+    assert.equal(pool.target, 'foodnstuff');
+    assert.equal(f.launches.length, launches);
+    assert.equal(f.killed.length, 0);
+});
+
+test('64 GB starter yields early augmentation RAM and hands off without a 128 GB upgrade', async () => {
+    const f = fixture(), supervisor = loadScript('supervisor.js', f.clock);
+    Object.assign(f.costs, { 'supervisor.js': 12.75, 'daemon.js': 15.75, 'fleet-manager.js': 10.45,
+        'progression-manager.js': 6, 'augmentation-manager.js': 25.8, 'home-upgrade.js': 7.25 });
+    f.hosts.home.ram = 64; f.hosts.home.foreign = 12.75;
+    f.processes.set(31, { pid: 31, host: 'home', filename: 'progression-manager.js', threads: 1, args: [] });
+    f.processes.set(32, { pid: 32, host: 'home', filename: 'augmentation-manager.js', threads: 1, args: [] });
+    f.ns.getResetInfo = () => ({ currentNode: 4, lastNodeReset: 1, lastAugReset: 2 });
+    f.ns.sleep = async () => { throw Error('should not wait for another RAM tier'); };
+    const cfg = { augmentationActions: true, progression: true, progressionActions: true };
+    assert.ok(supervisor.starterAdmissionRam(f.ns, cfg, f.costs['home-upgrade.js']) + f.costs['augmentation-manager.js'] > 64);
+    await supervisor.runStarterMode(f.ns, cfg);
+    assert.equal(f.hosts.home.ram, 64);
+    assert.deepEqual(f.killed, [32]);
+    assert.ok(f.processes.has(31), 'progression remains running');
+    assert.ok(64 - f.ns.getServerUsedRam('home') >= f.costs['daemon.js'] + f.costs['fleet-manager.js'] + f.costs['home-upgrade.js']);
+    assert.equal(f.launches.length, 0, 'no unnecessary upgrade or new workers');
+});
+
+test('failed augmentation cancellation retains starter income and retries handoff', async () => {
+    const f = fixture(), supervisor = loadScript('supervisor.js', f.clock);
+    Object.assign(f.costs, { 'supervisor.js': 12.75, 'daemon.js': 15.75, 'fleet-manager.js': 10.45,
+        'progression-manager.js': 6, 'augmentation-manager.js': 25.8 });
+    f.hosts.home.ram = 64; f.hosts.home.foreign = 12.75;
+    f.processes.set(31, { pid: 31, host: 'home', filename: 'progression-manager.js', threads: 1, args: [] });
+    f.processes.set(32, { pid: 32, host: 'home', filename: 'augmentation-manager.js', threads: 1, args: [] });
+    f.ns.getResetInfo = () => ({ currentNode: 4, lastNodeReset: 1, lastAugReset: 2 });
+    const kill = f.ns.kill;
+    f.ns.kill = pid => pid === 32 ? false : kill(pid);
+    let sleeps = 0;
+    f.ns.sleep = async () => {
+        assert.equal(++sleeps, 1);
+        assert.ok(f.launches.some(process => process.filename === 'starter-worker.js' && process.host !== 'home'));
+        assert.ok(f.processes.has(32));
+        f.ns.kill = kill;
+    };
+    await supervisor.runStarterMode(f.ns, { augmentationActions: true, progression: true, progressionActions: false });
+    assert.equal(sleeps, 1);
+    assert.ok(!f.processes.has(32));
+    assert.equal(f.api.starterHosts(f.ns).flatMap(host => f.api.starterWorkers(f.ns, host)).length, 0);
+});
+
+test('augmentation action opt-out preserves a manually running augmentation manager', async () => {
+    const f = fixture(), supervisor = loadScript('supervisor.js', f.clock);
+    Object.assign(f.costs, { 'progression-manager.js': 6, 'augmentation-manager.js': 40 });
+    f.hosts.home.ram = 64;
+    f.processes.set(32, { pid: 32, host: 'home', filename: 'augmentation-manager.js', threads: 1, args: [] });
+    f.ns.getResetInfo = () => ({ currentNode: 4, lastNodeReset: 1, lastAugReset: 2 });
+    f.ns.sleep = async () => { throw Error('end fixture'); };
+    await assert.rejects(supervisor.runStarterMode(f.ns, { progression: true, augmentationActions: false }), /end fixture/);
+    assert.ok(f.processes.has(32));
+    assert.ok(!f.killed.includes(32));
+    assert.ok(f.launches.some(process => process.filename === 'starter-worker.js' && process.host !== 'home'));
+});

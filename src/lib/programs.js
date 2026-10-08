@@ -23,10 +23,12 @@ export function rankPrograms(programs, { servers = [], homeRam = 0, darknetRam =
     return programs.filter(p=>!p.owned).map(p=>{
         const unlocked = !p.category ? servers.filter(s=>!s.hasAdminRights && s.numOpenPortsRequired <= openers+1 && s.numOpenPortsRequired > openers) : [];
         const addedRam = unlocked.reduce((n,s)=>n+(s.maxRam||0),0);
+        const cheapRootRam = !p.category && p.cost <= 5_000_000 && addedRam > 0;
         // Clear cloud's 79 plus arbitration hysteresis, below core RAM (90),
         // Daedalus (95), and Red Pill (100).
-        let priority = !p.category ? openers===0 ? 85 : 50 + Math.min(20, Math.log2(1+addedRam)) : p.category === "darknet" ? 84 : 45;
+        let priority = !p.category ? openers===0 || cheapRootRam ? 85 : 50 + Math.min(20, Math.log2(1+addedRam)) : p.category === "darknet" ? 84 : 45;
         let useful = true, reason = !p.category ? unlocked.length + " newly rootable servers / " + addedRam + " GB" : "";
+        if (cheapRootRam) reason = "Bootstrap worker RAM: " + reason;
         if (p.category === "darknet") reason = darknetAvailableRam >= darknetRam
             ? "Navigator unlocks enabled Darknet; minimum activation fits"
             : "Navigator unlocks enabled Darknet; home RAM expansion needed afterward";

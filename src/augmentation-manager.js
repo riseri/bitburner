@@ -259,7 +259,7 @@ function handleEndgameReputation(ns, cfg, state, context, goal) {
 }
 
 async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold = false) {
-    if (!bypassThreshold && queued < cfg.minInstall) return { state: "WAITING", phase: "INSTALL", plan, queued,
+    if (!queued || !bypassThreshold && queued < cfg.minInstall) return { state: "WAITING", phase: queued ? "QUEUE" : "UNLOCK", plan, queued,
         recommendation: queued ? `${queued}/${cfg.minInstall} augmentations queued; unlock another faction, install manually, or lower --min-install to ${queued}`
             : "No matching unowned augmentations from joined factions; unlock or join another faction" };
     if (!ns.fileExists(BOOTSTRAP, HOME)) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
@@ -290,7 +290,7 @@ async function handleInstallation(ns, cfg, state, plan, queued, bypassThreshold 
     if (ns.singularity.isBusy() || ns.singularity.getCurrentWork()) return { state: "BLOCKED", phase: "INSTALL", plan, queued,
         recommendation: "Player activity changed while saving; refresh before automatic installation" };
     queued = queuedCount(ns);
-    if (!queued) return { state: "WAITING", phase: "INSTALL", plan, queued,
+    if (!queued) return { state: "WAITING", phase: "UNLOCK", plan, queued,
         recommendation: "No augmentations remain queued; refresh the installation decision" };
 
     // Optional repeatable purchases cannot approve or postpone a reset. Run one

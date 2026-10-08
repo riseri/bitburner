@@ -17,6 +17,12 @@ dashboard consume this snapshot. Consumers require a matching live home producer
 and reject snapshots older than 15 seconds, future timestamps, and wrong epochs.
 The standalone planner and manual observations remain fallback paths.
 
+Waiting for another faction or a larger augmentation queue publishes `UNLOCK` or
+`QUEUE`. These states allow progression, home RAM, and fleet purchases to continue.
+`resetImminent` requires a nonempty queue and an approved installation, including
+an installation waiting on its execution checks. An empty queue never retains
+capital for an augmentation reset.
+
 Static augmentation metadata is cached for 60 seconds and invalidated by faction,
 target or epoch changes. Prices, ownership and reputation are live each decision.
 Catalogs omit repeatable NeuroFlux purchases from ordinary baskets. Once an
@@ -178,7 +184,8 @@ augmentation/stock/Go/Darknet services are still admitted later. Once the core f
 the augmentation manager is admitted ahead of the contract solver: joining factions,
 working for reputation and publishing the shared objective must not wait for optional
 contract solving. Enabled progression
-services can start earlier if they leave room for the upgrade helper. Subsequent home upgrades serve enabled,
+services can start earlier if they leave room for the upgrade helper and progression
+actors. Subsequent home upgrades serve enabled,
 available blocked services/helpers. The supervisor uses game-provided script RAM
 quotes; expensive upgrade calls stay in a helper. Port 8 caches a quote by reset
 and current RAM for five minutes. Unknown/failed quotes retry at most once a
@@ -201,7 +208,19 @@ ordinary augmentation/faction plans about 70–72, ordinary programs about 50–
 and Formulas normally 45 (80 at the final-server stage). Close requests retain the
 existing choice. Home RAM takes priority 90 during bootstrap or when fleet/progression/augmentation automation
 cannot start, so a program goal cannot hold up the RAM needed to execute it.
-The main supervisor also reserves helper space when admitting new services;
+Port openers priced at $5m or less receive baseline priority 85 when they unlock
+worker RAM. This keeps FTP/SMTP bootstrap purchases ahead of Navigator while
+retaining Navigator's lead over costly openers and programs without a RAM benefit.
+An already-funded TOR or port opener worth at most 10% of the pending service RAM
+quote receives priority 94 when its purchase actor fits. This lets small root
+unlocks improve income before a large service upgrade; Navigator and Formulas keep
+their ordinary priorities. Daedalus and Red Pill suppress this boost so arbitration
+hysteresis cannot retain the old program goal ahead of either milestone.
+The supervisor reserves purchase/backdoor actor space before optional services,
+including early starter admission, without blocking the initial money engine.
+Upgrade-helper RAM is reserved on home only when no rooted remote host can run it.
+An actor waiting for home RAM also makes the upgrade critical. The main supervisor
+continues to reserve helper space when admitting new services;
 existing daemon workers retain their ownership. These values intentionally favor near-term progression over
 speculative income; dashboard output names deferred competitors. Fleet ROI checks
 remain, with no surplus override when a batch is queued and a five-minute payback

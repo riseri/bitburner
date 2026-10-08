@@ -55,11 +55,17 @@ arguments. The BN4 route controller is enabled by default through the augmentati
 manager when progression actions are enabled. It is scoped to BN4.1, BN4.2 and
 BN4.3; it is not a strategy for every BitNode or every optional subsystem.
 
-- The starter pool earns money while a small helper upgrades home RAM until the
-  daemon, fleet, enabled progression and upgrade-helper headroom fit, then admits
-  other enabled services as RAM permits. A fresh 32 GB home stays in starter mode
-  when that core set needs the next RAM tier. Further home
-  upgrades fund blocked services/helpers after bootstrap. Quotes are cached so
+- The starter pool earns while isolated helpers plan cloud service placement
+  and, when needed, home RAM upgrades. Cloud hosting is enabled by default:
+  daemon, fleet and enabled progression can use purchased servers instead of
+  waiting for a higher home tier. The planner reuses purchased capacity and quotes
+  the smallest purchase that makes the core set fit. `--cloud-services false`
+  retains home placement for new services. Target checks explain keeping or
+  leaving n00dles, and the dashboard shows the cloud quote and assigned hosts.
+  An early augmentation manager yields RAM to this core set instead of forcing
+  another home upgrade before hacking can start. Augmentation management and
+  home-specific actors stay on home; further home upgrades fund their RAM.
+  Quotes are cached so
   unaffordable upgrades do not repeatedly interrupt starter workers. The helper runs on free
   rooted remote RAM and only reclaims workers owned by the starter pool. Manual
   savings goals remain protected. Your SF1 normally gives 32 GB on a new node;

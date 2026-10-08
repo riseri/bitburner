@@ -11,6 +11,7 @@ import { readSharingDemand } from "lib/progression-objective.js";
 import { schedulerCapacity } from "lib/scheduler-capacity.js";
 import { targetLimit } from "lib/target-limit.js";
 import { createSchedulerScaling, recordSchedulerTiming } from "lib/scheduler-scaling.js";
+import { serviceProcesses } from "lib/service-hosts.js";
 
 const HOME = "home";
 
@@ -63,6 +64,7 @@ export async function main(ns) {
 		["cloud-min-ram", 32],
 		["cloud-prefix", "cloud"],
 		["fleet-port", PORTS.FLEET_STATUS],
+		["managed-services", false],
 		["control-port", PORTS.JIT_CONTROL],
 	]);
 
@@ -93,6 +95,7 @@ export async function main(ns) {
 		),
 		port: Number(flags.port),
 		fleetPort: Number(flags["fleet-port"]),
+		managedServices: asBoolean(flags["managed-services"]),
 		controlPort: Number(flags["control-port"]),
 		periodScale: 1,
 		ram: {},
@@ -289,6 +292,7 @@ function startFleetManager(
 	ns,
 	cfg
 ) {
+	if (cfg.managedServices) return;
 	if (
 		!ns.fileExists(
 			FLEET_MANAGER,
@@ -300,7 +304,7 @@ function startFleetManager(
 
 	// Adopt an existing fleet, including its cloud budget flags. A daemon restart
 	// must not reset another service's configuration or create a second owner.
-	if (ns.ps(HOME).some(process => process.filename === FLEET_MANAGER)) return;
+	if (serviceProcesses(ns, FLEET_MANAGER).length) return;
 
 	const pid =
 		ns.run(
@@ -4517,7 +4521,7 @@ function renderSchedulerFrame(ns, pool) {
 	const backgroundEta = background?.active ? Math.max(0, background.active.finishAt - now) : 0;
 	const usedRam = [...pool.running.values()].filter(j => j.host !== HOME).reduce((n,j) => n + j.ram, 0) + prepRam - backgroundPrepRam(pool.cfg.prepStates || pool.cfg.backgroundPrep, HOME) + [...pool.foreign.values()].reduce((n, ram) => n + ram, 0);
 	const snapshot = {
-		type: "jit-status", version: 2, pid: ns.pid, generatedAt: now,
+		type: "jit-status", version: 2, pid: ns.pid, host: typeof ns.getHostname === "function" ? ns.getHostname() : HOME, generatedAt: now,
 		capacity: schedulerCapacity(pool, now),
 		policy: pool.cfg.hackingPolicy ? { ...pool.cfg.hackingPolicy, ...xpPipelineStatus(ns, pool),
 			bestMoney: pool.targetAnalysis?.[0] ? { name: pool.targetAnalysis[0].name, estimatedMoneyPerSecond: pool.targetAnalysis[0].steady } : null } : null,

@@ -11,10 +11,12 @@ import { PORTS } from "lib/ports.js";
 import { createService, tickService, serviceLabel, readArgument } from "lib/service-lifecycle.js";
 import { createActionState, tickProgressionActions, actorProcesses } from "lib/progression-dispatch.js";
 import { pathFromHome, singularityAvailable, resetEpoch } from "lib/progression-protocol.js";
-import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget, selectedServices, darknetActivation } from "lib/service-catalog.js";
+import { serviceDefinition, supervisorFiles, ACTION_DEFAULTS, supervisorRamBudget, selectedServices, darknetActivation, homeUpgradeEnabled } from "lib/service-catalog.js";
 import { starterHosts, starterWorkers, stopStarterPool, tickStarterPool } from "lib/starter-pool.js";
 import { targetLimit } from "lib/target-limit.js";
 import { schedulerLimit } from "lib/scheduler-scaling.js";
+import { serviceProcesses, readServiceHosts, readServiceSettings } from "lib/service-hosts.js";
+import { tickCoreHosting, prepareCoreHosts } from "lib/core-hosting.js";
 
 const HOME = "home";
 const SUPERVISOR = "supervisor.js";
@@ -89,6 +91,7 @@ export async function main(ns) {
 		["save-label", "Savings"],
 		["save-target", ""],
 		["cloud-roi", true],
+		["cloud-services", true],
 		["cloud-payback", 1800],
         ["cloud-min-ram", 8],
 		["home-reserve", 8],
@@ -130,6 +133,7 @@ export async function main(ns) {
 		resetPolicy: String(flags["reset-policy"]),
 		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
 		cloudRoi: asBoolean(flags["cloud-roi"]),
+		cloudServices: asBoolean(flags["cloud-services"]),
 		cloudPayback: Number(flags["cloud-payback"]),
         cloudMinRam: Number(flags["cloud-min-ram"]),
 		// A property named share is charged as the worker API by the RAM analyzer.
@@ -164,6 +168,8 @@ export async function main(ns) {
 	};
 
 	validateSupervisorOptions(flags, cfg);
+	cfg.serviceHosts = readServiceHosts(ns);
+	cfg.serviceSettings = readServiceSettings(ns);
 	await saveSupervisorBootstrap(ns);
 	const dashboardUi = { opened: new Set() };
 	openDashboard(ns, cfg, dashboardUi, ns.pid, 0);
@@ -206,7 +212,8 @@ export async function main(ns) {
 		// does not fit. Existing processes are always adopted and monitored.
 		const stockGate = stockAccess(ns);
 		const capabilities = supervisorCapabilities(ns, stockGate);
-		cfg.shareReserve = Math.max(cfg.homeReserve, supervisorRamBudget(ns, cfg, capabilities).utilityRam);
+		const ramBudget = supervisorRamBudget(ns, cfg, capabilities);
+		cfg.shareReserve = Math.max(cfg.homeReserve, ramBudget.utilityRam);
 		const coreServices = [DAEMON, FLEET].map(name => services.find(service => service.name === name));
 		const admittedServices = [...coreServices];
 		for (const service of services.filter(service => !coreServices.includes(service))) {
@@ -233,11 +240,19 @@ export async function main(ns) {
 			}
 			admittedServices.push(service);
 		}
+		const cloudFiles = [DAEMON, FLEET, ...(cfg.progression ? [PROGRESSION] : [])];
+		const upgradeRam = homeUpgradeEnabled(cfg, capabilities) ? ns.getScriptRam("home-upgrade.js", HOME) : 0;
+        const upgradeHosts = upgradeRam > 0 ? starterHosts(ns) : [];
+		if (cfg.cloudServices && cloudFiles.some(file => !findProcess(ns, file)))
+			await tickCoreHosting(ns, cfg, starterHosts(ns), cloudFiles, upgradeRam);
+		for (const service of services.filter(s => cloudFiles.includes(s.name)))
+			service.host = findProcess(ns, service.name)?.host || cfg.serviceHosts?.[service.name] || HOME;
+		await prepareCoreHosts(ns, cfg, cloudFiles);
+		for (const service of services.filter(s => cloudFiles.includes(s.name))) service.filesReady = !cfg.hostingBlocked?.has(service.name);
 		yieldFleetRamToDaemon(ns, coreServices);
-        const upgradeReserve = capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions
-            ? ns.getScriptRam("home-upgrade.js", HOME) : 0;
+        const upgradeReserve = homeUpgradeReserve(ns, upgradeHosts, upgradeRam);
         cfg.shareReserve = Math.max(cfg.shareReserve, upgradeReserve);
-		const serviceBlocker = tickServicePriority(ns, reserveRouteHelper(ns, services, admittedServices), "", upgradeReserve);
+		const serviceBlocker = tickServicePriority(ns, reserveRouteHelper(ns, services, admittedServices), "", upgradeReserve, ramBudget.actorRam);
 		const managedDaemon = coreServices.find(service => service.name === DAEMON);
 		if (managedDaemon.state !== "CONFLICT") openDashboard(ns, cfg, dashboardUi, managedDaemon.pid, 1);
 
@@ -261,16 +276,11 @@ export async function main(ns) {
 			augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER);
 		try { await updateSupervisorSavings(ns, cfg, cfg.augmentationPlan, progressionStatus, augmentationStatus, fleetStatus); }
 		catch (error) { cfg.savingsStatus = `Savings update failed: ${String(error.message || error)}`; }
-        if (capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions) {
-            cfg.homeUpgradeCritical = progressionRamBlocked(services);
-            const target = ongoingHomeTarget(ns, cfg, capabilities, services, jobs);
-            if (target > ns.getServerMaxRam(HOME)) await tickStarterHomeUpgrade(ns, starterHosts(ns), target, cfg);
-            else { cfg.homeInvestment = null; cfg.homeUpgradeStatus = ""; }
-        }
+        await tickHomeServiceUpgrade(ns, cfg, capabilities, services, jobs, actions, upgradeHosts);
         const performanceAllowed = capabilities.singularity && cfg.augmentationActions && cfg.progression && cfg.progressionActions &&
             !serviceBlocker && !cfg.homeInvestment && !readProgressionSnapshot(ns)?.resetImminent;
         const homePolicyPort = ns.getPortHandle(PORTS.HOME_CAPACITY);
-        const missingRam = admittedServices.filter(s => !findProcess(ns, s.name)).reduce((n,s) => n + ns.getScriptRam(s.name, HOME), 0);
+        const missingRam = admittedServices.filter(s => (s.host || HOME) === HOME && !findProcess(ns, s.name)).reduce((n,s) => n + ns.getScriptRam(s.name, HOME), 0);
         const capitalRam = performanceAllowed ? ns.getScriptRam("home-capital.js", HOME) : 0;
         const reserve = Math.max(cfg.homeReserve, cfg.shareReserve, capitalRam + 8, missingRam + cfg.shareReserve);
         cfg.sharingDemand = readSharingDemand(ns);
@@ -292,19 +302,31 @@ export async function main(ns) {
 	}
 }
 
-function tickServicePriority(ns, services, blockedBy = "", reserveRam = 0) {
+function tickServicePriority(ns, services, blockedBy = "", reserveRam = 0, actorReserveRam = 0) {
 	let blocker = blockedBy;
+	const hostBlockers = new Map();
+	if (blockedBy) hostBlockers.set(HOME, blockedBy);
 	for (let index = 0; index < services.length; index++) {
 		const service = services[index];
 		const process = findProcess(ns, service.name);
+		if (process) service.host = process.host;
+		const host = service.host || HOME, heldRam = host === HOME
+            ? Math.max(reserveRam, [DAEMON, FLEET, PROGRESSION].includes(service.name) ? 0 : actorReserveRam) : 0;
 		if (process) {
 			service.waitReason = "";
 			tickService(ns, service);
 			continue;
 		}
-		if (blocker) {
+		if (service.filesReady === false) {
+			service.state = "WAITING_FILES";
+			service.waitReason = `copying dependencies to ${host}`;
+			blocker = `${service.name} ${service.waitReason}`;
+			hostBlockers.set(host, blocker);
+			continue;
+		}
+		if (hostBlockers.has(host)) {
 			service.state = "WAITING_PRIORITY";
-			service.waitReason = blocker;
+			service.waitReason = hostBlockers.get(host);
 			continue;
 		}
 		// Let lifecycle accounting observe exits and honor retry backoff before
@@ -315,19 +337,20 @@ function tickServicePriority(ns, services, blockedBy = "", reserveRam = 0) {
 			continue;
 		}
 		const needed = ns.getScriptRam(service.name, HOME) * Math.max(1, service.threads || 1);
-		let free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) - reserveRam;
-		if (needed > free) {
+		let free = ns.getServerMaxRam(host) - ns.getServerUsedRam(host) - heldRam;
+		if (needed > free && host === HOME) {
 			yieldHomeShare(ns);
-			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) - reserveRam;
+			free = ns.getServerMaxRam(host) - ns.getServerUsedRam(host) - heldRam;
 		}
 		if (needed > free) {
 			preemptLowerPriorityServices(ns, service, services.slice(index + 1), needed - free);
-			free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) - reserveRam;
+			free = ns.getServerMaxRam(host) - ns.getServerUsedRam(host) - heldRam;
 		}
 		if (needed > 0 && needed > free) {
 			service.state = "WAITING_RAM";
-			service.waitReason = `needs ${needed.toFixed(2)} GB; ${Math.max(0, free).toFixed(2)} GB free${reserveRam > 0 ? ` after ${reserveRam.toFixed(2)} GB upgrade reserve` : ""}`;
+			service.waitReason = `needs ${needed.toFixed(2)} GB; ${Math.max(0, free).toFixed(2)} GB free on ${host}${heldRam > 0 ? ` after ${heldRam.toFixed(2)} GB helper reserve` : ""}`;
 			blocker = `${service.name} ${service.waitReason}`;
+			hostBlockers.set(host, blocker);
 			continue;
 		}
 		service.waitReason = "";
@@ -401,7 +424,7 @@ function sharingLabel(status) {
 
 function preemptLowerPriorityServices(ns, owner, lowerServices, shortfall) {
 	const victims = lowerServices.map(service => ({service, process: findProcess(ns, service.name)}))
-		.filter(item => item.process)
+		.filter(item => item.process && item.process.host === (owner.host || HOME))
 		.reverse();
 	const reclaimable = victims.reduce((sum, item) =>
 		sum + ns.getScriptRam(item.process.filename, HOME) * Math.max(1, item.process.threads || 1), 0);
@@ -422,43 +445,75 @@ function preemptLowerPriorityServices(ns, owner, lowerServices, shortfall) {
 
 // Borrow free network RAM while home cannot yet hold the full money engine.
 async function runStarterMode(ns, cfg = {}, dashboardUi = null) {
-	const autoHome = cfg.augmentationActions && cfg.progression && cfg.progressionActions && bn4Route(ns.getResetInfo());
+	const autoHome = homeUpgradeEnabled(cfg) && singularityAvailable(ns.getResetInfo());
     const coreFiles = [DAEMON, FLEET, ...(cfg.progression ? [PROGRESSION] : [])];
     const helperRam = autoHome ? ns.getScriptRam("home-upgrade.js", HOME) : 0;
     cfg.homeUpgradeCritical = Boolean(autoHome);
 	const copied = new Set();
+	const starterState = {};
 	while (true) {
 		const hosts = starterHosts(ns);
+		const homeHelper = cfg.cloudServices ? 0 : helperRam;
+		const keepHomeRam = helperRam;
+		if (cfg.cloudServices) await tickCoreHosting(ns, cfg, hosts, coreFiles, keepHomeRam);
 		const maxRam = ns.getServerMaxRam(HOME);
-        const coreRam = starterAdmissionRam(ns, cfg, helperRam) +
-            (findProcess(ns, AUGMENTATION_MANAGER) ? ns.getScriptRam(AUGMENTATION_MANAGER, HOME) : 0);
+        const coreRam = starterAdmissionRam(ns, cfg, homeHelper);
 
 		const workerRam = ns.getScriptRam(STARTER_WORKER, HOME);
 		const homeWorkerRam = starterWorkers(ns, HOME).reduce((sum, process) => sum + workerRam * process.threads, 0);
-		const missingCore = coreFiles.filter(file => !findProcess(ns, file))
-			.reduce((sum, file) => sum + ns.getScriptRam(file, HOME), helperRam);
-		const ready = coreRam > 0 && maxRam >= coreRam &&
+		const coreHost = file => findProcess(ns, file)?.host || cfg.serviceHosts?.[file] || HOME;
+		const missingCore = coreFiles.filter(file => coreHost(file) === HOME && !findProcess(ns, file))
+			.reduce((sum, file) => sum + ns.getScriptRam(file, HOME), homeHelper);
+        // Early augmentation work is lower priority than the money engine. It
+        // must not inflate the RAM tier required to leave starter mode.
+        const augmentation = cfg.augmentationActions
+            ? ns.ps(HOME).filter(process => process.filename === AUGMENTATION_MANAGER) : [];
+        const augmentationRam = augmentation.length === 1
+            ? ns.getScriptRam(AUGMENTATION_MANAGER, HOME) * Math.max(1, augmentation[0].threads || 1) : 0;
+		let ready = coreRam > 0 && maxRam >= coreRam &&
+			maxRam - ns.getServerUsedRam(HOME) + homeWorkerRam + augmentationRam >= missingCore;
+        if (ready && augmentation.length === 1 && maxRam - ns.getServerUsedRam(HOME) + homeWorkerRam < missingCore) {
+            if (ns.kill(augmentation[0].pid)) {
+                const service = cfg.starterServices?.find(item => item.name === AUGMENTATION_MANAGER);
+                if (service) { service.pid = 0; service.state = "WAITING_PRIORITY"; service.waitReason = "yielded RAM to the money engine"; }
+            }
+        }
+        ready = ready &&
 			maxRam - ns.getServerUsedRam(HOME) + homeWorkerRam >= missingCore;
-		if (ready && stopStarterPool(ns, hosts)) {
-			ns.tprint(`Starter mode complete at ${maxRam.toFixed(2)} GB home RAM; admitting services in RAM priority order`);
+		for (const host of new Set(coreFiles.map(coreHost).filter(host => host !== HOME))) {
+			const missing = coreFiles.filter(file => coreHost(file) === host && !findProcess(ns, file))
+				.reduce((sum, file) => sum + ns.getScriptRam(file, HOME), 0);
+			const reclaim = starterWorkers(ns, host).reduce((sum, p) => sum + workerRam * p.threads, 0);
+			ready = ready && ns.getServerMaxRam(host) - ns.getServerUsedRam(host) + reclaim >= missing;
+		}
+		if (ready && cfg.cloudServices) ready = await prepareCoreHosts(ns, cfg, coreFiles);
+		if (ready && stopStarterPool(ns, [...new Set([...hosts, ...coreFiles.map(coreHost)])])) {
+			ns.tprint(`Starter mode complete; admitting core services: ${coreFiles.map(file => `${file} on ${coreHost(file)}`).join(", ")}`);
 			return;
 		}
         if (!ready) await tickStarterProgression(ns, cfg, helperRam);
-		const pool = ready ? { rooted: true, threads: 0, workers: 0, failures: 1 }
-			: await tickStarterPool(ns, hosts, copied);
+		const pool = ready ? { rooted: true, threads: 0, workers: 0, failures: 1, target: starterState.target || "n00dles" }
+			: await tickStarterPool(ns, hosts, copied, starterState);
 
-        if (autoHome && !ready) await tickStarterHomeUpgrade(ns, hosts, coreRam, cfg);
+        if (autoHome && !ready && coreRam > maxRam && !cfg.serviceInvestment && !cfg.hosting?.requestId) await tickStarterHomeUpgrade(ns, hosts, coreRam, cfg);
 		ns.clearLog();
 		dashboardTitle(ns, "BITBURNER AUTOMATION :: STARTER MODE");
 		dashboardSection(ns, "Income bootstrap");
-		dashboardRow(ns, "Target", "n00dles");
-		dashboardRow(ns, "Workers", !pool.rooted ? "WAITING FOR ROOT on n00dles" : pool.threads
+		dashboardRow(ns, "Target", pool.target);
+		if (starterState.targetStatus) dashboardRow(ns, "Target check", starterState.targetStatus);
+		dashboardRow(ns, "Workers", !pool.rooted ? `WAITING FOR ROOT on ${pool.target}` : pool.threads
 			? `${pool.threads} threads across ${pool.workers} servers` : "WAITING FOR RAM on home and rooted servers");
 		if (pool.failures) dashboardRow(ns, "Retry", ready ? "Waiting for starter workers to stop before handoff" : `${pool.failures} deployment(s) will retry`);
 		dashboardSection(ns, "Upgrade path");
-		dashboardRow(ns, "Home RAM", `${formatRam(maxRam)} / ${formatRam(coreRam)} needed for core services${helperRam ? " + upgrade helper" : ""}`);
+		dashboardRow(ns, "Home RAM", `${formatRam(maxRam)} / ${formatRam(coreRam)} needed for core services on home${!cfg.cloudServices && helperRam ? " + upgrade helper" : ""}`);
+		if (cfg.cloudServices) dashboardRow(ns, "Cloud services", cfg.hostingStatus || "Using existing service placement");
+		if (cfg.serviceInvestment) dashboardRow(ns, "Cloud budget", `${cash(cfg.serviceInvestment.amount)} quoted for service RAM`);
+        if (Object.values(cfg.serviceHosts || {}).some(host => host !== HOME)) dashboardRow(ns, "Placement",
+            coreFiles.map(file => `${file.replace("-manager.js", "").replace(".js", "")} @ ${coreHost(file)}`).join("; "));
         if (cfg.homeUpgradeStatus) dashboardRow(ns, "Home upgrade", cfg.homeUpgradeStatus);
-		dashboardRow(ns, "Next", autoHome ? "Saving for automatic home RAM upgrades; remote starter workers keep earning" : "Upgrade home RAM manually; full automation starts when enough RAM is free");
+		dashboardRow(ns, "Next", cfg.cloudServices && (cfg.serviceInvestment || cfg.hosting?.requestId)
+			? "Preparing affordable cloud service RAM; starter workers keep earning"
+			: autoHome ? "Saving for automatic RAM upgrades; starter workers keep earning" : "Core services start when their assigned servers have free RAM");
 		await ns.sleep(5_000);
 		finishDashboardLayout(ns, dashboardUi);
 	}
@@ -474,7 +529,9 @@ function yieldFleetRamToDaemon(ns, coreServices, now = Date.now()) {
 	if (!daemon || !fleet || findProcess(ns, DAEMON)) return false;
 	const fleetProcess = findProcess(ns, FLEET);
 	if (!fleetProcess) return false;
-	const free = ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME);
+	const host = daemon.host || HOME;
+	if (fleetProcess.host !== host) return false;
+	const free = ns.getServerMaxRam(host) - ns.getServerUsedRam(host);
 	const daemonRam = ns.getScriptRam(DAEMON, HOME) * Math.max(1, daemon.threads || 1);
 	const fleetRam = ns.getScriptRam(FLEET, HOME) * Math.max(1, fleetProcess.threads || 1);
 	if (!(daemonRam > free && daemonRam <= free + fleetRam)) return false;
@@ -498,9 +555,8 @@ function ownedServiceStatus(ns, service, status) {
 
 // Resolve dependencies once at startup; adopting a process never rewrites its arguments.
 function createManagedServices(ns, cfg, daemonArgs) {
-	const processes = ns.ps(HOME);
-	const existingDaemon = processes.find(process => process.filename === DAEMON);
-	const existingFleet = processes.find(process => process.filename === FLEET);
+	const existingDaemon = findProcess(ns, DAEMON);
+	const existingFleet = findProcess(ns, FLEET);
 	const managedDaemonArgs = existingDaemon?.args ?? daemonArgs;
 	const fleetArgs = ["--port", readArgument(managedDaemonArgs, "--fleet-port", PORTS.FLEET_STATUS),
 		"--stock-port", PORTS.STOCK_STATUS,
@@ -519,10 +575,14 @@ function createManagedServices(ns, cfg, daemonArgs) {
 		throw new Error("Existing daemon and fleet use different fleet ports; align their arguments explicitly");
 	}
 	// New dependents follow the adopted fleet; existing dependents retain their own args.
-	const launchDaemonArgs = existingDaemon ? daemonArgs : [...daemonArgs, "--fleet-port", fleetPort];
+	const launchDaemonArgs = existingDaemon ? daemonArgs : [...daemonArgs, "--fleet-port", fleetPort, "--managed-services", true];
 	const managed = (name, args, port = null) => {
 		const definition = serviceDefinition(name);
-		return createService(name, args, definition.type, port ?? definition.port, definition.heartbeatRequired ?? true);
+		const settings = cfg.serviceSettings?.[name];
+		const service = createService(name, settings?.args || args, definition.type, port ?? definition.port, definition.heartbeatRequired ?? true);
+		if (settings) service.threads = settings.threads;
+		service.host = findProcess(ns, name)?.host || cfg.serviceHosts?.[name] || HOME;
+		return service;
 	};
 	const services = [managed(DAEMON, launchDaemonArgs), managed(FLEET, fleetArgs, fleetPort)];
 	if (cfg.progression) services.push(managed(PROGRESSION, ["--fleet-port", fleetPort, "--darknet", cfg.darknet !== false]));
@@ -638,11 +698,11 @@ function blockGoService(ns, service, status) {
 }
 
 function isRunning(ns, script) {
-	return ns.ps(HOME).some(process => process.filename === script);
+	return Boolean(findProcess(ns, script));
 }
 
 function findProcess(ns, script) {
-	return ns.ps(HOME).find(process => process.filename === script) ?? null;
+	return serviceProcesses(ns, script)[0] ?? null;
 }
 
 // One-shot startup only; long-running services use tickService and its history.
@@ -750,7 +810,7 @@ function renderSupervisorFrame(ns, state) {
 	if (state.services) {
 		for (const service of state.services) {
 			dashboardRow(ns, service.name.replace("-manager.js", "").replace(".js", ""),
-				`${serviceLabel(service)} | ${service.restarts} restarts`);
+				`${serviceLabel(service)} @ ${service.host || HOME} | ${service.restarts} restarts`);
 		}
 		const last = [...state.services].filter(service => service.lastEvent).sort((a, b) => b.lastEventAt - a.lastEventAt)[0];
 		if (last) dashboardRow(ns, "Last recovery", `${last.name}: ${last.lastEvent}`);
@@ -1621,12 +1681,13 @@ async function saveSupervisorBootstrap(ns) {
 // Run the small upgrade helper remotely while home is occupied by the starter supervisor.
 export function starterAdmissionRam(ns, cfg = {}, helperRam = 0) {
     return [SUPERVISOR, DAEMON, FLEET, ...(cfg.progression ? [PROGRESSION] : [])]
+        .filter(file => (cfg.serviceHosts?.[file] || HOME) === HOME)
         .reduce((sum, file) => sum + ns.getScriptRam(file, HOME), helperRam);
 }
 
 export function ongoingHomeTarget(ns,cfg,capabilities,services,jobs) {
-    const enabled=selectedServices(cfg,capabilities), blocked=services.some(s=>enabled.some(e=>e.name===s.name) && ["WAITING_RAM","WAITING_PRIORITY"].includes(s.state)) ||
-        jobs.some(j=>j.state === "WAITING_RAM" && !(j.type === "augmentation-plan" && readProgressionSnapshot(ns)));
+    const enabled=selectedServices(cfg,capabilities).filter(e => (services.find(s => s.name === e.name)?.host || HOME) === HOME), blocked=services.some(s=>enabled.some(e=>e.name===s.name) && ["WAITING_RAM","WAITING_PRIORITY"].includes(s.state)) ||
+        cfg.homeUpgradeCritical || jobs.some(j=>j.state === "WAITING_RAM" && !(j.type === "augmentation-plan" && readProgressionSnapshot(ns)));
     const budget = supervisorRamBudget(ns,cfg,capabilities);
     const darknet = darknetActivation(ns, { enabled: cfg.darknet === true, reserve: Math.max(cfg.homeReserve || 0, budget.utilityRam) });
     const crawlerBlocked = ["OWNED", "BITNODE_ACCESS"].includes(darknet.navigator) && !darknet.threads && !darknet.fits;
@@ -1639,25 +1700,54 @@ export function ongoingHomeTarget(ns,cfg,capabilities,services,jobs) {
     return Math.max(required, darknet.requiredHomeRam);
 }
 
-function progressionRamBlocked(services) {
+async function tickHomeServiceUpgrade(ns, cfg, capabilities, services, jobs, actions, hosts) {
+    if (!homeUpgradeEnabled(cfg, capabilities)) return;
+    cfg.homeUpgradeCritical = progressionRamBlocked(services, actions);
+    const target = ongoingHomeTarget(ns, cfg, capabilities, services, jobs);
+    if (target > ns.getServerMaxRam(HOME)) await tickStarterHomeUpgrade(ns, hosts, target, cfg);
+    else { cfg.homeInvestment = null; cfg.homeUpgradeStatus = ""; }
+}
+
+function progressionRamBlocked(services, actions = null) {
     return services.some(s => [FLEET, PROGRESSION, AUGMENTATION_MANAGER].includes(s.name) &&
-        ["WAITING_RAM", "WAITING_PRIORITY"].includes(s.state));
+        ["WAITING_RAM", "WAITING_PRIORITY"].includes(s.state)) ||
+        Boolean(!actions?.active && actions?.current?.state === "waiting" &&
+            actions.diagnostics?.some(item => item.state === "waiting" && item.reason.includes("WAITING_RAM")));
+}
+
+// Home is the fallback for this one-shot helper. Rooted network RAM avoids
+// adding its cost to home admission; only owned starter workers may be
+// reclaimed, matching tickStarterHomeUpgrade's placement checks.
+export function homeUpgradeReserve(ns, hosts, helperRam) {
+    if (!(helperRam > 0)) return 0;
+    const workerRam = ns.getScriptRam(STARTER_WORKER, HOME);
+    for (const host of hosts) {
+        if (host === HOME || !ns.hasRootAccess(host)) continue;
+        const reclaimable = starterWorkers(ns, host).reduce((sum, p) => sum + workerRam * p.threads, 0);
+        if (ns.getServerMaxRam(host) - ns.getServerUsedRam(host) + reclaimable >= helperRam) return 0;
+    }
+    return helperRam;
 }
 
 async function tickStarterProgression(ns,cfg,helperRam = 0) {
     if(!cfg.progression || typeof ns.getPortHandle!=="function") return;
+    const { actorRam } = supervisorRamBudget(ns, cfg, { singularity: singularityAvailable(ns.getResetInfo()) });
     cfg.starterServices ||= createManagedServices(ns,cfg,[]).filter(s=>s.name===PROGRESSION || s.name===AUGMENTATION_MANAGER && singularityAvailable(ns.getResetInfo()));
     const admitted = [];
     for(const service of cfg.starterServices) {
+        service.host = findProcess(ns, service.name)?.host || cfg.serviceHosts?.[service.name] || HOME;
+        if (cfg.hostingBlocked?.has(service.name)) continue;
+        const host = service.host, heldRam = host === HOME
+            ? Math.max(helperRam, service.name === AUGMENTATION_MANAGER ? actorRam : 0) : 0;
         const needed=ns.getScriptRam(service.name,HOME);
-        const owned=starterWorkers(ns,HOME), reclaim=owned.reduce((n,p)=>n+p.threads*ns.getScriptRam(STARTER_WORKER,HOME),0);
+        const owned=starterWorkers(ns,host), reclaim=owned.reduce((n,p)=>n+p.threads*ns.getScriptRam(STARTER_WORKER,HOME),0);
         if (!findProcess(ns, service.name)) {
-            if (!(needed > 0) || needed + helperRam > ns.getServerMaxRam(HOME) - ns.getServerUsedRam(HOME) + reclaim) continue;
+            if (!(needed > 0) || needed + heldRam > ns.getServerMaxRam(host) - ns.getServerUsedRam(host) + reclaim) continue;
             for(const process of owned) ns.kill(process.pid);
         }
         admitted.push(service);
     }
-    tickServicePriority(ns,admitted,"",helperRam);
+    tickServicePriority(ns,admitted,"",helperRam,actorRam);
     const progression=ns.getPortHandle(PORTS.PROGRESSION_STATUS).peek();
     const augmentation=ns.getPortHandle(PORTS.AUGMENTATION_STATUS).peek();
     await updateSupervisorSavings(ns,cfg,null,progression,augmentation);
@@ -1685,7 +1775,7 @@ export async function tickStarterHomeUpgrade(ns, hosts, target, state = {}) {
         const owned=starterWorkers(ns,host), workerRam=ns.getScriptRam(STARTER_WORKER,HOME);
         const reclaimable=owned.reduce((n,p)=>n+p.threads*workerRam,0);
         if(ns.getServerMaxRam(host)-ns.getServerUsedRam(host)+reclaimable<cost) continue;
-        if(host!==HOME && !await ns.scp([file,"lib/savings.js","lib/programs.js","lib/ports.js"],host,HOME)) continue;
+        if(host!==HOME && !await ns.scp([file,"lib/savings.js","lib/programs.js","lib/ports.js","lib/progression-protocol.js"],host,HOME)) continue;
         for(const p of owned) ns.kill(p.pid);
         if(ns.getServerMaxRam(host)-ns.getServerUsedRam(host)<cost) continue;
         state.nextHomeQuoteAt=now+60000; state.nextHomeQuoteRam=ram;
