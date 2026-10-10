@@ -43,7 +43,8 @@ export function renderSchedulerCapacity(ns, capacity, details = false) {
     const c = capacity, ram = n => n >= 1048576 ? `${(n/1048576).toFixed(2)} PB` : n >= 1024 ? `${(n/1024).toFixed(2)} TB` : `${n.toFixed(2)} GB`;
     dashboardSection(ns, "Scheduler capacity");
     dashboardRow(ns, "Limit", c.limitingFactor);
-    dashboardRow(ns, "Targets", `${c.targets.active} / ${c.targets.mode === "auto" ? `AUTO (max ${c.targets.limit})` : c.targets.limit}`);
+    dashboardRow(ns, "Targets", `${c.targets.active} / ${c.targets.mode === "auto" ?
+        c.targets.capacityGoverned ? "AUTO (capacity governed)" : `AUTO (max ${c.targets.limit})` : c.targets.limit}`);
     if (c.targets.waiting > 0) dashboardRow(ns, "Target work", `${c.targets.admitting} running/committed | ${c.targets.waiting} waiting`);
     dashboardRow(ns, "Worker RAM", `${ram(c.ram.used)} / ${ram(c.ram.total)} (${(100*c.ram.utilization).toFixed(1)}%)`);
     dashboardRow(ns, "Batch / launch", `${c.batchRate.used.toFixed(2)} / ${c.batchRate.limit.toFixed(2)} | ${c.launches.recent} / ${c.launches.limit}`);

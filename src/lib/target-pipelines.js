@@ -5,6 +5,7 @@ import { schedulerCapacity, MIN_TARGET_BATCH_RATE } from "lib/scheduler-capacity
 import { boundedXpAllocation } from "lib/milestone-balance.js";
 import { recordSchedulerTiming, tickSchedulerScaling, applySchedulerLimits, governedBatchScale, governedPeerRate, pipelineUsesBudget, pipelineAdmissionPeriod, refreshAdmissionCadence } from "lib/scheduler-scaling.js";
 import { launchBudgetDemand, optionalLaunchLimit } from "lib/launch-budget.js";
+import { cadenceBatchRate } from "lib/scheduler-limits.js";
 
 // One event loop, one allocation ledger. A pipeline never owns the global ports,
 // process map, or reservation array. Changing its epoch cannot erase a peer.
@@ -255,7 +256,7 @@ export function serviceHackingPolicy(ns, pool) {
 // Otherwise a missing candidate would hide the demand that justifies raising it.
 function scanScalingCandidates(ns, pool) {
 	const state = pool.cfg.schedulerScaling;
-	if (state.batchMode !== "auto" || pool.pipelines.size >= pool.cfg.maxTargets) return;
+	if (state.batchMode !== "auto") return;
 	state.scan ||= { names: [...pool.network.servers], index: 0, candidates: new Map() };
 	const scan = state.scan;
 	for (let checked = 0; checked < 8 && scan.index < scan.names.length; checked++) {
@@ -264,7 +265,8 @@ function scanScalingCandidates(ns, pool) {
 			!ns.hasRootAccess(name) || ns.getServerRequiredHackingLevel(name) > ns.getHackingLevel()) continue;
 		const money = ns.getServerMaxMoney(name);
 		if (!(money > 0)) continue;
-		const perBatch = money * pool.cfg.maxSteal * .95 * ns.hackAnalyzeChance(name);
+		const perBatch = money * pool.cfg.maxSteal * .95 * ns.hackAnalyzeChance(name) *
+			(pool.cfg.hackingPolicy?.multipliers?.ScriptHackMoneyGain ?? 1);
 		if (perBatch > 0) scan.candidates.set(name, { perBatch });
 	}
 	if (scan.index >= scan.names.length) { pool.scalingCandidates = scan.candidates; state.scan = null; }
@@ -286,6 +288,8 @@ export function serviceSchedulerScaling(ns, pool, now = Date.now()) {
 		goal: `${goal?.milestone || "MONEY"}:${goal?.limitingResource || "money"}`,
 		income: lanes.reduce((n, p) => n + pool.api.incomeRate(p.stats, 60_000, now), 0), xpRate,
 		xpWaitingLaunch: /LAUNCH/.test(xp?.status || ""), maxActionTime: Math.max(0, ...lanes.map(p => p.runtime?.plan.times.W || 0)),
+		planKey: active.map(p => `${p.epoch}:${p.generation}:${p.runtime.plan.period}`).join("|"),
+		budgetPlanning: active.some(p => p.shadow || p.swap),
 		stable: active.length > 0 && active.every(p => !p.trial && productive(p, now) && p.shadow?.state !== "PREFLIGHT" && !p.swap) && !pool.cfg.backgroundPrep?.active,
 		earningStable: active.some(p => !p.trial && productive(p, now)) && active.every(p => p.mode === "RUNNING" && !p.swap?.restoring) &&
 			!(pool.cfg.prepStates || []).some(p => p?.active),
@@ -844,6 +848,9 @@ function serviceShadowTuneStep(ns, pool, p) {
 			p.lastSwap = { state: "ABORTED", trigger: s.trigger, reason: "no replacement plan fits" }; p.shadow = null; return;
 		}
 		if (!(s.runtime.plan.expected > p.runtime.plan.expected * 1.001)) {
+			// This budget was evaluated successfully. Retrying an unchanged,
+			// already-optimal lane every 30s must not keep a rate probe pending.
+			if (s.trigger === "throughput") p.tunedBatchLimit = s.inputs.batchLimit;
 			p.lastSwap = { state: "ABORTED", trigger: s.trigger, reason: "candidate does not improve modeled income" };
 			p.hotSwaps.aborted++; p.shadow = null; p.shadowRetryAt = now + 30_000; return;
 		}
@@ -1209,7 +1216,7 @@ export function elasticAdmissionBlocker(pool, now = Date.now()) {
 
 // Scouting is incremental. A prepared target can fill any vacant lane.
 function nextReadyCandidate(ns, pool, anchor, now) {
-	const emptySlotFloor = emptySlotIncomeFloor(anchor.runtime.plan.expected, pool.cfg.switchThreshold);
+	const emptySlotFloor = admissionIncomeFloor(pool, emptySlotIncomeFloor(anchor.runtime.plan.expected, pool.cfg.switchThreshold));
 	const prepared = pool.cfg.backgroundPrep;
 	if (prepared.status === "READY" && !prepared.active && prepared.target &&
 		!pool.pipelines.has(prepared.target) && (pool.blocked.get(prepared.target) || 0) <= now) {
@@ -1227,8 +1234,9 @@ function nextReadyCandidate(ns, pool, anchor, now) {
 			!ns.hasRootAccess(name) || ns.getServerMaxMoney(name) <= 0 ||
 			ns.getServerRequiredHackingLevel(name) > ns.getHackingLevel()) continue;
 		if (!pool.api.targetHealth(ns, name).clean) continue;
-		const rate = remainingBatchRate(pool);
-		const potential = ns.getServerMaxMoney(name) * pool.cfg.maxSteal * 0.95 * ns.hackAnalyzeChance(name) * rate;
+		const rate = Math.min(cadenceBatchRate(pool.cfg.gap), remainingBatchRate(pool));
+		const potential = ns.getServerMaxMoney(name) * pool.cfg.maxSteal * 0.95 * ns.hackAnalyzeChance(name) * rate *
+			(pool.cfg.hackingPolicy?.multipliers?.ScriptHackMoneyGain ?? 1);
 		if (potential > emptySlotFloor && (!scan.best || potential > scan.best.potential)) {
 			scan.best = { name, potential };
 		}
@@ -1356,6 +1364,8 @@ function serviceBackgroundAndAdmission(ns, pool, allowPrepLaunch = true) {
 			pool.note = `Admission waiting: ${blocker}`;
 			return;
 		}
+		pool.admission = { decision: "SCOUT", candidate: pool.pendingAdmission || undefined,
+			expectedLanes: pool.pipelines.size, reason: "shared capacity available; seeking a worthwhile target" };
 	}
 	if (!productive(anchor, now)) {
 		const seconds = Math.floor((anchor.stats.pipeline.productiveMs || 0) / 1000);

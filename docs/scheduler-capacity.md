@@ -40,12 +40,24 @@ remain fixed (batch rate in (0,8], launches integer 4..128); mixed AUTO/fixed
 settings are supported. AUTO values and fixed overrides survive reset bootstrap.
 An adopted running daemon keeps its own settings and code until restarted.
 
+AUTO target admission no longer stops at six lanes. Its safety bound follows the
+launch envelope and minimum admission headroom (128 / 4 / 0.25 = 128), while
+actual admissions still require shared RAM, worker and launch placement, stable
+incumbents and a profitable paid trial. Numeric target limits remain fixed.
+After syncing these files, `run supervisor-restart.js` reloads resident code with
+the saved settings. An explicitly saved `--max-targets 6` remains an intentional
+six-target limit; the default `auto` adopts capacity governed admission.
+
 `lib/scheduler-scaling.js` evaluates fresh 10-second timing windows. Growth needs
 productive lanes with running or committed work, recent paid income, no active trial/cutover/prep,
 and 60 seconds of stable timing observations. Lifetime lag/drift maxima do not
 veto growth. A bounded read-only scout checks at most eight known servers per
 sample, including while admission is blocked, to calculate the batch headroom
 needed for a candidate to clear the existing marginal-income floor.
+Each candidate is capped at its own safe landing cadence; unused global batch
+budget cannot all be assigned to one target. Fresh scout models supersede stale
+startup estimates, and scouting continues at explicit target limits for replacement
+comparisons. Ready scans apply the same cadence cap and aggregate admission hurdle.
 An empty retained TUNING plan consumes no batch budget and cannot prevent the
 healthy earner from establishing timing evidence. Target work rows distinguish
 running/committed lanes from waiting lanes. Tuning accounts for home and remote
@@ -61,6 +73,11 @@ remain authoritative. This is bounded adaptation, not a claim of an exact optimu
 
 The controller waits for increased-budget work to land and compares measured
 income, or stable completed-wave XP rates for cash-covered FINAL_SERVER hacking.
+Pending plan searches and actual generation changes postpone that comparison
+until a fresh payout window can cover the changed plan. Unchanged optimal lanes
+record that their current budget was already evaluated; repeated no-gain searches
+cannot keep verification pending. Read-only search deferrals are bounded to the
+larger of five minutes or two action durations plus the observation window.
 No measured gain of at least 3% returns to the earlier budgets with a 10-minute
 hold. Multiple bounded steps can be needed to obtain a whole candidate's modeled
 headroom; those retain the original comparison baseline. Recent timing pressure
@@ -97,6 +114,9 @@ existing productive XP expansion proof instead of expanding money workloads.
 fresh timing window and bounded RAM request. Both dashboards show the current
 decision and its reason. `batchRate.modeled` retains raw plan rates while `used`
 reports the shared governed admission rate after an automatic decrease.
+Observation reasons include elapsed seconds so healthy observation can be
+distinguished from a reset of its evidence window. Capacity governed AUTO status
+is marked by the producer; an older adopted daemon still displays its legacy cap.
 
 The single scheduler loop computes its next wake from committed launches (2 ms
 guard), event servicing, health/recovery, admission, planning horizon, yielding
@@ -143,6 +163,17 @@ factors, XP pressure, adaptive rate growth/backoff, coordinated RAM quotes, fixe
 limits, reset restoration and small-fleet/missing-capability behavior. Existing timing,
 ownership, recovery, hot-swap, background-prep, XP, one- and two-target simulations
 remain in the complete suite. Full results are recorded in the PR description.
+`automatic-target-capacity.test.cjs` replays the six-lane, 4.2%-RAM snapshot:
+AUTO can admit a seventh paid trial without changing existing epochs or worker
+PIDs, while explicit limits, worker/launch pressure, recovery and resets still
+block unsafe expansion. It also checks cadence-capped candidate estimates and
+clearing expired admission holds. Scaling and hot-swap regressions cover delayed
+plan cutovers, bounded probe waits and unchanged optimal plans.
+`automatic-target-simulation.test.cjs` runs 45 virtual minutes with seven targets
+becoming available in sequence. AUTO sustains all seven and earns $7.86b/s
+versus $7.41b/s with an explicit six-target limit (about 6% more), with no phase
+misses, cancelled Hacks or worker/RAM/launch-budget overruns. These are simulator
+results, not a live-game income guarantee.
 The trial simulation injects two global timing backoffs to 2.25/16 while real
 workers continue. It restores capacity before trial completion and reaches three
 earning lanes, with clean-security action starts, no phase misses, no cancelled

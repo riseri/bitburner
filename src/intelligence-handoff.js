@@ -1,29 +1,47 @@
-import { readIntelligenceSession } from "lib/intelligence-session.js";
-import { bn4Route } from "lib/bitnode-route.js";
-import { resetEpoch } from "lib/progression-protocol.js";
-import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
+import { INTELLIGENCE_AUTO, readIntelligenceSession, intelligenceSessionActive, intelligenceAvailable, intelligenceFactions } from "lib/intelligence-session.js";
+import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
+import { readIntelligenceRequest, savedIntelligencePolicy, intelligenceAttempted, intelligenceCallbackFits, installedIntelligencePackage } from "lib/intelligence-automation.js";
 
-/** Transfer a fresh BN4 run to its one bounded INT session. @param {NS} ns */
+/** Enter INT farming directly after an approved augmentation installation. @param {NS} ns */
 export async function main(ns) {
-    const request = JSON.parse(String(ns.args[0] || "null")), reset = ns.getResetInfo();
-    if (ns.getHostname() !== "home" || !request || request.resetEpoch !== resetEpoch(reset) ||
-        !Number.isFinite(request.createdAt) || Date.now() < request.createdAt || Date.now() - request.createdAt > 30000 ||
-        !bn4Route(reset) || !(reset.ownedSF?.get(5) > 0)) return;
-    const processes = ns.ps("home"), manager = processes.find(p => p.pid === request.ownerPid && p.filename === "augmentation-manager.js");
-    const supervisors = processes.filter(p => p.filename === "supervisor.js");
-    if (!manager || supervisors.length !== 1 || processes.some(p => ["progression-purchase.js", "progression-backdoor.js", "intelligence-farm.js"].includes(p.filename))) return;
-    const player = ns.getPlayer();
-    if (player.skills.intelligence >= 50 || ns.singularity.isBusy() || ns.singularity.getOwnedAugmentations(true).length) return;
-    if (!player.factions.includes("Shadows of Anarchy") && !ns.singularity.checkFactionInvitations().includes("Shadows of Anarchy")) return;
-    try { restoreSupervisorArgs(ns.read("data/supervisor-bootstrap.json")); }
-    catch { return; }
-    if (!(ns.getScriptRam("intelligence-farm.js", "home") > 0) || ns.getScriptRam("intelligence-farm.js", "home") > ns.getServerMaxRam("home")) return;
-    let prior;
-    try { prior = JSON.parse(ns.read("data/intelligence-auto.json") || "null"); } catch { return; }
-    if (prior?.nodeReset === reset.lastNodeReset || readIntelligenceSession(ns)) return;
-    await ns.write("data/intelligence-auto.json", JSON.stringify({ version: 1, nodeReset: reset.lastNodeReset, startedAt: Date.now() }), "w");
-    if (!ns.kill(manager.pid) || !ns.kill(supervisors[0].pid)) {
-        ns.tprint("INT handoff stopped: could not release automation ownership. Restart supervisor.js."); return;
+    if (ns.getHostname() !== "home") throw new Error("Run intelligence-handoff.js on home");
+    try {
+        const reset = ns.getResetInfo(), epoch = resetEpoch(reset), request = readIntelligenceRequest(ns);
+        if (!request || !singularityAvailable(reset) || !intelligenceAvailable(reset) || intelligenceAttempted(ns)) return resume(ns);
+        const policy = savedIntelligencePolicy(ns), player = ns.getPlayer();
+        if (!policy.enabled || policy.minutes !== request.policy.minutes || policy.target !== request.policy.target ||
+            !Number.isFinite(player.exp?.intelligence) || !Number.isFinite(player.skills?.intelligence) ||
+            policy.target > 0 && player.skills.intelligence >= policy.target ||
+            ns.singularity.isBusy() || !installedIntelligencePackage(ns, request) ||
+            !intelligenceFactions(player.factions, ns.singularity.checkFactionInvitations()).length ||
+            !intelligenceCallbackFits(ns) || conflicts(ns)) return resume(ns);
+        await ns.write(INTELLIGENCE_AUTO, JSON.stringify({ ...request, status: "started", startedAt: Date.now(), consumerPid: ns.pid }), "w");
+        const claimed = JSON.parse(ns.read(INTELLIGENCE_AUTO) || "null");
+        const currentPolicy = savedIntelligencePolicy(ns);
+        if (resetEpoch(ns.getResetInfo()) !== epoch || Date.now() >= request.expiresAt || claimed?.id !== request.id || claimed.status !== "started" ||
+            claimed.consumerPid !== ns.pid || readIntelligenceSession(ns) || conflicts(ns) || ns.singularity.isBusy() ||
+            !installedIntelligencePackage(ns, request) || !currentPolicy.enabled ||
+            currentPolicy.minutes !== policy.minutes || currentPolicy.target !== policy.target) return resume(ns);
+        ns.tprint(`Starting automatic INT farming: ${policy.minutes} minutes${policy.target ? ` or INT ${policy.target}` : ""}; supervision resumes afterward`);
+        ns.spawn("intelligence-farm.js", { threads: 1, spawnDelay: 0 }, "--start", "--automatic", "--minutes", policy.minutes, "--target", policy.target);
+    } catch (error) {
+        ns.tprint(`Automatic INT session skipped: ${String(error?.message || error)}`);
+        resume(ns);
     }
-    ns.spawn("intelligence-farm.js", { threads: 1, spawnDelay: 0 }, "--start", "--minutes", 10, "--target", 50);
+}
+
+function conflicts(ns) {
+    return ns.ps("home").some(process => ["supervisor.js", "augmentation-manager.js", "progression-purchase.js",
+        "progression-backdoor.js", "intelligence-farm.js"].includes(process.filename));
+}
+
+function resume(ns) {
+    if (ns.ps("home").some(process => ["supervisor.js", "intelligence-farm.js"].includes(process.filename))) return;
+    if (intelligenceSessionActive(ns)) return;
+    try {
+        const request = JSON.parse(ns.read(INTELLIGENCE_AUTO) || "null");
+        if (request?.status === "started" && ns.ps("home").some(process => process.pid === request.consumerPid &&
+            process.pid !== ns.pid && process.filename === "intelligence-handoff.js")) return;
+    } catch { /* A corrupt optional request must not prevent supervision. */ }
+    ns.spawn("bootstrap.js", { threads: 1, spawnDelay: 0 });
 }

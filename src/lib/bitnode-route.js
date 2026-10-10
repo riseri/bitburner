@@ -1,11 +1,13 @@
-// The user's route is BN5.1 -> BN4.1 -> BN4.2 -> BN4.3. Never invent a next node.
+// Every BitNode repeats through its third run. Source-File ownership records
+// completed runs; after the third run, wait for the user's next destination.
 export function bn4Route(reset) {
     const level = Number(reset.ownedSF?.get?.(4) ?? 0);
     return reset.currentNode === 4 && level < 3;
 }
 
 export function nextRouteNode(reset) {
-    return bn4Route(reset) && Number(reset.ownedSF?.get?.(4) ?? 0) < 2 ? 4 : null;
+    const node = reset.currentNode, level = Number(reset.ownedSF?.get?.(node) ?? 0);
+    return Number.isSafeInteger(node) && node > 0 && Number.isSafeInteger(level) && level >= 0 && level < 2 ? node : null;
 }
 
 export function routeCities(factions, selected = "") {

@@ -41,10 +41,13 @@ export function supervisorServiceConfig(args = []) {
         cfg[service.option] = enabled(readArgument(args, `--${service.flag}`, service.defaultEnabled));
     }
     for (const [option, flag, fallback] of [["progressionActions", "progression-actions", ACTION_DEFAULTS["progression-actions"]],
-        ["cloudServices", "cloud-services", true],
+        ["cloudServices", "cloud-services", true], ["intelligence", "intelligence", true],
+        ["augmentationJoinFactions", "augmentation-join-factions", true],
         ["augmentations", "augmentations", true], ["diagnostics", "diagnostics", true], ["shareEnabled", "share", true]]) {
         cfg[option] = enabled(readArgument(args, `--${flag}`, fallback));
     }
+    cfg.intelligenceMinutes = Number(readArgument(args, "--intelligence-minutes", 10));
+    cfg.intelligenceTarget = Number(readArgument(args, "--intelligence-target", 0));
     return cfg;
 }
 
@@ -61,7 +64,10 @@ export function supervisorFiles(cfg, capabilities = null) {
     if (singularity && cfg.augmentationActions) files.push("bootstrap.js");
     if (homeUpgradeEnabled(cfg, capabilities)) files.push("home-upgrade.js");
     if ((!capabilities || capabilities.route) && cfg.augmentationActions && cfg.progression && cfg.progressionActions)
-        files.push("node-complete.js", "intelligence-handoff.js", "intelligence-farm.js");
+        files.push("node-complete.js");
+    if ((!capabilities || capabilities.intelligence) && singularity && cfg.intelligence !== false &&
+        cfg.augmentationActions && cfg.progression && cfg.progressionActions)
+        files.push("intelligence-handoff.js", "intelligence-farm.js");
     if (singularity && cfg.progression && cfg.progressionActions) files.push("progression-purchase.js", "progression-backdoor.js");
     if (darknet && cfg.darknet) files.push("darknet-bootstrap.js", "darknet-agent.js", "darknet-phish.js", "darknet-stasis.js",
         "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js", "lib/darknet-solvers.js", "lib/darknet-formulas.js", "lib/darknet-coordination.js", "lib/home-share.js");
@@ -73,7 +79,7 @@ export function supervisorRamBudget(ns, cfg, capabilities) {
     const cost = file => Math.max(0, Number(ns.getScriptRam(file, "home")) || 0);
     const actorRam = capabilities.singularity && cfg.progression && cfg.progressionActions
         ? Math.max(cost("progression-purchase.js"), cost("progression-backdoor.js")) : 0;
-    const utilityRam = Math.max(actorRam, homeUpgradeEnabled(cfg, capabilities) ? cost("home-upgrade.js") : 0, cfg.stocks && capabilities.singularity ? cost("stock-access.js") : 0, capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions ? Math.max(cost("node-complete.js"), cost("intelligence-handoff.js")) : 0, cfg.diagnostics ? cost("doctor.js") : 0,
+    const utilityRam = Math.max(actorRam, homeUpgradeEnabled(cfg, capabilities) ? cost("home-upgrade.js") : 0, cfg.stocks && capabilities.singularity ? cost("stock-access.js") : 0, capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions ? cost("node-complete.js") : 0, cfg.diagnostics ? cost("doctor.js") : 0,
         capabilities.singularity && cfg.augmentations ? cost("augmentation-planner.js") : 0);
     const optionalRam = (capabilities.singularity && cfg.augmentationActions ? cost("augmentation-manager.js") : 0) +
         (capabilities.darknet && cfg.darknet ? cost("darknet-manager.js") + cost("darknet-agent.js") : 0);

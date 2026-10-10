@@ -92,33 +92,36 @@ runs.** At five queued augmentations by default, it installs and restarts the
 supervisor using saved settings. A queued **The Red Pill** bypasses the threshold.
 Once installed, the loop evaluates further hacking upgrades and NeuroFlux against
 the projected time to finish the final server, including reset recovery. It still waits for unrelated manual activity
-and requires a valid restart script and saved configuration. There is no
-`--auto-install` switch.
+and requires a valid restart script and saved configuration. An eligible reset
+can include the supervisor's one bounded INT session before services restart.
+There is no `--auto-install` switch.
 
 Optional flags express specific preferences. For example:
 
 ```text
 run supervisor.js --min-install 8 --augmentation-city-faction Aevum
 run supervisor.js --reset-policy threshold
+run supervisor.js --intelligence-minutes 10 --intelligence-target 150
 ```
 
 The first command sets the fallback installation threshold to eight and permits joining Aevum when
-eligible. The BN4 route automatically chooses compatible city factions when none
-is explicitly selected; outside that route, city factions are skipped by default. The default
+eligible. With progression enabled, the augmentation manager chooses compatible
+city factions in BN4 or any node with SF4 when none is explicitly selected. The default
 hacking plan includes The Red Pill, faction reputation upgrades, and
 Neuroreceptor Management Implant.
 
-Outside the planned BN4 route, the loop checks the install threshold before its next purchase or faction join,
-even when expensive upgrades remain. If an early faction offers fewer upgrades
-than the threshold, unlock another faction, install manually, or lower
-`--min-install`. In BN4, the route controller also installs completed smaller
-batches and batches that reach Daedalus's 30-augmentation requirement. It limits
+The progression-enabled loop uses the same reset policy in BN4 and other nodes
+with SF4, including BN5. It installs completed smaller batches and batches that
+reach Daedalus's distinct-augmentation requirement, then pursues additional
+factions when they offer useful unowned augmentations. It limits
 waiting to 30 minutes of actual stalled progress, with a 60-minute absolute
 cap per selected objective. `--reset-policy auto` (default) uses conservative reset
-economics on this route when recovery and resource evidence are reliable. It can
+economics when recovery and resource evidence are reliable. It can
 install fewer than five meaningful upgrades or wait beyond five for a better next
 purchase. Auto mode also caps a nonempty queue at one hour across objective changes.
 Unknown economics falls back to the existing count/stall policy.
+The standalone `--route false` opt-out retains the basic purchase/count loop;
+the supervisor selects that opt-out when progression actions are disabled.
 `--reset-policy threshold` keeps that policy, including its two-minute near-term
 purchase grace. Both options persist through supervisor/bootstrap restarts.
 Red Pill, Daedalus count crossings, completed reachable batches and donation/favor
@@ -161,7 +164,7 @@ can launch more work.
 | `Income 60s` | Measured hacking income over the recent window. Use this to judge actual earnings. |
 | `Model` | Estimated income from current plans. Warmup, Hack chance, rejected batches, and recovery can reduce actual income. |
 | `Potential` | An estimate for a candidate after preparation; it is not income being earned now. |
-| `Targets 1 / AUTO (max 6)` | One useful lane is running. Automatic mode adds one trial at a time when global capacity and marginal income justify it. Explicit `--max-targets 1` or `2` remains supported. |
+| `Targets 1 / AUTO (capacity governed)` | One useful lane is running. AUTO adds one trial at a time when shared capacity and marginal income justify it, including beyond six targets. Explicit target limits remain supported. |
 | `Batch headroom 0.050/s free; next target needs 0.250/s` | The current budget cannot admit another target. Automatic rate control can test more headroom after stable paid work and timing observations. Numeric limits remain fixed. |
 | `Scaling AUTO batches; AUTO launches` | Recent timing and useful demand control both budgets. The scale reason explains observation, increases, verification, backoff, or a bounded RAM request. |
 | `Target work 1 running/committed; 1 waiting` | An empty tuning plan occupies a target slot but does not consume batch capacity or block scaling evidence from healthy paid work. |
@@ -335,17 +338,31 @@ augmentation and skill requirements are met. After joining, it switches to The
 Red Pill when a price is known. The augmentation plan prioritizes The Red Pill
 once available; explicit augmentation targets still override the plan.
 
-In early BN4, `intelligence-farm.js` provides a separate, bounded join/reset
-session with measured XP/hour. The controller starts one early session when
-INT is below 50 and no augmentations are installed/queued, stopping at 50 or ten
-minutes. It requires SF5, a Shadows of Anarchy invitation
-from an infiltration, and saved supervisor settings. Every cycle resets cash,
-normal skills, faction reputation, purchased servers, and running scripts. Use it
-before rebuilding your economy. The first infiltration remains manual; progression
-continues if its invitation is unavailable.
+The supervisor automatically runs one bounded INT farming session per BitNode
+when Singularity (BN4 or SF4), INT (BN5 or SF5), a persistent faction, and enough
+home RAM are available. It starts immediately after an eligible augmentation
+installation, before rebuilding the economy, and restores supervision afterward.
+The default is ten minutes with no INT level cap. `--intelligence-minutes` changes
+the budget (up to 60); `--intelligence-target 150` adds an earlier level limit;
+`--intelligence false` disables automatic farming. These settings persist through
+resets. The dashboard shows the policy and the last measured result.
 
-The controller automatically completes BN4.1 into BN4.2, then BN4.2 into BN4.3.
-It stops at BN4.3's exit requirements for you to choose the subsequent node.
+The farmer rejoins every available persistent corporate faction and Shadows of
+Anarchy, measuring XP/hour, joins and resets. A corporate invitation works without
+an infiltration; Shadows of Anarchy requires one manual infiltration. Missing
+factions or RAM do not postpone the augmentation installation. Manual, stopped
+and completed budgets are not automatically renewed in the same BitNode.
+
+Every cycle resets cash, normal skills, faction reputation, purchased servers,
+and running scripts. Red Pill installations skip INT farming. The standalone
+`run intelligence-farm.js --start --minutes 10` remains available for explicit
+extra sessions after stopping automation/player work and installing queued
+augmentations. Automatic sessions return to supervision on completion,
+cancellation or failure.
+
+With Singularity, the controller follows BNx.1 -> BNx.2 -> BNx.3 for every
+BitNode x. It restores automation after each transition and waits at the third
+run's exit requirements for you to choose the subsequent node.
 
 See [the BN5/BN4 guide](docs/bn5-bn4-progression.md) for setup, commands, stopping,
 and the automatic return to normal supervision.
@@ -358,6 +375,7 @@ features have their own unlocks:
 | Feature | Main requirement |
 | --- | --- |
 | Program purchases, faction backdoors, augmentation advice/actions | Singularity: current BN4 or SF4 level 1+. Lower SF4 levels outside BN4 have higher API RAM costs. |
+| Automatic INT farming after installation | Singularity plus INT (current BN5 or SF5), a persistent faction, and sufficient home RAM. |
 | Stock trading | WSE Account, TIX API, and 4S Market Data TIX API access. Short entries additionally need BN8 or SF8 level 2+. |
 | Darknet exploration | `DarkscapeNavigator.exe`, or BN15/SF15 access that grants it. |
 | IPvGO | The ordinary `ns.go` API; no Singularity requirement. |

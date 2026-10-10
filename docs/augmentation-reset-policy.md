@@ -1,9 +1,10 @@
 # Conservative augmentation reset timing
 
-The BN4 automatic route defaults to `--reset-policy auto`. `--min-install` remains
-5 by default, but is a fallback when economics is unknown. Generic/non-route runs
-keep their existing count behavior. `--reset-policy threshold` preserves the old
-route count/stall policy, including the two-minute valuable-purchase grace. Both
+The progression-enabled augmentation loop defaults to `--reset-policy auto` in
+BN4 or any node with SF4, including BN5. `--min-install` remains 5 by default,
+but is a fallback when economics is unknown. Explicit `--route false` runs
+keep their basic count behavior. `--reset-policy threshold` preserves the bounded
+count/stall policy, including the two-minute valuable-purchase grace. Both
 the supervisor and standalone augmentation manager accept the flag; the supervisor
 forwards it and its existing saved arguments restore it through bootstrap.
 

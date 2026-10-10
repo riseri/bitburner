@@ -1,11 +1,11 @@
 import { boundedXpAllocation } from "lib/milestone-balance.js";
+import { LAUNCH_ENVELOPE, BATCH_PHASES, cadenceBatchRate } from "lib/scheduler-limits.js";
 
 // Capacity control changes future admission only. Committed worker deadlines and
 // ownership are handled by the scheduler, independently of these budgets.
 const SAMPLE_MS = 10_000;
 const OBSERVE_MS = 60_000;
 const COOLDOWN_MS = 120_000;
-const LAUNCH_ENVELOPE = 128;
 
 export function schedulerLimit(value, kind) {
     if (String(value).trim().toLowerCase() === "auto") return "auto";
@@ -23,8 +23,8 @@ export function createSchedulerScaling(cfg, batch = "auto", launches = "auto", n
     const launchMode = requestedLaunches === "auto" ? "auto" : "fixed";
     // At least four phase launches per batch; each target also has its own safe
     // landing cadence. Extra split processes consume the actual launch ledger.
-    const batchCeiling = batchMode === "auto" ? Math.min(LAUNCH_ENVELOPE / 4,
-        cfg.maxTargets * 1000 / (4 * cfg.gap + 20)) : requestedBatch;
+    const batchCeiling = batchMode === "auto" ? Math.min(LAUNCH_ENVELOPE / BATCH_PHASES,
+        cfg.maxTargets * cadenceBatchRate(cfg.gap)) : requestedBatch;
     if (!(Number.isFinite(batchCeiling) && batchCeiling > 0)) throw new Error("Require a finite positive gap and target limit");
     const state = { enabled: batchMode === "auto" || launchMode === "auto", batchMode, launchMode,
         batchCeiling, launchCeiling: launchMode === "auto" ? LAUNCH_ENVELOPE : requestedLaunches,
@@ -123,6 +123,14 @@ export function tickSchedulerScaling(state, input, now = Date.now()) {
         state.changes++;
         return before[0] !== state.batch || before[1] !== state.launches;
     }
+    // A budget change can need a yielding search and a generation cutover before
+    // it changes paid work. Start the comparison window after the latest plan
+    // change, rather than rolling back while the higher-budget plan is pending.
+    if (state.probe && state.probe.goal === input.goal && (state.probe.planKey !== input.planKey ||
+        input.budgetPlanning && now < state.probe.planWaitUntil)) {
+        state.probe.planKey = input.planKey;
+        state.probe.settleAt = Math.max(state.probe.settleAt, now + input.maxActionTime * 2 + OBSERVE_MS);
+    }
     const restoring = state.restore && input.earningStable;
     const evidenced = w.loop.count >= 10 && w.landing.count >= 4 && (input.stable || restoring) && !input.recovering && Number.isFinite(input.income) && input.income > 0;
     if (!evidenced || input.resetPending) {
@@ -134,7 +142,8 @@ export function tickSchedulerScaling(state, input, now = Date.now()) {
     state.healthySince ??= now;
     if (now < state.cooldownUntil || now - state.healthySince < OBSERVE_MS) {
         state.decision = now < state.cooldownUntil ? "COOLDOWN" : "OBSERVE";
-        state.reason = now < state.cooldownUntil ? state.cooldownReason : "Observing 60 seconds of stable timing and paid work";
+        state.reason = now < state.cooldownUntil ? state.cooldownReason :
+            `Observing 60 seconds of stable timing and paid work (${Math.floor((now - state.healthySince) / 1000)}/60s)`;
         return false;
     }
     const c = input.capacity, limits = c.constraints;
@@ -208,7 +217,8 @@ export function tickSchedulerScaling(state, input, now = Date.now()) {
         state.launches = Math.min(state.launchCeiling, state.launches + Math.max(8, Math.ceil(state.launches * .25 / 4) * 4));
     if (before.batch !== state.batch || before.launches !== state.launches) {
         const baseline = input.skillGoal ? input.xpRate : input.income;
-        if (baseline > 0) state.probe = { ...(incompleteProbe || { ...before, baseline, goal: input.goal }),
+        if (baseline > 0) state.probe = { ...(incompleteProbe || { ...before, baseline, goal: input.goal }), planKey: input.planKey,
+            planWaitUntil: now + Math.max(5 * OBSERVE_MS, input.maxActionTime * 2 + OBSERVE_MS),
             settleAt: now + Math.max(OBSERVE_MS, input.maxActionTime * 2 + OBSERVE_MS) };
         state.healthySince = null; state.changes++; state.decision = "INCREASE";
         state.reason = "Stable timing with usable demand; test higher shared budgets";

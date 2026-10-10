@@ -2,8 +2,9 @@ import { homeCapacityStatus } from "lib/home-capacity.js";
 import { backgroundPrepJobs, backgroundPrepRam } from "lib/background-prep.js";
 import { governedPeerRate, schedulerScalingStatus, pipelineUsesBudget } from "lib/scheduler-scaling.js";
 import { launchBudgetDemand, optionalLaunchLimit } from "lib/launch-budget.js";
+import { MIN_TARGET_RATE, MAX_TARGETS, cadenceBatchRate } from "lib/scheduler-limits.js";
 
-export const MIN_TARGET_BATCH_RATE = .25;
+export const MIN_TARGET_BATCH_RATE = MIN_TARGET_RATE;
 
 // Pure projection of the scheduler's ledgers. No fleet scan or expensive APIs.
 export function schedulerCapacity(pool, now = Date.now()) {
@@ -33,14 +34,24 @@ export function schedulerCapacity(pool, now = Date.now()) {
     }
     const candidates = new Map();
     const requiredRates = new Map(), modelIncome = active.reduce((n, p) => n + (p.runtime?.plan.expected || 0), 0);
+    const full = lanes.length >= cfg.maxTargets;
+    const replacement = full ? active.reduce((weakest, p) => !weakest ||
+        (p.runtime?.plan.expected || Infinity) < (weakest.runtime?.plan.expected || Infinity) ? p : weakest, null) : null;
+    const incomeFloor = replacement ? replacement.runtime.plan.expected * cfg.switchThreshold : modelIncome * (cfg.switchThreshold - 1);
+    const availableRate = Math.max(0, (cfg.schedulerScaling?.batchCeiling || cfg.maxBatchRate) - modelRate +
+        (replacement?.runtime.plan.batchRate || 0));
+    const candidateRate = Math.min(cadenceBatchRate(cfg.gap), availableRate);
     for (const [name, model] of pool.scalingCandidates || []) {
         if (pool.pipelines.has(name) || (pool.blocked?.get(name) || 0) > now) continue;
-        const needed = Math.max(MIN_TARGET_BATCH_RATE, modelIncome * (cfg.switchThreshold - 1) / model.perBatch);
-        if (needed + modelRate <= cfg.schedulerScaling.batchCeiling) {
-            candidates.set(name, model.perBatch * (cfg.schedulerScaling.batchCeiling - modelRate)); requiredRates.set(name, needed);
+        const needed = Math.max(MIN_TARGET_BATCH_RATE, incomeFloor / model.perBatch);
+        if (needed <= candidateRate) {
+            candidates.set(name, model.perBatch * candidateRate); requiredRates.set(name, needed);
         }
     }
-    for (const c of pool.targetAnalysis || []) if (!pool.pipelines.has(c.name) && c.steady > 0 && (pool.blocked?.get(c.name) || 0) <= now)
+    // Fresh scout evidence supersedes startup estimates, including a candidate
+    // excluded because even its own maximum cadence cannot clear the hurdle.
+    for (const c of pool.targetAnalysis || []) if (!pool.pipelines.has(c.name) && c.steady > 0 &&
+        !pool.scalingCandidates?.has(c.name) && (pool.blocked?.get(c.name) || 0) <= now)
         candidates.set(c.name, c.steady);
     if (pool.readyScan?.best) candidates.set(pool.readyScan.best.name, pool.readyScan.best.potential);
     if (prep?.candidate?.potential > 0 && prep.target && !pool.pipelines.has(prep.target)) candidates.set(prep.target, prep.candidate.potential);
@@ -99,6 +110,7 @@ export function schedulerCapacity(pool, now = Date.now()) {
         homeGw: homeCapacityStatus(pool),
         ram: { used, total, physical, foreign, utilization: total > 0 ? used / total : 0, scalable: Boolean(ramScalable) },
         targets: { active: lanes.length, limit: cfg.maxTargets, mode: cfg.targetMode || "explicit", profitableInactive: candidates.size,
+            capacityGoverned: cfg.targetMode === "auto" && cfg.maxTargets === MAX_TARGETS,
             admitting: active.length, waiting: lanes.length - active.length,
             next: next ? { name: next[0], expected: next[1], requiredRate: requiredRates.get(next[0]) || MIN_TARGET_BATCH_RATE } : null },
         scaling: schedulerScalingStatus(cfg.schedulerScaling),

@@ -45,6 +45,22 @@ function fixture() {
         setLevel:n=>level=n,setFormulas:n=>formulas=n,get calls(){return calls;}};
 }
 
+test('an unchanged optimal lane does not keep retrying the same throughput search and holding rate verification',()=>{
+    const f=fixture();let attempts=0;
+    f.pool.cfg.schedulerScaling={batchMode:'auto',preferTargets:false};
+    f.cfg=f.pool.cfg;f.cfg.maxBatchRate=8;f.p.tunedBatchLimit=4;
+    f.api.tuneTargetSteps=function*(){attempts++;yield;return f.p.runtime;};
+    f.multi.serviceShadowTune(f.ns,f.pool,f.p);
+    assert.equal(f.p.shadow.trigger,'throughput');
+    f.clock.now+=2001;
+    for(let i=0;i<3;i++)f.multi.serviceShadowTune(f.ns,f.pool,f.p);
+    assert.equal(attempts,1);assert.equal(f.p.shadow,null);
+    f.clock.now+=30001;f.multi.serviceShadowTune(f.ns,f.pool,f.p);
+    assert.equal(f.p.shadow,null);assert.equal(attempts,1);
+    f.cfg.maxBatchRate=10;f.multi.serviceShadowTune(f.ns,f.pool,f.p);
+    assert.equal(f.p.shadow.trigger,'throughput','a materially larger budget still gets a fresh search');
+});
+
 for(const trigger of ['skill','formulas','capacity']) test(`${trigger} tunes in the background while the sole lane admits old-plan batches`,()=>{
     const f=fixture();if(trigger==='skill')f.setLevel(3000);if(trigger==='formulas')f.setFormulas(true);
     if(trigger==='capacity')f.p.tunedCapacity=1000;

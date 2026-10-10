@@ -1,4 +1,4 @@
-import { bn4Route } from "lib/bitnode-route.js";
+import { nextRouteNode } from "lib/bitnode-route.js";
 import { writeUtilityReport } from "lib/utility-report.js";
 import { PORTS } from "lib/ports.js";
 import { readSavings } from "lib/savings.js";
@@ -29,7 +29,7 @@ export function diagnoseAutomation(ns) {
     const supervisor = processes.find(process => process.filename === "supervisor.js");
     const cfg = supervisorServiceConfig(supervisor?.args || []);
     const reset = ns.getResetInfo();
-    const capabilities = { route: bn4Route(reset), singularity: singularityAvailable(reset),
+    const capabilities = { route: singularityAvailable(reset) && nextRouteNode(reset) !== null, singularity: singularityAvailable(reset),
         darknet: ns.fileExists("DarkscapeNavigator.exe", "home") || reset.currentNode === 15, stocks: false };
     try { capabilities.stocks = ns.stock.hasWseAccount() && ns.stock.hasTixApiAccess() && ns.stock.has4SDataTixApi(); } catch {}
     const enabled = selectedServices(cfg);

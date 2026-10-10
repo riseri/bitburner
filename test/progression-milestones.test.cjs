@@ -46,6 +46,24 @@ test('Red Pill installation and the final server use current hacking and root re
     assert.match(f.api.planMilestone(input).label, /home -> cave/);
 });
 
+test('final-server advice follows the BN5 destination and does not retain the old BN4 instruction', () => {
+    const f = fixture(), input = { currentNode: 5, nextNode: 5, player: { skills: { hacking: 5000 } },
+        observation: { redPill: 'installed' }, worldDaemon: { discovered: true, requiredHacking: 4500, rooted: true } };
+    assert.match(f.api.planMilestone(input).label, /then enter BitNode 5/);
+    assert.doesNotMatch(f.api.planMilestone(input).label, /BitNode 4/);
+    input.nextNode = null;
+    assert.doesNotMatch(f.api.planMilestone(input).label, /then enter BitNode/);
+});
+
+test('final-server readiness is recognized outside the original BN4/BN5 advisor', () => {
+    const f = fixture();
+    for (let node = 1; node <= 15; node++) {
+        const result = f.api.planMilestone({ currentNode: node, nextNode: node, player: { skills: { hacking: 9000 } },
+            observation: { redPill: 'installed' }, worldDaemon: { discovered: true, requiredHacking: 4500, rooted: true } });
+        assert.equal(result.stage, 'FINISH'); assert.match(result.label, new RegExp(`then enter BitNode ${node}(?:$| )`));
+    }
+});
+
 test('manual observations expire on reset and fresh automatic reports take precedence', async () => {
     const f = fixture();
     f.ns.flags = defaults => ({ ...Object.fromEntries(defaults), 'installed-count': 30, 'red-pill': 'none' });

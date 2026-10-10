@@ -23,17 +23,17 @@ export function readProgressionObservation(ns, now = Date.now()) {
     return readProgressionInput(ns);
 }
 
-export function planMilestone({ currentNode, player = {}, money, observation = {}, worldDaemon = {} }) {
+export function planMilestone({ currentNode, nextNode = null, player = {}, money, observation = {}, worldDaemon = {} }) {
     const result = (stage, label, savings = null) => ({ stage, label, savings });
-    if (![4, 5].includes(currentNode)) return result("GENERAL", "Continue faction work and install augmentations");
     if (observation.redPill === "queued") return result("INSTALL", "Install The Red Pill now; no need to wait for more augmentations");
     if (observation.redPill === "installed" || worldDaemon.discovered) {
         if (!worldDaemon.discovered) return result("DAEMON", "Discover w0r1d_d43m0n after installing The Red Pill");
         if (Number(player.skills?.hacking) < worldDaemon.requiredHacking) return result("DAEMON_SKILL",
             `Raise hacking to ${worldDaemon.requiredHacking} for w0r1d_d43m0n`);
         if (!worldDaemon.rooted) return result("DAEMON_ROOT", "Gain root access on w0r1d_d43m0n");
-        return result("FINISH", `Backdoor w0r1d_d43m0n to finish this BitNode${currentNode === 5 ? "; then enter BitNode 4" : ""}${worldDaemon.path?.length ? ` | ${worldDaemon.path.join(" -> ")}` : ""}`);
+        return result("FINISH", `Backdoor w0r1d_d43m0n to finish this BitNode${nextNode !== null ? `; then enter BitNode ${nextNode}` : ""}${worldDaemon.path?.length ? ` | ${worldDaemon.path.join(" -> ")}` : ""}`);
     }
+    if (![4, 5].includes(currentNode)) return result("GENERAL", "Continue faction work and install augmentations");
     if (player.factions?.includes("Daedalus")) {
         const price = observation.redPillPrice;
         const savings = Number.isFinite(price) && price > 0

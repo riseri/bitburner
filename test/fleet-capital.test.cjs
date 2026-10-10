@@ -35,8 +35,9 @@ test('an actual BN5 augmentation observation with five installed and zero queued
     const f = fixture(), api = loadScript('augmentation-manager.js', f.clock);
     f.reset.currentNode = 5; f.reset.ownedSF = new Map([[4, 3], [5, 1]]);
     f.ns.getPlayer = () => ({ factions: [], skills: { hacking: 256 } });
+    f.ns.getHackingLevel = () => 256;
     f.ns.singularity = { getOwnedAugmentations: () => ['A', 'B', 'C', 'D', 'E'],
-        getCurrentWork: () => null, checkFactionInvitations: () => [] };
+        getCurrentWork: () => null, checkFactionInvitations: () => [], getAugmentationsFromFaction: () => [] };
     const producer = { ...f.ns, pid: 10 }, cfg = { minInstall: 5, route: true, focus: 'hacking', cashReserve: .1, interval: 5000 };
     const status = await api.tickAugmentationLoop(producer, cfg, {});
     api.publish(f.ns.getPortHandle(11), producer, cfg, status);

@@ -4577,7 +4577,7 @@ function renderSchedulerFrame(ns, pool) {
 
 	dashboardSection(ns, "Overview");
 	renderSchedulerCapacity(ns, snapshot.capacity, pool.cfg.dashboardDetails);
-	row("Target slots", `${rows.length}/${pool.cfg.maxTargets} | priority ${pool.anchor}`);
+	row("Target slots", `${rows.length}/${pool.cfg.targetMode === "auto" ? "AUTO" : pool.cfg.maxTargets} | priority ${pool.anchor}`);
 	row("Income 60s", `${cash(snapshot.income60)}/s`);
 	row("Model", `${cash(snapshot.model)}/s estimate`);
 	row("Run total", `${cash(snapshot.earned)} earned`);

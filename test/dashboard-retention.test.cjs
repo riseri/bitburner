@@ -74,6 +74,20 @@ test('capacity display separates next-target batch headroom from recent and futu
     }
 });
 
+test('AUTO dashboard identifies capacity governed admission while retaining an old resident daemon cap',()=>{
+    const clock=new Clock(),ui=loadScript('lib/dashboard.js',clock),ns=tail();
+    const producer=loadScript('lib/scheduler-capacity.js',clock);
+    const pool={cfg:{maxTargets:128,targetMode:'auto',maxBatchRate:8.11,maxLaunches:128,maxWorkers:6000},
+        pipelines:new Map(),network:{hosts:[]},running:new Map(),foreign:new Map(),launchBuckets:new Map()};
+    const current=producer.schedulerCapacity(pool);
+    assert.equal(current.targets.capacityGoverned,true);
+    ui.dashboardFrame(ns,frame=>ui.renderSchedulerCapacity(frame,current));
+    assert.match(ns.entries[0],/AUTO \(capacity governed\)/);
+    const legacy={...current,targets:{...current.targets,limit:6,capacityGoverned:undefined}};
+    ui.dashboardFrame(ns,frame=>ui.renderSchedulerCapacity(frame,legacy));
+    assert.match(ns.entries[0],/AUTO \(max 6\)/);
+});
+
 test('the endgame trial dashboard shows restoration, full peer budget, actual demand and independent XP expansion',()=>{
     const f=require('./home-xp-fixture.cjs').fixture({trial:true}),ui=loadScript('lib/dashboard.js',f.clock),ns=tail();
     let c;for(let i=0;i<7;i++)c=f.sample({moneyAge:11000,blockedDemand:true});

@@ -58,7 +58,7 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | Flag | Default | Behavior |
 | --- | --- | --- |
 | `--progression-actions` | `true` | Buy programs and install faction backdoors when Singularity is unlocked |
-| `--max-targets` | `auto` | Automatic admission up to 6; explicit integer 1..6 remains available. Capacity and marginal value determine actual lane count. |
+| `--max-targets` | `auto` | Capacity governed automatic admission; explicit integer 1..128 remains available. AUTO's safety bound of 128 follows the launch envelope and minimum admission rate. Shared capacity and marginal value determine actual lane count. |
 | `--max-batch-rate` | `auto` | Adaptive shared admission rate, starting at up to 4/s. Ceiling follows target cadence and the launch envelope. Numeric (0,8] keeps a fixed budget. |
 | `--max-launches` | `auto` | Adaptive shared planned launches/s, starting at 32 with a 128/s safety envelope. Numeric integer 4..128 keeps a fixed budget. Split chunks and 250 ms buckets count. |
 | `--background-prep` | `true` | Prepare promising targets while the current target earns, subject to health and resource gates |
@@ -76,6 +76,9 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--augmentation-city-faction` | empty | The only city faction the loop may auto-join; city invitations are skipped when empty |
 | `--augmentation-join-factions` / `--augmentation-work` / `--augmentation-donate` / `--augmentation-purchase` | `true` | Individual action gates within an enabled loop; donations also require favor and `Formulas.exe` |
 | `--augmentation-focus-work` | `false` | Whether automatic faction work takes focus |
+| `--intelligence` | `true` | Run one bounded INT session per BitNode after an eligible augmentation installation; requires Singularity, INT and a persistent faction |
+| `--intelligence-minutes` | `10` | Absolute automatic INT budget in minutes, greater than 0 and at most 60 |
+| `--intelligence-target` | `0` | Optional earlier INT level limit; 0 means time only |
 | `--min-install` | `5` | Install at this queued count before another purchase/join; remaining catalog items do not delay it. Installation is always enabled in the augmentation service. |
 | `--savings` | `auto` | Protect program cash even before Singularity; then milestone or augmentation cash. Augmentation quotes require Singularity or manual input |
 | `--save-amount` | unset | Set a fixed manual goal instead of automatic savings; no Singularity required |
@@ -274,7 +277,7 @@ focuses on it and its prerequisites; once purchased, the automatic basket is emp
 Earlier, it scores economy, faction reputation, skill/XP, and distinct-count progress
 against the shared bottleneck. Those progression/support upgrades are included in
 the default hacking focus; `--target` remains an explicit override. NeuroFlux is
-excluded from the ordinary automatic basket. The BN4 endgame controller can
+excluded from the ordinary automatic basket. The Singularity endgame controller can
 include it in a separate completion package. Missing prerequisites
 from unjoined factions are reported. This is a useful ordering heuristic, not a
 global optimization over every faction, donation, or unlock.
@@ -288,10 +291,9 @@ The standalone planner never buys, works for a faction, donates, installs
 augmentations or resets. The separately gated augmentation loop can join invited
 non-city factions, perform faction work, donate when favor and `Formulas.exe` make
 the exact reputation cost available, and buy its next planned item. It never
-interrupts unrelated player activity. Outside the BN4 route, city factions require
-`--augmentation-city-faction`. The BN4 controller selects compatible city factions
-automatically unless explicitly configured. Outside the BN4 route, installation retains the queued-augmentation threshold.
-Within BN4, the controller compares a bounded wait for the next valuable purchase
+interrupts unrelated player activity. With progression enabled, the controller
+selects compatible city factions in BN4 or other nodes with SF4 unless explicitly
+configured through `--augmentation-city-faction`. It compares a bounded wait for the next valuable purchase
 with the current batch, favor access, and observed reset recovery. The Red Pill
 installs immediately, subject
 to manual-work and restart checks. After The Red Pill is installed, the controller
@@ -303,13 +305,14 @@ comparable recovery history, the controller uses a labeled 24-hour allowance
 and requires a projected finish at least 50% sooner. Donations retain
 enough cash for the planned purchase, the percentage reserve, and unrelated goals.
 
-Outside the BN4 route, automatic installation checks `--min-install` before
-another purchase or faction join, even if the plan still contains items. Queued NeuroFlux levels purchased
-manually count toward the threshold. Outside the planned BN4 route, small exhausted catalogs remain manual until
-you lower the threshold or unlock additional factions. In BN4.1–BN4.3, completed
-smaller batches install automatically, as do batches reaching 30 distinct
-augmentations. A nonempty batch waiting on reputation or cash installs after
-30 minutes since the last reset. Faction-work ETAs include
+With progression enabled, completed smaller batches install automatically in
+BN4 or any node with SF4, including BN5, as do batches reaching the live distinct
+augmentation requirement for Daedalus. Queued NeuroFlux levels purchased
+manually count toward the fallback threshold. Explicit standalone `--route false`
+runs retain the basic purchase/count loop. A nonempty batch waiting on reputation
+or cash installs after 30 minutes of stalled progress or 60 minutes on one
+objective. Auto mode also caps queue age at one hour across objective changes.
+Faction-work ETAs include
 the game's existing sharing bonus once, plus the actual/configured focus penalty;
 only an installed Neuroreceptor Management Implant removes that penalty.
 
@@ -350,11 +353,28 @@ live soak after deployment.
 ## BN5/BN4 milestone advisor and INT farming
 
 See [BN5/BN4 progression](bn5-bn4-progression.md) for `progression-state.js` inputs,
-automatic milestone savings, and the separate bounded `intelligence-farm.js` command.
+automatic milestone savings and bounded INT farming.
 
-The BN4 controller also acquires factions, trains hacking, upgrades starter home
-RAM, and completes the first two BN4 runs automatically. The only automatic next
-node is BN4; the BN4.3 exit waits for your next-node choice. An early SoA invitation
-can trigger one bounded INT session. See the guide for its manual infiltration
-prerequisite and reset effects. Other BitNodes and optional subsystems are not
-covered by this route strategy.
+The supervisor automatically farms INT once per BitNode, immediately after an
+eligible augmentation installation. It defaults to ten minutes with no level
+cap and resumes supervision on completion, failure or cancellation. Configure it
+with `--intelligence-minutes`, `--intelligence-target`, or `--intelligence false`.
+Singularity, INT, persistent faction access and callback RAM are required.
+Missing prerequisites never postpone installation; Red Pill installations skip
+farming. A used or cancelled budget is not automatically renewed in the same node.
+
+Manual INT farming works in any BitNode with Singularity (BN4 or SF4) and INT
+(BN5 or SF5). Stop the supervisor, augmentation manager and player work, then run
+`run intelligence-farm.js --start --minutes 10`; optional `--target 150` adds a
+level limit. It rejoins all available persistent corporate factions and Shadows
+of Anarchy. No fixed level cap applies by default. Queued augmentations must be
+installed first; each cycle resets cash, reputation, ordinary skills, purchased
+servers and scripts. Normal completion restores the saved supervisor settings.
+
+The controller also acquires factions, trains hacking, upgrades starter home
+RAM, and follows BNx.1 -> BNx.2 -> BNx.3 for every BitNode x when Singularity
+is available. It restores automation after each transition; the third-run exit
+waits for your subsequent node choice. INT farming follows
+capabilities across nodes. See the guide for persistent faction prerequisites,
+reset effects and manual extra sessions. Other BitNodes may still require
+dedicated automation for their node-specific completion mechanics.

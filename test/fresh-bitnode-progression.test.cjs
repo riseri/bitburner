@@ -88,7 +88,8 @@ test('the reported BN5 empty augmentation queue buys TOR and programs, then perm
     f.ns.getHackingLevel = () => 256;
     f.ns.getServerRequiredHackingLevel = () => 344;
     const installed = ['A', 'B', 'C', 'D', 'E'];
-    Object.assign(f.ns.singularity, { getOwnedAugmentations: () => installed, checkFactionInvitations: () => [] });
+    Object.assign(f.ns.singularity, { getOwnedAugmentations: () => installed, checkFactionInvitations: () => [],
+        getAugmentationsFromFaction: () => [] });
     const cfg = { minInstall: 5, route: true, focus: 'hacking', cashReserve: .1, joinFactions: true, interval: 5000 };
     const producer = { ...f.ns, pid: manager.pid };
     const status = await augmentation.tickAugmentationLoop(producer, cfg, {});

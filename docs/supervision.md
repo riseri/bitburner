@@ -406,22 +406,36 @@ their old arguments. Use the root README for all flags and deployment instructio
 
 An active bounded INT farming session prevents supervisor startup. The farmer
 uses its own reset callback and marks the session inactive before returning to
-`bootstrap.js`. The BN4 controller can request one early bounded session through
-`intelligence-handoff.js` when its persistent invitation is available and no
-augmentations have been bought. The handoff validates prerequisites before
-stopping its owning services. The infiltration itself remains manual.
+`bootstrap.js`. With Singularity and INT unlocked, the supervisor enables one
+automatic session per BitNode after an eligible augmentation installation.
+`intelligence-handoff.js` runs as the installation callback, before rebuilding
+the economy, and verifies a fresh request, installed package, faction access,
+settings and callback RAM. Missing prerequisites skip farming while normal
+installation proceeds; Red Pill installations skip it. The default is ten
+minutes without a level cap, configured by `--intelligence-minutes` and
+`--intelligence-target`; `--intelligence false` disables it. There is no ongoing
+helper RAM reservation for farming. The dashboard shows policy and measured gains.
 
-## Planned BN4 route
+The farmer rejoins all available persistent factions. Automatic completion,
+failure and `--stop` restore supervision without renewing the budget in the same
+node. Manual extra sessions remain available after stopping automation and player
+work. A Shadows of Anarchy invitation requires a manual infiltration; corporate
+invitations also qualify.
 
-With progression and augmentation actions enabled, BN4.1 through BN4.3 use the
+## Automatic three-run BitNode route
+
+With progression and augmentation actions enabled and Singularity available,
+BNx.1 through BNx.3 for every BitNode x use the
 controller described in [the BN5/BN4 guide](bn5-bn4-progression.md). It adds automatic
 starter RAM upgrades, compatible faction acquisition, count fillers, completed
 batch/30-minute installation decisions, and hacking training. Singularity calls
 stay in the augmentation service and isolated helpers; none are added to the
-supervisor's RAM bill. Only BN4 reserves the additional route helper RAM.
+supervisor's RAM bill. The additional route helper RAM is reserved while an
+automatic same-node transition remains in the route.
 
 `node-complete.js` accepts only fresh requests from the live augmentation manager
-for the next BN4 run while SF4 is below level 2. At BN4.3 it leaves the subsequent
-node unspecified and does not reset. `bootstrap.js` uses spawn to release its RAM
+for the next run of the current node while its Source-File is below level 2.
+At BNx.3 it waits for your next node choice and does not reset. `bootstrap.js`
+restores the saved supervisor arguments and uses spawn to release its RAM
 before launching the next supervisor. Existing manual activity and savings remain
 constraints on automatic actions.

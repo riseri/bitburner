@@ -7,9 +7,23 @@ test('default configuration enables actions; explicit service opt-outs remain av
     const cfg = api.supervisorServiceConfig();
     assert.equal(cfg.progressionActions, true);
     assert.equal(cfg.augmentationActions, true);
+    assert.equal(cfg.intelligence, true);
+    assert.equal(cfg.intelligenceMinutes, 10);
+    assert.equal(cfg.intelligenceTarget, 0);
     const limited = api.supervisorServiceConfig(['--augmentation-actions=false', '--progression-actions', false]);
     assert.equal(limited.augmentationActions, false);
     assert.equal(limited.progressionActions, false);
+});
+
+test('INT callback files follow capabilities and settings without reserving ongoing worker RAM', () => {
+    const api = loadScript('lib/service-catalog.js', new Clock()), queried = [];
+    const cfg = api.supervisorServiceConfig(), capabilities = { route: false, singularity: true, intelligence: true };
+    const files = api.supervisorFiles(cfg, capabilities);
+    assert.ok(files.includes('intelligence-handoff.js')); assert.ok(files.includes('intelligence-farm.js'));
+    api.supervisorRamBudget({ getScriptRam: file => { queried.push(file); return 2; } }, cfg, capabilities);
+    assert.ok(!queried.some(file => file.startsWith('intelligence-')));
+    cfg.intelligence = false;
+    assert.ok(!api.supervisorFiles(cfg, capabilities).some(file => file.startsWith('intelligence-')));
 });
 
 test('locked services need no files or RAM reservations; unlocks and opt-outs change the budget', () => {
@@ -99,6 +113,46 @@ function supervisorFixture(node) {
         sleep: async () => { throw new Error('end fixture'); } };
     return { ns, api, clock, processes, launches, files, reads, logs, killed, uiCalls, unlockDarknet: () => { navigator = true; } };
 }
+
+for (const [args, enabled, minutes, target] of [[[], true, 10, 0], [['--intelligence', false], false, 10, 0],
+    [['--intelligence-minutes', 2, '--intelligence-target', 150], true, 2, 150]]) {
+    test(`supervisor forwards and restores the INT policy: ${JSON.stringify(args)}`, async () => {
+        const f = supervisorFixture(5); f.ns.args = args;
+        f.ns.getResetInfo().ownedSF.set(4, 3); f.ns.getResetInfo().ownedSF.set(5, 1);
+        await assert.rejects(f.api.main(f.ns), /end fixture/);
+        const manager = f.launches.find(process => process.filename === 'augmentation-manager.js');
+        const { readArgument } = loadScript('lib/service-lifecycle.js', f.clock);
+        assert.equal(readArgument(manager.args, '--intelligence'), enabled);
+        assert.equal(readArgument(manager.args, '--intelligence-minutes'), minutes);
+        assert.equal(readArgument(manager.args, '--intelligence-target'), target);
+        const restored = [];
+        await loadScript('bootstrap.js', f.clock).main({ getHostname: () => 'home',
+            read: () => f.files.get('data/supervisor-bootstrap.json'), spawn: (...values) => restored.push(values), tprint() {} });
+        assert.deepEqual(restored[0].slice(2), args);
+    });
+}
+
+for (const [flag, value] of [['--intelligence-minutes', 0], ['--intelligence-minutes', 61],
+    ['--intelligence-minutes', 'bad'], ['--intelligence-target', -1], ['--intelligence-target', Infinity]]) {
+    test(`invalid automatic INT limits are rejected before saving or starting services: ${flag}=${value}`, async () => {
+        const f = supervisorFixture(5); f.ns.args = [flag, value];
+        await assert.rejects(f.api.main(f.ns), /intelligence-minutes|intelligence-target/);
+        assert.equal(f.files.has('data/supervisor-bootstrap.json'), false);
+        assert.equal(f.launches.length, 0);
+    });
+}
+
+test('the supervisor shows automatic INT policy and measured completion in its dashboard', () => {
+    const f = supervisorFixture(5), cfg = loadScript('lib/service-catalog.js', f.clock).supervisorServiceConfig();
+    f.ns.getResetInfo().ownedSF.set(4, 3); f.ns.getResetInfo().ownedSF.set(5, 1);
+    assert.match(f.api.intelligenceSummary(f.ns, cfg), /10 min after next eligible install.*once per BitNode/);
+    f.files.set('data/intelligence-session.json', JSON.stringify({ version: 2, automatic: true, active: false,
+        node: 5, nodeReset: 1, startedAt: 1000000, deadline: 1600000, target: 0, startExp: 15085, startInt: 109,
+        resets: 2, joins: 6, factions: ['ECorp'], reason: 'Time budget reached', metrics: { gained: 45, xpPerHour: 27000, joins: 6 } }));
+    assert.match(f.api.intelligenceSummary(f.ns, cfg), /Time budget reached.*45.0 XP.*27000 XP\/hour.*6 joins/);
+    cfg.intelligence = false;
+    assert.equal(f.api.intelligenceSummary(f.ns, cfg), 'Disabled');
+});
 
 test('reset policy override is validated, forwarded and survives bootstrap arguments', async () => {
     for (const mode of ['auto', 'threshold']) {
@@ -217,11 +271,12 @@ test('a Darknet unlock admits the service without restarting the supervisor', as
 });
 
 
-test('supervisor does not compete with an active INT session and resumes after it ends', async () => {
-    const f = supervisorFixture(4), logs = [];
+for (const [node, version] of [[4, 1], [5, 2], [12, 2]]) test(`BN${node} supervisor yields to an active v${version} INT session and resumes after it ends`, async () => {
+    const f = supervisorFixture(node), logs = [];
     f.ns.tprint = text => logs.push(text);
-    const session = { version: 1, active: true, node: 4, nodeReset: 1, startedAt: 1000000,
-        deadline: 1600000, target: 50, startExp: 0, startInt: 1, resets: 0 };
+    const session = { version, active: true, node, nodeReset: 1, startedAt: 1000000,
+        deadline: 1600000, target: version === 1 ? 50 : 0, startExp: 0, startInt: 109,
+        resets: 0, joins: 0, factions: ['ECorp', 'Shadows of Anarchy'] };
     f.files.set('data/intelligence-session.json', JSON.stringify(session));
     await f.api.main(f.ns);
     assert.equal(f.launches.length, 0);

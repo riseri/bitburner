@@ -1,8 +1,8 @@
 # Controlled multi-target JIT
 
 The money engine now runs a collection of independent target pipelines inside
-**one daemon**. Automatic mode admits up to six earning targets, one trial at a
-time. Explicit limits 1 through 6 are supported; 1 and 2 retain their established
+**one daemon**. Automatic mode admits useful earning targets according to shared
+capacity, one trial at a time. Explicit limits 1 through 128 are supported; 1 and 2 retain their established
 admission behavior. See [elastic throughput](elastic-throughput.md) for global
 capacity, marginal-value and cloud-investment policy.
 This is concurrent hacking, not merely background preparation and not shotgun
@@ -36,7 +36,7 @@ as an earning rate. Live tuning yields
 between small search steps rather than running the entire search in the hot loop.
 Peers keep earning during tuning and initial warmup. Once the configured slots
 are full and all lanes are stable and productive, spare RAM can prepare a
-replacement candidate. The same applies below AUTO's six-target ceiling when
+replacement candidate. The same applies with open AUTO target slots when
 the shared batch budget is full and fixed, at its safety ceiling, or held for
 the final-server XP goal. Cheap bootstrap lanes must not prevent a richer target
 from being compared. Ordinary money AUTO can grow the rate budget first.
@@ -74,7 +74,7 @@ Default combined limits are:
 
 | Limit | Default | Meaning |
 | --- | ---: | --- |
-| Active targets | AUTO, max 6 | Ceiling including warming or draining lanes; admission still needs capacity |
+| Active targets | AUTO, capacity governed | One trial at a time; safety bound of 128 follows launch envelope and minimum admission headroom |
 | Admission batch rate | AUTO, starts at up to 4/s | Shared rate; automatically paced when budgets decrease |
 | Worker commitments | 6,000 | Queued plus running chunks across all targets |
 | Planned worker launches | AUTO, starts at 32/s | Shared rolling-window admission budget; bounded at 128/s |
@@ -211,7 +211,7 @@ run supervisor.js --max-targets 1
 
 The supervisor forwards `--max-targets`, `--max-batch-rate` and `--max-launches`
 to a newly started daemon. Existing process arguments cannot be changed by
-starting another supervisor. Target limits support AUTO and explicit 1..6;
+starting another supervisor. Target limits support AUTO and explicit 1..128;
 `--max-workers` remains a daemon-only setting. Reducing shared budgets may reduce
 income or prevent another target's admission. `--target` selects the initial target, not necessarily
 the only target; combine it with `--max-targets 1` to lock a single earning lane.
@@ -248,5 +248,6 @@ RAM analysis, real API execution cost, Electron garbage collection, external
 scripts or suspended/offline time. Passing tests supports the tested ownership,
 resource and recovery invariants, not guaranteed dollars/second or universal
 stability. Monitor per-target income, combined income and recovery after the
-first live multi-target warmup before considering tighter timing. The hard limit
-is six. Promotion waits for a safe handoff and drains only the replaced lane.
+first live multi-target warmup before considering tighter timing. Shared launch,
+worker, batch and RAM budgets remain authoritative beyond six targets. Promotion
+waits for a safe handoff and drains only the replaced lane.

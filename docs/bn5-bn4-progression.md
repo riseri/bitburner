@@ -1,12 +1,21 @@
-# BN5.1 to BN4 progression
+# BN5 and BN4 progression
 
-Finish BN5.1 through faction work and augmentations. The supervisor now protects
+Repeat BN5 through BN5.3 using faction work and augmentations. The supervisor protects
 cash for TOR and missing programs even without Singularity; buy them manually.
 Fleet purchases and new stock entries respect this floor. Existing stock positions
 are liquidated only for an authenticated, urgent cash-only milestone when net
 portfolio value can cover it; ordinary program savings do not force sales. Manual goals from `savings.js` take priority.
 
-## Milestone inputs in BN5
+With SF4, the supervisor can manage augmentation progression in BN5 as well:
+compatible faction unlocks, reputation and purchases, completed short batches,
+Daedalus count crossings, and bounded reset waits all run automatically. A queue
+of four with no remaining reachable basket installs instead of waiting forever
+for a fifth. Augmentation resets use the saved bootstrap settings. With Singularity,
+the first two completions re-enter the current BitNode automatically:
+BNx.1 -> BNx.2 -> BNx.3 for every BitNode x, including BN5. The third run waits
+at its exit requirements for your next BitNode choice.
+
+## Milestone inputs in BN5 without SF4
 
 Singularity is unavailable in BN5 without SF4, so scripts cannot read installed
 augmentations or faction reputation there. Record the missing facts on home:
@@ -43,17 +52,19 @@ Clear or replace manual goals when done. To record The Red Pill purchase:
 run progression-state.js --red-pill queued
 ```
 
-Install manually in BN5. All observations expire on augmentation or BitNode reset.
+Install manually in BN5 without SF4. All observations expire on augmentation or BitNode reset.
 After installation, record `--red-pill installed` if the network has not yet
 discovered the final server. The dashboard gives its live hacking requirement,
-root status, and route once discovered. In BN5 without SF4, finishing the node and selecting BN4 remain manual actions.
+root status, and route once discovered. In BN5 without SF4, finishing the node and re-entering BN5 remain manual actions.
 
-## Automatic behavior in BN4
+## Automatic augmentation progression with Singularity
 
-After manually finishing BN5.1 and entering BN4.1, run `supervisor.js` with no
-arguments. The BN4 route controller is enabled by default through the augmentation
-manager when progression actions are enabled. It is scoped to BN4.1, BN4.2 and
-BN4.3; it is not a strategy for every BitNode or every optional subsystem.
+After entering BN4.1, run `supervisor.js` with no
+arguments. The augmentation controller is enabled by default when progression
+actions are enabled. Its faction and reset policy also runs in other nodes with
+SF4. INT farming follows Singularity and INT access across nodes. Automatic
+BitNode transitions follow BNx.1 -> BNx.2 -> BNx.3 for every BitNode x;
+optional subsystems retain their separate policies.
 
 - The starter pool earns while isolated helpers plan cloud service placement
   and, when needed, home RAM upgrades. Cloud hosting is enabled by default:
@@ -110,13 +121,17 @@ See [dynamic planning details](progression-planning.md).
 
 The node transition helper checks ownership, the current reset, installed Red
 Pill, root access, hacking, player activity and restart files immediately before
-calling Singularity. **Its only allowed destination is BN4:** completing BN4.1
-enters BN4.2; completing BN4.2 enters BN4.3. At the BN4.3 exit requirements it stops
-with `ROUTE_END`. You must choose the subsequent node yourself; the game cannot
-award the completion and enter an unspecified next node. Nothing is random.
+calling Singularity. It re-enters the current node for its first two completions:
+BNx.1 -> BNx.2 -> BNx.3 for every BitNode x. Source-File levels record completed
+runs, so a BN5 run with SF5.1 completes into BN5.3. The actor rejects a request
+for a different node or a repeat beyond the third run. At the third-run exit it
+stops with `ROUTE_END` and waits for your next destination. Completing the third
+run requires selecting that destination; it never selects a fourth run or the
+next numbered BitNode for you.
 
 The callback releases its RAM before starting the supervisor, and the starter
-pool rebuilds the new node. Optional services yield RAM while the INT or node
+pool rebuilds the new node using the saved supervisor settings. The restart RAM
+check includes the Source-File awarded by the completion. Optional services yield RAM while the INT or node
 transition helper needs it. Failed node transitions retry after 30 seconds.
 
 `--augmentation-actions false` disables this controller's supervision;
@@ -126,19 +141,41 @@ augmentation manager's `--route false` keeps its generic augmentation loop.
 
 ## Bounded Intelligence session
 
-The controller automatically hands off to one early INT session when SF5 is
-owned, INT is below 50, no augmentations are installed/queued, and Shadows of
-Anarchy membership or its invitation exists. It stops at INT 50 or ten minutes,
-then restores supervision. A session already attempted manually or automatically
-in this node is not silently renewed.
+INT farming works in any BitNode with Singularity access (BN4 or SF4) and
+Intelligence unlocked (BN5 or SF5). This includes BN5 with SF4.3/SF5.1 and later
+BitNodes with those Source-Files; it does not require a particular node number.
+Without either capability, it prints the missing prerequisite before touching
+Singularity APIs.
+
+The supervisor enables automatic INT farming by default. Once per BitNode, an
+eligible augmentation installation uses `intelligence-handoff.js` as its reset
+callback. The newly installed augmentations remain installed while the farmer
+runs; normal supervision and economy rebuilding start afterward. The old
+BN4-only, below-50 startup handoff has been replaced by this reset-boundary policy.
+
+The default is ten minutes with no INT level cap, including when INT is already
+109 or higher. Supervisor flags `--intelligence-minutes N` (greater than zero, at
+most 60), `--intelligence-target N` (0 means no level limit), and
+`--intelligence false` configure or disable it. Settings survive resets. Both
+augmentation and progression actions, including faction joining, must be enabled.
+Saved supervisor settings remain authoritative when services are adopted.
+
+Missing persistent factions, missing callback files, insufficient home RAM and
+an already-reached target skip farming while the approved installation proceeds.
+Red Pill installations always skip it. The callback rechecks its fresh,
+node-bound request, installed augmentation package, settings, player work,
+conflicting processes, and RAM before starting. It never stops a live economy or
+another player's activity to make room. Automatic sessions return to supervision
+on completion, cancellation or failure. A manual or automatic budget already
+attempted in this node is not silently renewed, including after `--stop`.
 
 **Complete one infiltration manually to obtain that invitation.** Singularity
-cannot play the infiltration minigame. Without the invitation, ordinary node
-progression continues instead of waiting. Do the infiltration early if you want
-the automatic handoff before the first augmentation batch. Existing membership
-also works: the first reset restores the invitation.
+cannot play the infiltration minigame. A persistent corporate faction also
+qualifies. Without either, ordinary progression continues; the next eligible
+installation can use a faction unlocked later. Existing membership works because
+the augmentation installation restores its invitation.
 
-For a separate manually requested session, the following command remains available:
+For a separate manually requested session in any supported node:
 
 Start the supervisor once to save valid restart settings. Stop `supervisor.js`
 and `augmentation-manager.js` before farming, let progression helpers finish,
@@ -146,43 +183,69 @@ and stop any player work. The farmer prints a blocker if any prerequisite is
 missing. It does not take over those activities.
 
 ```text
-run intelligence-farm.js --start --minutes 10 --target 50
+run intelligence-farm.js --start --minutes 10
 ```
 
-The session joins Shadows of Anarchy and soft-resets using itself as the callback.
+The default manual session runs for ten minutes with no INT level cap, so it
+continues to be useful above INT 50 or 109. Add `--target 150`, for example, to
+stop when INT reaches 150 or the time budget expires. `--target 0` explicitly
+selects time-only farming.
+
+The session joins every available persistent faction and soft-resets using
+itself as the callback. Eligible factions are Shadows of Anarchy, ECorp,
+MegaCorp, Bachman & Associates, Blade Industries, NWO, Clarke Incorporated,
+OmniTek Incorporated, Four Sigma, KuaiGong International, and Fulcrum Secret
+Technologies. Already-joined factions work too: one initial reset restores their
+invitations. A corporate invitation or membership is sufficient without Shadows
+of Anarchy or an infiltration. Ordinary hacker/city factions are excluded because
+their invitations do not persist. Church of the Machine God rejoins automatically
+and cannot supply join XP. Each join must measurably increase INT XP; no remaining
+persistent factions, failed joins and unproductive callbacks stop the session.
+
 **Each reset loses current cash, normal skills, faction reputation, purchased
 servers, and running scripts.** INT, installed augmentations, and home upgrades
 persist. Queued augmentations must be installed first. Do this before rebuilding
 the economy; the farmer refuses to run with The Red Pill installed.
 
-The first reached limit ends farming: the target INT level or the absolute wall
-clock deadline. `--minutes` must be greater than zero and at most 60. No argument
+The first reached limit ends farming: an optional target INT level or the absolute
+wall clock deadline. Limits are checked between faction joins and before resetting.
+`--minutes` must be greater than zero and at most 60. No argument
 invocation shows the last result/setup guidance, or resumes an active reset
 callback. Active sessions cannot silently renew their budget. Gains are measured
-from player XP and stored with reset count and XP/hour in
-`data/intelligence-session.json`; no assumed rate is used.
+from player XP and stored with reset count, successful joins, participating
+factions and XP/hour in `data/intelligence-session.json`; no assumed rate is used.
+Existing level-50 sessions keep their saved target and deadline after an update.
 
 On normal completion the farmer releases its RAM and launches `bootstrap.js`,
-which restores the supervisor settings. A blocked/failed session stops with a
-reason. To cancel and resume normal play manually:
+which restores the supervisor settings. Automatic sessions also return after a
+failure or manual cancellation. Stop an automatic session with:
+
+```text
+run intelligence-farm.js --stop
+```
+
+A blocked/failed manual session stops with a reason. To cancel and resume a manual
+session:
 
 ```text
 run intelligence-farm.js --stop
 run bootstrap.js
 ```
 
-The supervisor refuses to start during an active farming session. Automatic
-handoff validates prerequisites before stopping its owning supervisor and
-augmentation manager. Sessions are
+The supervisor refuses to start during an active farming session. The automatic
+handoff runs after installation has already stopped the old scripts. Sessions are
 bound to their BitNode reset and cannot carry into the next node. Killing the
 farmer alone does not clear its saved session; use `--stop`. This is a tested
 callback workflow in mocks, not a live-game throughput benchmark.
 
 ## Updating an existing run
 
-Sync all `src` files, including `lib`. Restart the supervisor, progression manager,
-and augmentation manager so they load the changes. Let active backdoor helpers
-finish first. The short-lived augmentation planner loads new code on its next run.
+Sync all `src` files, including `lib`, then run `supervisor-restart.js` to reload
+the supervisor and augmentation/progression managers with saved arguments. Let
+active backdoor helpers finish first. Automatic farming starts at the next
+eligible augmentation installation; it does not reset the current economy just
+because the code was updated. The short-lived augmentation planner loads new
+code on its next run.
 
 ## Mechanics references
 

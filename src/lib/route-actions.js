@@ -1,6 +1,5 @@
 import { augmentationValue } from "lib/augmentation-plan.js";
 import { progressionPrograms, programCreationEstimate } from "lib/programs.js";
-import { readIntelligenceSession } from "lib/intelligence-session.js";
 import { readSavings } from "lib/savings.js";
 import { nextRouteNode, routeCities } from "lib/bitnode-route.js";
 import { resetEpoch, progressionBackdoors } from "lib/progression-protocol.js";
@@ -22,24 +21,6 @@ export function releaseRouteWork(ns, state) {
     if (current && !ns.singularity.stopAction()) return false;
     state.ownedWork = null; state.ownedClass = null; state.ownedProgram = null; state.ownedCompany = null; state.ownedCrime = null;
     return true;
-}
-
-export function routeIntelligence(ns, state, installed, pending, invitations) {
-    const reset = ns.getResetInfo(), player = ns.getPlayer();
-    if (installed.length || pending.length || !(reset.ownedSF?.get(5) > 0) || player.skills.intelligence >= 50 ||
-        (!player.factions.includes("Shadows of Anarchy") && !invitations.includes("Shadows of Anarchy"))) return null;
-    let prior;
-    try { prior = JSON.parse(ns.read("data/intelligence-auto.json") || "null"); } catch { return null; }
-    if (prior?.nodeReset === reset.lastNodeReset || readIntelligenceSession(ns)) return null;
-    const script = "intelligence-handoff.js";
-    if (ns.ps("home").some(p => p.filename === script)) return status("WAITING", "INT", "Handing off to bounded INT farming");
-    if (!releaseRouteWork(ns, state)) return status("BLOCKED", "INT", "Waiting for unrelated player work before the early INT session");
-    const cost = ns.getScriptRam(script, "home");
-    if (!(cost > 0) || cost > ns.getServerMaxRam("home") - ns.getServerUsedRam("home")) return status("WAITING_RAM", "INT", "Waiting for early INT farming helper RAM");
-    if (Date.now() < (state.nextIntAttempt || 0)) return status("WAITING", "INT", "INT handoff retry cooling down");
-    state.nextIntAttempt = Date.now() + 30000;
-    const pid = ns.run(script, 1, JSON.stringify({ ownerPid: ns.pid, createdAt: Date.now(), resetEpoch: resetEpoch(reset) }));
-    return status(pid ? "ACTIVE" : "BLOCKED", "INT", pid ? "Starting one early INT session: level 50 or 10 minutes" : "INT handoff launch failed");
 }
 
 export function routeBackdoorYield(ns, state) {
@@ -117,13 +98,16 @@ export function routeEndgame(ns, cfg, state) {
     if (ns.getHackingLevel() < required) return trainHacking(ns, cfg, state, required);
     if (!ns.hasRootAccess(daemon)) return status("WAITING", "DAEMON", "Waiting for the fleet to root the final server");
     if (!releaseRouteWork(ns, state)) return status("BLOCKED", "COMPLETE_NODE", "Finish or stop unrelated player work before completing the node");
-    if (nextRouteNode(reset) === null) return status("READY", "ROUTE_END", "BN4.3 exit requirements met. Choose the next BitNode manually; no further node is configured");
+    const nextNode = nextRouteNode(reset);
+    if (nextNode === null) return status("READY", "ROUTE_END",
+        `BN${reset.currentNode} exit requirements met. The three-run route is complete; choose the next BitNode manually`);
     const script = "node-complete.js", cost = ns.getScriptRam(script, "home");
     if (ns.ps("home").some(p => p.filename === script) || Date.now() < (state.nextNodeAttempt || 0)) return status("WAITING", "COMPLETE_NODE", "Waiting for node transition; failed attempts retry after 30 seconds");
     if (!(cost > 0) || cost > ns.getServerMaxRam("home") - ns.getServerUsedRam("home")) return status("WAITING_RAM", "COMPLETE_NODE", "Waiting for node-complete.js RAM");
     state.nextNodeAttempt = Date.now() + 30000;
-    const pid = ns.run(script, 1, JSON.stringify({ nextNode: 4, ownerPid: ns.pid, resetEpoch: resetEpoch(reset), createdAt: Date.now() }));
-    return status(pid ? "ACTIVE" : "BLOCKED", "COMPLETE_NODE", pid ? "Completing this node and entering the next BN4 run" : "Node transition helper failed to launch");
+    const pid = ns.run(script, 1, JSON.stringify({ nextNode, ownerPid: ns.pid, resetEpoch: resetEpoch(reset), createdAt: Date.now() }));
+    const nextRun = Number(reset.ownedSF?.get?.(nextNode) ?? 0) + 2;
+    return status(pid ? "ACTIVE" : "BLOCKED", "COMPLETE_NODE", pid ? `Completing this node and entering BN${nextNode}.${nextRun}` : "Node transition helper failed to launch");
 }
 
 export function routeDaedalus(ns, cfg, state, installed, countRequired = 30) {

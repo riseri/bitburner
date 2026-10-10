@@ -1,6 +1,8 @@
 # Elastic throughput and fleet capital (PR3)
 
-`--max-targets auto` is the default, with a hard ceiling of six. Explicit 1..6
+`--max-targets auto` is the default, governed by shared resources rather than a
+six-target ceiling. Its safety bound is derived from 128 launches/s, four phases
+per batch and 0.25 batches/s of minimum admission headroom: 128 lanes. Explicit 1..128
 limits are supported. One and two retain the existing admission behavior; auto
 and larger limits admit only one trial at a time, after all incumbents are
 productive. Free RAM alone is not sufficient. Small fleets can remain at one
@@ -13,7 +15,7 @@ off. Each new target still needs at least 0.25 batches/s remaining. A 3.95/4.00
 budget blocks admission until capacity grows; bounded scouting continues through
 that block to calculate profitable candidate headroom. Explicit numeric budgets
 remain fixed and settings persist through reset bootstrap. More capacity permits
-a trial; it does not guarantee that six targets will be useful. See
+a trial; it does not guarantee that additional targets will be useful. See
 [adaptive budgets and RAM](scheduler-capacity.md#adaptive-budgets-and-coordinated-ram).
 
 Running lanes and still-owned work count toward batch rate, launch commitments,

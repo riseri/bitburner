@@ -98,6 +98,32 @@ test('a higher ceiling that earns no additional throughput is rolled back instea
     assert.ok(f.state.cooldownUntil>f.clock.now+500000);
 });
 
+test('a rate probe waits for yielding plan searches, cutover and a fresh paid comparison window',()=>{
+    const f=fixture();f.input.planKey='old-plan';f.observe();
+    assert.equal(f.cfg.maxBatchRate,4.5);
+    f.input.capacity.constraints=[];f.input.capacity.batchRate.used=2;f.input.capacity.batchRate.nextBlocked=false;
+    Object.assign(f.input.capacity.launches,{peakBucket:2,peakReserved:10});
+    f.input.budgetPlanning=true;
+    for(let i=0;i<12;i++)f.sample();
+    assert.equal(f.cfg.maxBatchRate,4.5,'flat income during read-only tuning is not failed scaling evidence');
+    assert.equal(f.state.decision,'VERIFY');
+    f.input.budgetPlanning=false;f.input.planKey='new-plan';f.sample();
+    for(let i=0;i<7;i++)f.sample();
+    assert.equal(f.state.decision,'VERIFY','old-plan payouts cannot prematurely validate or reject the new plan');
+    f.input.income=1400;f.sample();f.sample();
+    assert.equal(f.cfg.maxBatchRate,4.5);assert.equal(f.state.probe,null);
+});
+
+test('a continuously pending read-only search cannot extend an unproductive rate probe forever',()=>{
+    const f=fixture();f.input.planKey='old-plan';f.observe();
+    f.input.budgetPlanning=true;f.input.capacity.constraints=[];
+    f.input.capacity.batchRate.used=2;f.input.capacity.batchRate.nextBlocked=false;
+    Object.assign(f.input.capacity.launches,{peakBucket:2,peakReserved:10});
+    for(let i=0;i<80;i++)f.sample();
+    assert.equal(f.cfg.maxBatchRate,4);assert.equal(f.cfg.maxLaunches,32);
+    assert.equal(f.state.probe,null);assert.match(f.state.reason,/did not improve/);
+});
+
 test('rate and RAM expansion are coordinated rather than rejecting the rate probe before memory can be funded',()=>{
     const f=fixture();f.input.capacity.constraints=['RAM'];
     Object.assign(f.input.capacity.ram,{used:3800,utilization:.95});

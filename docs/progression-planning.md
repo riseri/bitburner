@@ -1,7 +1,9 @@
 # Dynamic progression policy
 
-This extends the existing controllers. The supported automatic route remains
-BN4.1 → BN4.2 → BN4.3, stopping at the existing route boundary. It uses explainable
+Augmentation progression and reset timing follow Singularity access in BN4 or
+other nodes with SF4, including BN5. Automatic BitNode transitions follow
+BNx.1 → BNx.2 → BNx.3 for every BitNode x, restoring automation after each
+transition and waiting for your next destination at the third-run exit. It uses explainable
 heuristics, not an optimality claim. No sleeve, gang, or corporation manager was
 found or added. Capability fields describe access hints, not running systems.
 
@@ -56,7 +58,7 @@ reputation and savings. Standard inflation defaults to 1.9 adjusted for SF11.
 Price-multiplier flags now default to 0 (automatic); a positive override is an
 inspection/model assumption, never a spending authorization.
 
-Five queued augmentations remains the default threshold. In the BN4 route a
+Five queued augmentations remains the default fallback threshold. With progression enabled, a
 valuable purchase within two minutes can briefly delay it. Completed batches,
 Daedalus-count crossings and queued Red Pill retain their reset behavior. Progress
 uses cash/reputation/ownership/skill high-water marks, not reset age. A blocked

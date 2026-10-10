@@ -22,8 +22,12 @@ function economicFixture() {
     return f;
 }
 
-test('BN4 economics installs three strong queued augmentations through the existing safe bootstrap path', async () => {
+for (const node of [4, 5]) test(`BN${node} economics installs three strong queued augmentations through the existing safe bootstrap path`, async () => {
     const f = economicFixture(); let status;
+    if (node === 5) {
+        f.reset.currentNode = node; f.reset.ownedSF.set(4, 3);
+        f.state.resetEpoch = `5:${f.reset.lastNodeReset}:${f.reset.lastAugReset}`;
+    }
     for (let i = 0; i <= 12; i++) {
         status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
         if (i < 12) { assert.equal(status.resetDecision.action, 'WAIT'); f.clock.now += 5000; }
@@ -117,16 +121,192 @@ function fixture() {
         policy: loadScript('lib/bitnode-route.js', clock) };
 }
 
-test('route selects BN4 for the first two completions and never invents the node after BN4.3', () => {
+function bn5Fixture() {
     const f = fixture();
-    for (const [level, next] of [[0, 4], [1, 4], [2, null], [3, null]]) {
-        f.reset.ownedSF.set(4, level); assert.equal(f.policy.nextRouteNode(f.reset), next);
+    f.reset.currentNode = 5; f.reset.ownedSF.set(4, 3);
+    f.state.resetEpoch = `5:${f.reset.lastNodeReset}:${f.reset.lastAugReset}`;
+    f.cfg.resetPolicy = 'auto';
+    return f;
+}
+
+test('the reported BN5 20-hour stall installs four queued augmentations after its reachable basket is exhausted', async () => {
+    const f = bn5Fixture();
+    f.world.cash = 176.03e12;
+    f.world.installed = Array.from({ length: 21 }, (_, i) => 'Installed' + i);
+    f.world.pending = ['Queued A', 'Queued B', 'Queued C', 'Queued D'];
+    f.world.catalog.CyberSec = [...f.world.installed, ...f.world.pending];
+    f.state.queuedSince = f.clock.now;
+    f.clock.now += 20 * 60 * 60 * 1000;
+    await f.api.saveState(f.ns, f.state);
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.api.loadState(f.ns));
+    assert.equal(status.state, 'RESETTING');
+    assert.equal(status.queued, 4);
+    assert.equal(status.progression.installedCount, 21);
+    assert.equal(status.progression.queuedDistinct.length, 4);
+    assert.match(status.resetDecision.reason, /batch is complete/);
+    assert.equal(status.progression.resetImminent, true);
+    assert.deepEqual(f.world.calls.filter(c => c[0] === 'install'), [['install', 'bootstrap.js']]);
+});
+
+test('BN5 keeps advancing after a short reset by joining another faction and installing count fillers for Daedalus', async () => {
+    const f = bn5Fixture();
+    f.world.installed = Array.from({ length: 21 }, (_, i) => 'Installed' + i);
+    f.world.pending = ['A', 'B', 'C', 'D'];
+    f.world.catalog = { CyberSec: [...f.world.installed, ...f.world.pending],
+        'Tian Di Hui': Array.from({ length: 5 }, (_, i) => 'Count filler ' + i) };
+    f.ns.singularity.getAugmentationStats = name => name.startsWith('Count filler') ? { strength: 1.1 } : { hacking: 1.1 };
+    const reset = async () => {
+        f.world.installed.push(...f.world.pending); f.world.pending = [];
+        f.world.factions = []; f.world.work = null;
+        f.reset.lastAugReset = ++f.clock.now;
+        await f.api.saveState(f.ns, f.state);
+        f.state = f.api.loadState(f.ns);
+    };
+    assert.equal((await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state)).state, 'RESETTING');
+    await reset();
+    let status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'TRAVEL');
+    assert.equal(f.world.city, 'Chongqing');
+    f.world.invites = ['Tian Di Hui'];
+    assert.equal((await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state)).phase, 'JOIN');
+    for (let i = 0; i < 5; i++) {
+        status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.equal(status.phase, 'PURCHASE');
     }
-    f.reset.currentNode = 5; f.reset.ownedSF.delete(4);
+    status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.state, 'RESETTING');
+    assert.match(status.resetDecision.reason, /Daedalus/);
+    assert.equal(status.progression.ownedCount, 30);
+    await reset();
+    f.world.hacking = 2500; f.world.cash = 100e9;
+    status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'DAEDALUS');
+    assert.equal(status.savings.target, 'faction:Daedalus');
+    assert.equal(status.progression.installedCount, 30);
+    f.world.invites = ['Daedalus'];
+    assert.equal((await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state)).phase, 'JOIN');
+    assert.ok(f.world.factions.includes('Daedalus'));
+    assert.equal(f.world.calls.filter(c => c[0] === 'run').length, 0, 'BN5 never launches a node transition or INT helper');
+});
+
+test('BN5 applies the absolute queue wait limit despite a fresh objective and unavailable economic evidence', async () => {
+    const f = bn5Fixture();
+    f.world.pending = ['A', 'B', 'C', 'D']; f.cfg.joinFactions = false;
+    f.state.queuedSince = f.clock.now;
+    f.clock.now += 20 * 60 * 60 * 1000;
+    f.ns.singularity.getAugmentationRepReq = () => 1e9;
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.state, 'RESETTING');
+    assert.equal(status.resetDecision.fallback.waitingMs, 0);
+    assert.match(status.resetDecision.reason, /60-minute absolute/);
+});
+
+test('BN5 short-batch resets retain bootstrap, manual activity, busy action and reset-epoch checks', async () => {
+    for (const reason of ['bootstrap', 'settings', 'manual', 'busy', 'epoch', 'new-activity']) {
+        const f = bn5Fixture();
+        f.world.pending = ['A', 'B', 'C', 'D']; f.world.catalog.CyberSec = [];
+        if (reason === 'bootstrap') f.ns.fileExists = () => false;
+        if (reason === 'settings') f.world.files.set('data/supervisor-bootstrap.json', '{}');
+        if (reason === 'manual') f.world.work = { type: 'CRIME' };
+        if (reason === 'busy') f.ns.singularity.isBusy = () => true;
+        if (reason === 'epoch') f.ns.write = async () => { f.reset.lastAugReset++; };
+        if (reason === 'new-activity') f.ns.write = async () => { f.world.work = { type: 'CRIME' }; };
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.equal(status.resetDecision.action, 'INSTALL', reason);
+        assert.equal(status.state, 'BLOCKED', reason);
+        assert.equal(f.world.calls.filter(c => c[0] === 'install').length, 0, reason);
+        if (reason === 'manual') assert.equal(f.world.calls.filter(c => c[0] === 'stop').length, 0);
+    }
+});
+
+test('BN5 progression protects empty queues, unavailable SF4 and an explicit route opt-out', async () => {
+    for (const reason of ['empty', 'locked', 'disabled']) {
+        const f = bn5Fixture(); f.world.catalog = {};
+        if (reason === 'locked') {
+            f.reset.ownedSF.delete(4);
+            f.ns.singularity = new Proxy({}, { get() { throw Error('Singularity unavailable'); } });
+        }
+        if (reason === 'disabled') { f.cfg.route = false; f.world.pending = ['A', 'B', 'C', 'D']; }
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.notEqual(status.state, 'RESETTING', reason);
+        assert.equal(f.world.calls.filter(c => ['install', 'travel', 'join'].includes(c[0])).length, 0, reason);
+        if (reason === 'empty') assert.equal(status.progression.resetImminent, false);
+        if (reason === 'locked') assert.equal(status.phase, 'UNLOCK');
+        if (reason === 'disabled') assert.equal(status.phase, 'QUEUE');
+    }
+});
+
+test('the ready BN5.2 run dispatches BN5.3 with the saved bootstrap instead of stopping at ROUTE_END', async () => {
+    const f = bn5Fixture();
+    f.world.installed = ['The Red Pill']; f.world.hacking = 9000;
+    f.ns.serverExists = host => host === 'w0r1d_d43m0n';
+    f.ns.getServerRequiredHackingLevel = () => 9000;
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'COMPLETE_NODE');
+    assert.match(status.recommendation, /BN5\.3/);
+    const launches = f.world.calls.filter(c => c[0] === 'run');
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0][1], 'node-complete.js');
+    assert.equal(JSON.parse(launches[0][3]).nextNode, 5);
+});
+
+test('every BitNode repeats through its third run and does not invent a destination beyond it', () => {
+    const f = fixture();
+    for (const node of [...Array.from({ length: 15 }, (_, i) => i + 1), 100]) {
+        f.reset.currentNode = node;
+        for (const [level, next] of [[0, node], [1, node], [2, null], [3, null]]) {
+            f.reset.ownedSF.set(node, level); assert.equal(f.policy.nextRouteNode(f.reset), next);
+        }
+    }
+    f.reset.currentNode = 0;
     assert.equal(f.policy.nextRouteNode(f.reset), null);
     assert.deepEqual([...f.policy.routeCities([])], ['Sector-12', 'Aevum']);
     assert.deepEqual([...f.policy.routeCities(['Chongqing'])], ['Chongqing', 'New Tokyo', 'Ishima']);
     assert.deepEqual([...f.policy.routeCities(['Volhaven'])], ['Volhaven']);
+});
+
+test('invalid BitNode numbers and Source-File levels cannot authorize a reset', () => {
+    const f = fixture();
+    for (const node of [0, -1, 1.5, NaN, '5']) {
+        f.reset.currentNode = node; assert.equal(f.policy.nextRouteNode(f.reset), null);
+    }
+    f.reset.currentNode = 5;
+    for (const level of [-1, 1.5, NaN]) {
+        f.reset.ownedSF.set(5, level); assert.equal(f.policy.nextRouteNode(f.reset), null);
+    }
+});
+
+for (let node = 1; node <= 15; node++) test(`BN${node}.1 -> BN${node}.2 -> BN${node}.3 restores automation and waits at the final exit`, async () => {
+    const f = fixture(), transitions = [];
+    f.reset.currentNode = node; f.reset.ownedSF.set(4, 3);
+    f.ns.serverExists = host => host === 'w0r1d_d43m0n'; f.ns.getServerRequiredHackingLevel = () => 9000;
+    f.ns.getScriptRam = () => 7.8;
+    f.ns.singularity.destroyW0r1dD43m0n = (...args) => transitions.push(args);
+    for (const level of [0, 1]) {
+        f.reset.ownedSF.set(node, level); f.reset.lastNodeReset = ++f.clock.now; f.reset.lastAugReset = f.clock.now;
+        f.ns.pid = 10; f.ns.fileExists = file => file === 'bootstrap.js';
+        f.world.work = null; f.world.installed = []; f.world.calls.length = 0;
+        const fresh = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.notEqual(fresh.phase, 'COMPLETE_NODE', 'the restarted run must earn its own completion');
+        assert.equal(f.world.calls.filter(c => c[0] === 'run' && c[1] === 'node-complete.js').length, 0);
+        f.world.installed = ['The Red Pill']; f.world.hacking = 9000;
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.equal(status.phase, 'COMPLETE_NODE'); assert.match(status.recommendation, new RegExp(`BN${node}\\.${level + 2}`));
+        const launch = f.world.calls.find(c => c[0] === 'run' && c[1] === 'node-complete.js');
+        assert.equal(JSON.parse(launch[3]).nextNode, node);
+        f.ns.args = [launch[3]]; f.ns.pid = 99;
+        f.world.scripts = [{ pid: 10, filename: 'augmentation-manager.js' }]; f.ns.fileExists = () => true;
+        await loadScript('node-complete.js', f.clock).main(f.ns);
+        assert.equal(transitions.length, level + 1);
+    }
+    assert.deepEqual(transitions, [[node, 'bootstrap.js'], [node, 'bootstrap.js']]);
+    f.reset.ownedSF.set(node, 2);
+    await loadScript('node-complete.js', f.clock).main(f.ns);
+    assert.equal(transitions.length, 2, 'the same actor cannot cross the third-run route boundary');
+    f.ns.pid = 10; f.ns.fileExists = file => file === 'bootstrap.js'; f.world.calls.length = 0;
+    const final = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(final.phase, 'ROUTE_END'); assert.match(final.recommendation, /choose the next BitNode manually/);
+    assert.equal(f.world.calls.filter(c => c[0] === 'run').length, 0);
 });
 
 test('installation policy handles short batches, Daedalus counts, bounded waits, and avoids empty resets', () => {
@@ -219,27 +399,49 @@ test('node transition actor revalidates epoch, route boundary, ownership, manual
     }
 });
 
-test('early INT farming requires a persistent invitation, empty augmentation run and one attempt per node', () => {
-    const f = fixture(); f.world.int = 1;
-    assert.equal(f.actions.routeIntelligence(f.ns, f.state, [], [], []), null);
-    assert.equal(f.actions.routeIntelligence(f.ns, f.state, [], [], ['Shadows of Anarchy']).phase, 'INT');
-    assert.equal(f.world.calls.filter(c => c[0] === 'run').length, 1);
-    assert.equal(f.actions.routeIntelligence(f.ns, f.state, ['BitWire'], [], ['Shadows of Anarchy']), null);
-    f.world.files.set('data/intelligence-auto.json', JSON.stringify({ nodeReset: 1 }));
-    assert.equal(f.actions.routeIntelligence(f.ns, f.state, [], [], ['Shadows of Anarchy']), null);
+test('BN5 transition revalidates the requested destination, route boundary and Singularity capability', async () => {
+    for (const reason of ['ok', 'wrong-node', 'final', 'epoch', 'owner', 'busy', 'locked', 'duplicate']) {
+        const f = bn5Fixture(), calls = [];
+        f.ns.args = [JSON.stringify({ ownerPid: 10, nextNode: reason === 'wrong-node' ? 4 : 5,
+            resetEpoch: f.state.resetEpoch, createdAt: f.clock.now })];
+        f.world.installed = ['The Red Pill']; f.world.scripts = [{ pid: 10, filename: 'augmentation-manager.js' }];
+        f.ns.pid = 99; f.ns.serverExists = () => true; f.ns.fileExists = () => true; f.ns.getScriptRam = () => 7.8;
+        f.ns.singularity.destroyW0r1dD43m0n = (...args) => calls.push(args);
+        if (reason === 'final') f.reset.ownedSF.set(5, 2);
+        if (reason === 'epoch') f.reset.lastAugReset++;
+        if (reason === 'owner') f.world.scripts = [];
+        if (reason === 'busy') f.world.work = { type: 'CRIME' };
+        if (reason === 'locked') {
+            f.reset.ownedSF.delete(4);
+            f.ns.singularity = new Proxy({}, { get() { assert.fail('locked Singularity must not be accessed'); } });
+        }
+        if (reason === 'duplicate') f.world.scripts.push({ pid: 98, filename: 'node-complete.js' });
+        await loadScript('node-complete.js', f.clock).main(f.ns);
+        assert.equal(calls.length, reason === 'ok' ? 1 : 0, reason);
+        if (calls.length) assert.deepEqual(calls[0], [5, 'bootstrap.js']);
+    }
 });
 
-test('INT handoff validates prerequisites before stopping owners, and does not repeat after completion', async () => {
-    const f = fixture(), killed = [], spawned = [];
-    f.world.int = 1; f.world.invites = ['Shadows of Anarchy'];
-    f.world.scripts = [{ pid: 10, filename: 'augmentation-manager.js' }, { pid: 2, filename: 'supervisor.js' }];
-    f.ns.pid = 99; f.ns.args = [JSON.stringify({ ownerPid: 10, resetEpoch: '4:1:1000000', createdAt: f.clock.now })];
-    f.ns.kill = id => { killed.push(id); return true; }; f.ns.spawn = (...args) => spawned.push(args);
-    const handoff = loadScript('intelligence-handoff.js', f.clock);
-    f.world.pending = ['BitWire']; await handoff.main(f.ns); assert.equal(killed.length, 0);
-    f.world.pending = []; await handoff.main(f.ns);
-    assert.deepEqual(killed, [10, 2]); assert.equal(spawned[0][0], 'intelligence-farm.js');
-    await handoff.main(f.ns); assert.equal(spawned.length, 1);
+test('callback RAM includes Source-File rewards from the completion being performed', async () => {
+    for (const [node, level, ram, allowed] of [[1, 0, 31, true], [1, 0, 33, false], [9, 1, 127, true], [9, 1, 129, false]]) {
+        const f = bn5Fixture(), calls = [];
+        f.reset.currentNode = node; f.reset.ownedSF.set(node, level);
+        f.ns.args = [JSON.stringify({ ownerPid: 10, nextNode: node,
+            resetEpoch: `${node}:${f.reset.lastNodeReset}:${f.reset.lastAugReset}`, createdAt: f.clock.now })];
+        f.world.installed = ['The Red Pill']; f.world.scripts = [{ pid: 10, filename: 'augmentation-manager.js' }];
+        f.ns.pid = 99; f.ns.serverExists = () => true; f.ns.fileExists = () => true; f.ns.getScriptRam = () => ram;
+        f.ns.singularity.destroyW0r1dD43m0n = (...args) => calls.push(args);
+        await loadScript('node-complete.js', f.clock).main(f.ns);
+        assert.equal(calls.length, allowed ? 1 : 0, `BN${node}.${level + 1}, ${ram} GB callback`);
+    }
+});
+
+test('early BN4 progression continues normally; INT farming waits for an augmentation installation', async () => {
+    const f = fixture(); f.world.int = 1; f.world.invites = ['Shadows of Anarchy'];
+    const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.notEqual(status.phase, 'INT');
+    assert.equal(f.world.calls.filter(c => c[0] === 'run' && c[1] === 'intelligence-handoff.js').length, 0);
+    assert.equal(f.world.files.has('data/intelligence-auto.json'), false);
 });
 
 test('route augmentation candidates include count fillers and skip inaccessible prerequisites', () => {
@@ -255,12 +457,14 @@ test('route augmentation candidates include count fillers and skip inaccessible 
 });
 
 
-test('a manually completed INT budget is not automatically renewed by the route controller', () => {
+test('a manually completed INT budget is not automatically renewed at installation', async () => {
     const f = fixture(); f.world.int = 1;
     f.world.files.set('data/intelligence-session.json', JSON.stringify({ version: 1, node: 4, nodeReset: 1,
         active: false, startedAt: 1, deadline: 1000, target: 50, startExp: 0, startInt: 1, resets: 3 }));
-    assert.equal(f.actions.routeIntelligence(f.ns, f.state, [], [], ['Shadows of Anarchy']), null);
-    assert.equal(f.world.calls.length, 0);
+    f.world.invites = ['Shadows of Anarchy']; f.world.pending = ['A', 'B', 'C', 'D', 'E'];
+    const status = await f.api.handleInstallation(f.ns, f.cfg, f.state, null, 5);
+    assert.equal(status.state, 'RESETTING');
+    assert.deepEqual(f.world.calls.filter(c => c[0] === 'install'), [['install', 'bootstrap.js']]);
 });
 
 test('route helpers reclaim optional service RAM without stopping the income engine or unrelated scripts', () => {
@@ -283,7 +487,7 @@ test('route helpers reclaim optional service RAM without stopping the income eng
     assert.equal(supervisor.reserveRouteHelper(f.ns, services, services), services);
 });
 
-test('route helper files and RAM are excluded outside the planned BN4 runs', () => {
+test('route helper files and RAM are excluded outside authorized transition routes', () => {
     const catalog = loadScript('lib/service-catalog.js', new Clock()), cfg = catalog.supervisorServiceConfig();
     const costs = [];
     const ns = { getScriptRam: file => { costs.push(file); return file === 'node-complete.js' ? 80 : 1; } };

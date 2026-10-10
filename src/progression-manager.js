@@ -1,5 +1,6 @@
 import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { readProgressionObservation, planMilestone } from "lib/progression-milestones.js";
+import { nextRouteNode } from "lib/bitnode-route.js";
 import { PORTS } from "lib/ports.js";
 import { progressionBackdoors, resetEpoch, pathFromHome, freshStatus } from "lib/progression-protocol.js";
 import { progressionPrograms, rankPrograms } from "lib/programs.js";
@@ -95,7 +96,7 @@ function buildStatus(ns, fleetStatus, options = {}) {
         income: objective?.incomePerSecond, objective });
     const objectives = planObjectives({ torOwned, programs: ranked, backdoors, money, progression: objective });
     if (darknet.navigator === "MISSING") darknet.navigator = money >= programs.find(p => p.category === "darknet")?.cost && torOwned ? "PURCHASABLE" : "SAVING";
-	const milestone = planMilestone({ currentNode, player: ns.getPlayer(), money, worldDaemon,
+	const milestone = planMilestone({ currentNode, nextNode: nextRouteNode(reset), player: ns.getPlayer(), money, worldDaemon,
 		observation: readProgressionObservation(ns) });
     const shared = readProgressionSnapshot(ns);
     if (shared) { milestone.stage = shared.milestone; milestone.label = shared.recommendation || `${shared.milestone}: ${shared.limitingResource}`; milestone.savings = shared.savings; }

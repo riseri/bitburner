@@ -15,9 +15,11 @@ function fixture() {
 }
 test('explicit 1/2 remain supported; automatic limit is a ceiling rather than a minimum',()=>{
     const api=loadScript('lib/target-limit.js',new Clock());
-    for(const n of [1,2,3,4,5,6])assert.equal(api.targetLimit(n).limit,n);
-    assert.equal(api.targetLimit('auto').limit,6);
-    for(const n of [0,7,1.5,'bad'])assert.throws(()=>api.targetLimit(n));
+    for(const n of [1,2,3,4,5,6,7,128])assert.equal(api.targetLimit(n).limit,n);
+    const limits=loadScript('lib/scheduler-limits.js',new Clock());
+    assert.equal(api.targetLimit('auto').limit,limits.LAUNCH_ENVELOPE/(limits.BATCH_PHASES*limits.MIN_TARGET_RATE));
+    assert.equal(api.targetLimit(' AUTO ').mode,'auto');
+    for(const n of [0,129,1.5,'bad'])assert.throws(()=>api.targetLimit(n));
 });
 test('remaining global rate counts all lanes; replacement releases only the selected lane',()=>{
     const f=fixture();assert.equal(f.multi.remainingBatchRate(f.pool),1);

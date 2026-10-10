@@ -1,8 +1,8 @@
 import { tickHomeInvestment } from "lib/home-investment.js";
 import { homeShareRam } from "lib/home-share.js";
 import { readProgressionSnapshot, readSharingDemand } from "lib/progression-objective.js";
-import { bn4Route } from "lib/bitnode-route.js";
-import { intelligenceSessionActive } from "lib/intelligence-session.js";
+import { nextRouteNode } from "lib/bitnode-route.js";
+import { intelligenceSessionActive, readIntelligenceSession, intelligenceAvailable, intelligencePolicy, automaticIntelligenceEnabled } from "lib/intelligence-session.js";
 import { createUtilityJob, tickUtilityJob, currentAugmentationPlan, updateSupervisorSavings } from "lib/supervised-utilities.js";
 import { readSavings, writeSavings } from "lib/savings.js";
 import { loadTelemetry, recordTelemetry, summarizeTelemetry } from "lib/telemetry.js";
@@ -86,6 +86,7 @@ export async function main(ns) {
 		["augmentation-focus-work", false],
 		["min-install", 5],
 		["reset-policy", "auto"],
+        ["intelligence", true], ["intelligence-minutes", 10], ["intelligence-target", 0],
 		["savings", "auto"],
 		["save-amount", -1],
 		["save-label", "Savings"],
@@ -129,6 +130,8 @@ export async function main(ns) {
 		augmentationDonate: asBoolean(flags["augmentation-donate"]),
 		augmentationPurchase: asBoolean(flags["augmentation-purchase"]),
 		augmentationFocusWork: asBoolean(flags["augmentation-focus-work"]),
+        intelligence: asBoolean(flags.intelligence), intelligenceMinutes: Number(flags["intelligence-minutes"]),
+        intelligenceTarget: Number(flags["intelligence-target"]),
 		minInstall: Number(flags["min-install"]),
 		resetPolicy: String(flags["reset-policy"]),
 		savingsMode: Number(flags["save-amount"]) >= 0 ? "fixed" : String(flags.savings),
@@ -592,7 +595,8 @@ function createManagedServices(ns, cfg, daemonArgs) {
 			"--city-faction", cfg.augmentationCityFaction, "--work", cfg.augmentationWork,
 			"--donate", cfg.augmentationDonate ?? true,
 			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
-			"--min-install", cfg.minInstall, "--reset-policy", cfg.resetPolicy || "auto", "--route", cfg.progression && cfg.progressionActions]));
+			"--min-install", cfg.minInstall, "--reset-policy", cfg.resetPolicy || "auto", "--route", cfg.progression && cfg.progressionActions,
+            "--intelligence", cfg.intelligence ?? true, "--intelligence-minutes", cfg.intelligenceMinutes ?? 10, "--intelligence-target", cfg.intelligenceTarget ?? 0]));
 	if (cfg.contracts) services.push(managed(CONTRACTS, ["--fleet-port", fleetPort]));
 	if (cfg.stocks) services.push(managed(STOCK_TRADER,
 		["--port", PORTS.STOCK_STATUS, "--cash-reserve", cfg.stockCashReserve]));
@@ -1055,7 +1059,7 @@ function renderMoneyEngine(ns, daemon, details = false) {
 		row("Income 60s", `${cash(daemon.income60)}/s`);
 		row("Model", `${cash(daemon.model)}/s estimate`);
 		row("Run total", `${cash(daemon.earned)} earned`);
-		row("Target slots", `${daemon.pipelines.length}/${daemon.limit} | priority ${daemon.priority}`);
+		row("Target slots", `${daemon.pipelines.length}/${daemon.capacity?.targets?.capacityGoverned ? "AUTO" : daemon.limit} | priority ${daemon.priority}`);
 		dashboardSection(ns, "Earning targets / independent recovery");
 		for (const p of daemon.pipelines) {
 			row(p.target, `${p.mode} | ${p.role} | ${cash(p.income60)}/s`);
@@ -1211,6 +1215,7 @@ function renderProgression(ns, progression, cfg, actions = null) {
 function renderAugmentationLoop(ns, augmentation, cfg) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Augmentation loop");
+    row("INT farming", intelligenceSummary(ns, cfg));
 	if (!cfg.augmentationActions) { row("Status", "Disabled; planning and recommendations remain active"); return; }
 	if (!augmentation) { row("Status", "Starting / waiting for augmentation manager"); return; }
 	row("Status", `${augmentation.state || "UNKNOWN"}${augmentation.phase ? ` | ${augmentation.phase}` : ""}`);
@@ -1264,6 +1269,18 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         if (!d.completionGoal) row("Fallback", `${d.queued}/${d.fallback.minInstall} | stalled ${dashboardTime(d.fallback.stalledMs)} | waiting ${dashboardTime(d.fallback.waitingMs)}`);
         if (augmentation.phase === "INSTALL") row("Execution", `${augmentation.state}${augmentation.recommendation ? ": " + augmentation.recommendation : ""}`);
     }
+}
+
+function intelligenceSummary(ns, cfg) {
+    if (!automaticIntelligenceEnabled(cfg)) return "Disabled";
+    if (!singularityAvailable(ns.getResetInfo()) || !intelligenceAvailable(ns.getResetInfo())) return "Waiting for Singularity and INT access";
+    const session = readIntelligenceSession(ns), policy = intelligencePolicy(cfg);
+    if (session) {
+        const metrics = session.metrics;
+        return `${session.active ? "ACTIVE" : session.reason || "Budget used this BitNode"}${metrics ?
+            ` | +${Number(metrics.gained).toFixed(1)} XP | ${Number(metrics.xpPerHour).toFixed(0)} XP/hour | ${metrics.joins || 0} joins` : ""}`;
+    }
+    return `${policy.minutes} min${policy.target ? ` or INT ${policy.target}` : ""} after next eligible install | once per BitNode | needs SoA/corporate faction`;
 }
 
 function renderGoStatus(ns, go, cfg, services) {
@@ -1591,7 +1608,9 @@ function augmentationAccess(ns) {
 }
 
 function supervisorCapabilities(ns, stockGate = stockAccess(ns)) {
-	return { route: bn4Route(ns.getResetInfo()), singularity: augmentationAccess(ns), darknet: darknetAccess(ns), stocks: stockGate.ok };
+	const reset = ns.getResetInfo(), singularity = singularityAvailable(reset);
+	return { route: singularity && nextRouteNode(reset) !== null, singularity,
+		intelligence: intelligenceAvailable(reset), darknet: darknetAccess(ns), stocks: stockGate.ok };
 }
 
 function createSupervisorUtilities(cfg) {
@@ -1648,6 +1667,7 @@ function layoutDashboard(ns, pid, column) {
 }
 
 function validateSupervisorOptions(flags, cfg) {
+    intelligencePolicy(cfg);
 	schedulerLimit(cfg.maxBatchRate, "batch");
 	schedulerLimit(cfg.maxLaunches, "launch");
 	if (cfg.dashboardLayout !== undefined && !["auto", "none"].includes(cfg.dashboardLayout)) throw new Error("dashboard-layout must be auto or none");
@@ -1791,7 +1811,7 @@ function reserveRouteHelper(ns, services, admitted) {
     if (!owner) return admitted;
     const status = ownedServiceStatus(ns, owner, ns.getPortHandle(owner.port).peek());
     if (!status || status.resetEpoch !== resetEpoch(ns.getResetInfo()) || !Number.isFinite(status.generatedAt) || Date.now() < status.generatedAt || Date.now() - status.generatedAt > 15000) return admitted;
-    const script = status.phase === "COMPLETE_NODE" ? "node-complete.js" : status.phase === "INT" ? "intelligence-handoff.js" : "";
+    const script = status.phase === "COMPLETE_NODE" ? "node-complete.js" : "";
     if (!script || !["ACTIVE", "WAITING", "WAITING_RAM"].includes(status.state)) return admitted;
     const optional = services.filter(s => ![DAEMON, FLEET, PROGRESSION, AUGMENTATION_MANAGER].includes(s.name));
     if (!findProcess(ns, script)) {
