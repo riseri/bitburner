@@ -269,6 +269,61 @@ test('cheap openers without additional worker RAM retain their ordinary rank beh
     assert.ok(ranked.find(p => p.name === 'FTPCrack.exe').priority < 85);
 });
 
+function relayBudgetFixture() {
+    const f = fixture();
+    f.world.cash = 11.66e6; f.world.tor = true;
+    f.world.owned.add('BruteSSH.exe'); f.world.owned.add('FTPCrack.exe');
+    f.hosts.netlink.ram = 128;
+    f.cfg.homeInvestment.amount = 31.86e6;
+    const daemon = [...f.processes.values()].find(p => p.filename === 'daemon.js');
+    const snapshot = { type: 'jit-status', pid: daemon.pid, generatedAt: f.clock.now,
+        totalRam: 120, usedRam: 100, income60: 20.2e6 / 3471, maxBatchRate: 4, maxWorkers: 6000,
+        pipelines: [{ mode: 'LIVE', running: 20, queued: 10, modelBatchRate: 1, warmupMs: 120000 }],
+        capacity: { limitingFactor: 'RAM', constraints: ['RAM'], ram: { scalable: true } } };
+    f.ns.getPortHandle(17).write(snapshot);
+    return { ...f, snapshot, daemon };
+}
+
+test('the $11.66m/$31.86m stall buys relaySMTP when its worker RAM shortens service funding', async () => {
+    const f = relayBudgetFixture();
+    await f.setGoal('home:ram', 31.86e6);
+    const plan = f.plan(), objective = plan.objectives.find(o => o.target === 'relaySMTP.exe');
+    assert.equal(objective.addedRam, 128, 'the planner carries the actual newly rootable RAM');
+    await f.utilities.updateSupervisorSavings(f.ns, f.cfg, null, plan);
+    assert.equal(f.goal().target, 'relaySMTP.exe');
+    assert.equal(f.goal().priority, 94, 'economic proof clears critical-home hysteresis');
+    assert.equal(f.goal().amount, 5e6 / .9, 'the normal reserve remains required');
+    assert.match(f.cfg.rootUnlockStatus, /3471s -> 2947s/);
+    f.dispatcher.tickProgressionActions(f.ns, f.actions, plan, f.cfg);
+    assert.equal(f.actions.active?.request.target, 'relaySMTP.exe');
+    await f.runActor();
+    assert.deepEqual(f.purchases, ['relaySMTP.exe']);
+    assert.equal(f.world.cash, 6.66e6);
+    assert.ok(f.ns.hasRootAccess('netlink'));
+    await f.utilities.updateSupervisorSavings(f.ns, f.cfg, null, f.plan());
+    assert.equal(f.goal().target, 'home:ram', 'service RAM savings resumes immediately after the opener');
+});
+
+for (const condition of ['little unlocked RAM', 'stale scheduler', 'dead scheduler', 'no timing', 'manual goal',
+    'Red Pill', 'purchase RAM', 'actions disabled']) {
+    test('economic root unlock arbitration preserves ' + condition, async () => {
+        const f = relayBudgetFixture();
+        await f.setGoal(condition === 'manual goal' ? 'manual:fund' : 'home:ram', 31.86e6, 90,
+            condition === 'manual goal' ? 'manual' : 'supervisor');
+        if (condition === 'little unlocked RAM') f.hosts.netlink.ram = 32;
+        if (condition === 'stale scheduler') f.snapshot.generatedAt -= 15001;
+        if (condition === 'dead scheduler') f.processes.delete(f.daemon.pid);
+        if (condition === 'no timing') delete f.snapshot.pipelines[0].warmupMs;
+        if (condition === 'purchase RAM') f.costs['progression-purchase.js'] = 129;
+        if (condition === 'actions disabled') f.cfg.progressionActions = false;
+        const plan = f.plan();
+        if (condition === 'Red Pill') plan.milestone.savings = { target: 'augmentation:The Red Pill', amount: 100e9, label: 'Red Pill' };
+        await f.utilities.updateSupervisorSavings(f.ns, f.cfg, null, plan);
+        const expected = condition === 'manual goal' ? 'manual:fund' : condition === 'Red Pill' ? 'augmentation:The Red Pill' : 'home:ram';
+        assert.equal(f.goal().target, expected);
+    });
+}
+
 test('home upgrade reserve retains its fallback unless a rooted host has free or owned starter RAM', () => {
     const f = fixture(), hosts = ['home', 'foodnstuff', 'n00dles', 'CSEC'];
     const worker = f.add('starter-worker.js', 'foodnstuff', 6, ['n00dles', 'manual']);

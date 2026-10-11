@@ -1,4 +1,6 @@
 import { chooseInvestment } from "lib/investment-policy.js";
+import { evaluateRootUnlock } from "lib/root-unlock-economics.js";
+import { PORTS } from "lib/ports.js";
 import { readFleetCapitalRequest } from "lib/fleet-capital.js";
 import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { readSavings, writeSavings } from "lib/savings.js";
@@ -66,6 +68,7 @@ export function currentAugmentationPlan(ns, job, now = Date.now()) {
 }
 
 export async function updateSupervisorSavings(ns, cfg, plan, progression = null, augmentation = null, fleet = null) {
+    cfg.rootUnlockStatus = "";
     if (cfg.savingsMode === "keep" || cfg.savingsMode === "none" || cfg.savingsMode === "fixed") return;
     const current = readSavings(ns);
     if (current.error) { cfg.savingsStatus = current.error; return; }
@@ -84,6 +87,7 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
         const program=progression?.objectives?.find(o=>["tor","program"].includes(o.kind));
         if (milestone && cfg.progression && (!singularity || cfg.progressionActions) && program)
             requests.push({amount:program.costEstimate/(1-(singularity ? cfg.progressionCashReserve : 0)), target:program.target,
+                cost:program.costEstimate,addedRam:program.addedRam,
                 label:program.label,priority:program.priority || (program.kind === "tor" ? 85 : 50),reason:program.reason || "Program unlock"});
         // Old/manual observations still work if no authoritative manager is available.
         if (!progression?.objectives && cfg.progression && (!singularity || cfg.progressionActions)) {
@@ -106,9 +110,9 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
         if(!cfg.homeInvestment) requests.push(...(cfg.homePerformanceInvestments || []));
         const cloud = readFleetCapitalRequest(ns, fleet);
         if (cloud) requests.push(cloud);
-        // A small, already-funded root unlock can expand earning RAM while a
-        // much larger service admission goal is still saving. Keep it below
-        // Daedalus/Red Pill and leave manual goals authoritative above.
+        // Funded root unlocks may accelerate admission itself. Retain the small
+        // bootstrap allowance before reliable income exists; larger purchases
+        // must shorten the time to this same service RAM goal.
         const admission = cfg.serviceInvestment || cfg.homeInvestment;
         const endgameGoal = requests.some(r => r.priority >= 95 && Number.isFinite(r.amount) && r.amount > 0 && r.available !== false);
         const openers = progressionPrograms({ darknet: false, formulas: false });
@@ -118,9 +122,18 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
             const purchaseRam = ns.getScriptRam("progression-purchase.js", "home");
             const purchaseFits = purchaseRam > 0 && purchaseRam <= ns.getServerMaxRam("home") - ns.getServerUsedRam("home");
             for (const request of rootUnlocks) {
-                if (purchaseFits && request.amount <= cash && request.amount <= admission.amount * .1) {
+                if (!purchaseFits || request.amount > cash) continue;
+                let accelerated = false;
+                if (request.amount > admission.amount * .1) {
+                    const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
+                    const live = Number.isInteger(snapshot?.pid) && ns.isRunning(snapshot.pid);
+                    const economics = evaluateRootUnlock(live ? snapshot : null, request, admission, cash, shared);
+                    cfg.rootUnlockStatus = `${request.target}: ${economics.reason}`;
+                    accelerated = economics.ok;
+                }
+                if (request.amount <= admission.amount * .1 || accelerated) {
                     request.priority = Math.max(request.priority, 94);
-                    request.reason = "Affordable root unlock before service RAM; " + request.reason;
+                    request.reason = (accelerated ? "Root unlock accelerates service RAM; " : "Affordable root unlock before service RAM; ") + request.reason;
                 }
             }
         }

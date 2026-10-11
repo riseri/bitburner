@@ -217,6 +217,18 @@ cannot resolve a home service-admission shortage, so essential home upgrades com
 first. Automatic home upgrades run in BN4 or with SF4 when progression and
 augmentation actions are enabled. RAM blocked by core services or progression
 actors takes priority over unfunded ordinary programs such as SQLInject.
+An already affordable port opener can go first when its newly rootable worker RAM
+is estimated to reach that same service RAM goal at least 10% and 30 seconds sooner.
+This uses fresh income, RAM pressure and scheduler headroom, discounts the expected
+income gain by 50%, and allows a minute for network refresh plus a full batch warmup.
+Only the actual program price is spent in the comparison; its savings threshold
+still includes the configured cash reserve. Better targets are not credited before
+they earn. The dashboard's `Savings comparison` row explains the estimated ETAs or
+the missing evidence. A separate bootstrap exception still allows small funded
+unlocks costing at most 10% of the admission goal even without income evidence.
+Manual savings, Daedalus and Red Pill goals remain protected. After syncing this
+change, restart the supervisor, daemon and progression manager to publish both the
+newly rootable RAM and worker warmup estimates.
 New fleets default to an 8 GB minimum instead of 32 GB, reducing the first
 purchase threshold. The existing 25% per-action cash cap and 10% reserve remain.
 

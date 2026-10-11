@@ -769,6 +769,7 @@ function renderSupervisorFrame(ns, state) {
 		dashboardRow(ns, "History 1h", `${cash(report.earnings)} hacked | ${cash(report.spending)} RAM spending | ${report.recoveries} recoveries | ${report.count} samples`);
 	}
 	if (cfg.savingsStatus) dashboardRow(ns, "Savings policy", cfg.savingsStatus);
+	if (cfg.rootUnlockStatus) dashboardRow(ns, "Savings comparison", cfg.rootUnlockStatus);
 	if (cfg.shareStatus) dashboardRow(ns, "Sharing", sharingLabel(cfg.shareStatus));
 	for (const job of cfg.utilityJobs || []) {
 		const stale = job.type === "augmentation-plan" && job.report && Date.now() - job.report.generatedAt > 120000;

@@ -4487,6 +4487,7 @@ function renderSchedulerFrame(ns, pool) {
 			batchRate: countRate(p.stats.batchTimes, 60_000, p.stats.started, now),
 			modelBatchRate: p.runtime?.plan.batchRate || 0, gap: p.cfg.gap,
 			period: p.runtime?.plan.period || 0, lead: p.cfg.lead,
+			warmupMs: p.runtime?.plan.times?.W > 0 ? p.runtime.plan.times.W + p.cfg.lead + 3 * p.cfg.gap : 0,
 			money: health.money, maxMoney: health.maxMoney, security: health.sec, minSecurity: health.minSec,
 			eta: Math.max(0, p.firstLanding - now), misses: { ...p.stats.pipeline.misses },
 			drift: p.stats.pipeline.driftMax, spacing: Number.isFinite(p.stats.pipeline.minSpacing) ? p.stats.pipeline.minSpacing : null,

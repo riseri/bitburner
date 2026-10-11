@@ -196,6 +196,7 @@ export function planObjectives({ torOwned, programs, backdoors, money, progressi
 	const missing = programs.find(program => !program.owned && program.useful !== false);
 	if (missing) objectives.push({ kind: "program", target: missing.name, program: missing.name,
 		priority: missing.priority, reason: missing.reason, label: `Acquire ${missing.name}`, ready: torOwned, costEstimate: missing.cost,
+		addedRam: missing.addedRam, unlocked: missing.unlocked,
 		affordable: money >= missing.cost, blocker: !torOwned ? "tor-required" : money >= missing.cost ? "" : "insufficient-cash" });
 	for (const target of backdoors) {
 		if (progression?.redPill === "installed") break;
