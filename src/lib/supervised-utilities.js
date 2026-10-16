@@ -109,7 +109,7 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
         // Service admission is evaluated before performance candidates exist.
         if(!cfg.homeInvestment) requests.push(...(cfg.homePerformanceInvestments || []));
         const cloud = readFleetCapitalRequest(ns, fleet);
-        if (cloud) requests.push(cloud);
+        if (cloud) requests.push({ ...cloud });
         // Funded root unlocks may accelerate admission itself. Retain the small
         // bootstrap allowance before reliable income exists; larger purchases
         // must shorten the time to this same service RAM goal.
@@ -117,6 +117,20 @@ export async function updateSupervisorSavings(ns, cfg, plan, progression = null,
         const endgameGoal = requests.some(r => r.priority >= 95 && Number.isFinite(r.amount) && r.amount > 0 && r.available !== false);
         const openers = progressionPrograms({ darknet: false, formulas: false });
         const rootUnlocks = requests.filter(r => r.target === "TOR" || openers.some(p => p.name === r.target));
+        // A measured cloud investment may fund the SAME service admission goal
+        // sooner. Never demote manual savings, reset goals, or a funded upgrade.
+        if (cloud && admission?.amount > 0 && admission.priority <= 90 && !endgameGoal) {
+            const snapshot = ns.getPortHandle(PORTS.JIT_STATUS).peek();
+            const live = Number.isInteger(snapshot?.pid) && ns.isRunning(snapshot.pid);
+            const economics = evaluateRootUnlock(live ? snapshot : null,
+                { ...cloud, cost: cloud.candidate.cost, addedRam: cloud.candidate.added }, admission,
+                ns.getServerMoneyAvailable("home"), shared);
+            if (economics.ok) {
+                const request = requests.find(r => r.target === cloud.target);
+                request.priority = 94;
+                request.reason = "Cloud expansion accelerates service RAM; " + economics.reason.replace("after opener", "after cloud expansion");
+            }
+        }
         if (admission?.amount > 0 && admission.priority <= 90 && !endgameGoal && rootUnlocks.length) {
             const cash = ns.getServerMoneyAvailable("home");
             const purchaseRam = ns.getScriptRam("progression-purchase.js", "home");

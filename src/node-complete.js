@@ -1,4 +1,4 @@
-import { nextRouteNode } from "lib/bitnode-route.js";
+import { nextRouteNode, routeStopsAfterClear } from "lib/bitnode-route.js";
 import { resetEpoch, singularityAvailable } from "lib/progression-protocol.js";
 import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
 
@@ -18,6 +18,11 @@ export async function main(ns) {
     if (!ns.serverExists("w0r1d_d43m0n") || !ns.hasRootAccess("w0r1d_d43m0n") ||
         ns.getHackingLevel() < ns.getServerRequiredHackingLevel("w0r1d_d43m0n")) return refuse("final server requirements are not met");
     if (ns.singularity.isBusy()) return refuse("player is busy");
+    if (routeStopsAfterClear(reset)) {
+        ns.tprint("BN10.3 complete: awarding SF10.3 and parking in BN10 with all scripts stopped.");
+        ns.singularity.destroyW0r1dD43m0n(nextNode);
+        return;
+    }
     try { restoreSupervisorArgs(ns.read("data/supervisor-bootstrap.json")); }
     catch { return refuse("invalid restart settings"); }
     for (const file of ["bootstrap.js", "supervisor.js"]) {

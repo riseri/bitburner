@@ -22,6 +22,13 @@ charge; see `docs/supervision.md`. Home-RAM purchasing, a larger scheduler/displ
 split, and new sleeve/gang services remain
 future feature work; they are not required to correct the findings in this pass.
 
+BN2 follow-up (2026-10-11): a supervised gang service now handles creation,
+recruitment, member training, wanted control, ascension and budgeted equipment.
+The gang Red Pill route also avoids premature exclusive targeting and unnecessary
+Daedalus savings/count requirements. The BN2 gaps listed below describe the
+original assessment; see [gang automation](gangs.md) for current behavior and
+the separate SF4 requirement for unattended player/augmentation progression.
+
 The hacking foundation is worth keeping. It already supports operation without Formulas, live adoption of Formulas, limited RAM, shared scheduling, recovery, and augmentation resets. The highest-value work is correcting progression policy and reducing duplicated orchestration. A scheduler rewrite would introduce more risk than the identified cleanup requires.
 
 ## Findings to fix first

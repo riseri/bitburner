@@ -3,9 +3,14 @@
 Augmentation progression and reset timing follow Singularity access in BN4 or
 other nodes with SF4, including BN5. Automatic BitNode transitions follow
 BNx.1 → BNx.2 → BNx.3 for every BitNode x, restoring automation after each
-transition and waiting for your next destination at the third-run exit. It uses explainable
-heuristics, not an optimality claim. No sleeve, gang, or corporation manager was
-found or added. Capability fields describe access hints, not running systems.
+transition and waiting for your next destination at the third-run exit. BN10 is
+the exception: it also clears BN10.3, awards SF10.3 by re-entering BN10, and stops
+all scripts by omitting the restart callback. It uses explainable
+heuristics, not an optimality claim. Gang management is a separate supervised
+service in BN2 or with SF2; sleeve management runs in BN10 or with SF10. Corporation
+capability remains an access hint. See [BN10 automation](bn10.md) and
+[gang automation](gangs.md) for prerequisites and
+spending policy.
 
 ## Shared objective and decisions
 
@@ -24,6 +29,17 @@ Waiting for another faction or a larger augmentation queue publishes `UNLOCK` or
 `resetImminent` requires a nonempty queue and an approved installation, including
 an installation waiting on its execution checks. An empty queue never retains
 capital for an augmentation reset.
+
+Before the augmentation manager fits on home, the progression dispatcher can
+accept compatible hacking-faction invitations through `progression-join.js`.
+The contract manager may also borrow otherwise idle home RAM while augmentation
+admission is blocked, yielding when the higher-priority service can fit.
+Cloud capital requests authenticate the fleet manager on home or a supported
+remote service host. A funded cloud expansion can outrank an unfunded service
+RAM goal when fresh measured economics project at least 10% and 30 seconds
+saved toward that same goal, including activation time. Existing RAM pressure,
+short payback, reset and cash-reserve checks still apply; spare capacity alone
+does not justify purchasing more servers.
 
 Static augmentation metadata is cached for 60 seconds and invalidated by faction,
 target or epoch changes. Prices, ownership and reputation are live each decision.
@@ -52,11 +68,27 @@ rates are reported as unknown; fallback uses reputation gap and favor. Similar
 sellers/plans keep their incumbent within a 10% margin. Purchase baskets evaluate
 entire prerequisite chains, spendable cash, live rep and sequential inflation.
 Affordable useful alternatives can outrank a currently unaffordable preferred
-chain; explicit targets remain binding. A deferred chain reserves its full
+chain; explicit targets remain binding. Deferred chains with known ETAs rank by
+useful benefit divided by acquisition time plus a one-minute smoothing allowance.
+This includes prerequisite waits and cash funding. Unknown ETAs remain unknown;
+known routes rank first, with static benefit/cost as a fallback when all rates
+are missing. The 10% incumbent margin uses the same time-adjusted score, so an
+old expensive reputation target cannot pin the plan for days when a useful near-term
+upgrade is available. Affordable baskets retain benefit/cost ranking.
+A deferred chain reserves its full
 estimated cost. Every actual purchase rechecks price, prerequisites, ownership,
 reputation and savings. Standard inflation defaults to 1.9 adjusted for SF11.
 Price-multiplier flags now default to 0 (automatic); a positive override is an
 inspection/model assumption, never a spending authorization.
+
+A gang offering The Red Pill provides a separate completion route. Its mere
+presence in the catalog does not suppress useful upgrades while gang reputation
+is low. Once its reputation requirement is met, The Red Pill takes priority;
+explicit targets remain binding. Gang reputation comes from member tasks, so the
+augmentation loop waits for gang progress instead of trying ordinary faction work
+or donations there. This route does not request Daedalus's $100b invitation fund
+or use its 30-augmentation count as a prerequisite. The final server's live hacking
+requirement and the usual installation/transition checks still apply.
 
 Five queued augmentations remains the default fallback threshold. With progression enabled, a
 valuable purchase within two minutes can briefly delay it. Completed batches,
@@ -182,7 +214,7 @@ and does not displace useful work. Disable it on the standalone manager with
 Starter graduation requires the supervisor, daemon, fleet, enabled progression,
 and upgrade-helper headroom. This prevents a fresh 32 GB BN4.1 home from handing
 off to a daemon that leaves fleet and progression unable to start. Optional
-augmentation/stock/Go/Darknet services are still admitted later. Once the core fits,
+augmentation/gang/stock/Go/Darknet services are still admitted later. Once the core fits,
 the augmentation manager is admitted ahead of the contract solver: joining factions,
 working for reputation and publishing the shared objective must not wait for optional
 contract solving. Enabled progression
@@ -203,6 +235,16 @@ daemon and may leave the same RAM shortage. No augmentation or BitNode reset is
 needed; other processes and remote workers can remain in place.
 
 ## Capital and optional systems
+
+The default gang service recruits and trains members, chooses tasks for respect
+and income, controls wanted level, ascends members and buys equipment. It manages
+existing combat gangs as well as hacking gangs; automatic creation prefers joined
+NiteSec or The Black Hand. It disables territory warfare and does not claim player
+work. Equipment purchases use the configured fraction of unprotected cash and
+defer during an imminent augmentation reset. The gang survives that installation;
+the service rediscovers it after bootstrap. A BitNode transition clears the gang.
+Outside BN2, creation waits for the game's karma prerequisite rather than farming
+crime. Automatic player/faction/augmentation progression in BN2 still requires SF4.
 
 Manual savings remain authoritative. Automatic requests use stable priorities:
 Red Pill 100, Daedalus invitation 95, TOR/first opener 85, blocked home services 75,

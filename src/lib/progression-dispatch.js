@@ -5,7 +5,7 @@ import { readProgressionSnapshot } from "lib/progression-objective.js";
 import { reclaimHomeShare } from "lib/home-share.js";
 import { freshStatus, resetEpoch, singularityAvailable, actionKey, createRequest, terminalAction, validateRequest } from "lib/progression-protocol.js";
 
-const PURCHASE = "progression-purchase.js", BACKDOOR = "progression-backdoor.js";
+const PURCHASE = "progression-purchase.js", BACKDOOR = "progression-backdoor.js", JOIN = "progression-join.js";
 
 export function createActionState() {
 	return { active: null, lastResult: null, current: { state: "idle", reason: "Waiting for progression" },
@@ -13,7 +13,7 @@ export function createActionState() {
 }
 
 export function actorProcesses(ns) {
-	return ns.ps("home").filter(process => process.filename === PURCHASE || process.filename === BACKDOOR);
+	return ns.ps("home").filter(process => [PURCHASE, BACKDOOR, JOIN].includes(process.filename));
 }
 
 /** Collect outcomes before dispatching. One-shot actors have no heartbeat timeout. */
@@ -85,6 +85,8 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		state.diagnostics.push({ target: objective.target, state: waiting ? "waiting" : "blocked", reason });
 	};
 	for (const objective of objectives) {
+		if (objective.kind === "join-faction" && (cfg.augmentationActions === false || cfg.augmentationJoinFactions === false ||
+			ns.ps("home").some(p => p.filename === "augmentation-manager.js"))) continue;
 		if (objective.kind === "backdoor" && progression?.redPill === "installed") continue;
 		// An adopted planner can still carry its previous feature flags.
 		if (objective.kind === "program" && !progressionPrograms({ darknet: cfg.darknet !== false }).some(program => program.name === objective.target)) continue;
@@ -100,7 +102,7 @@ export function tickProgressionActions(ns, state, plan, cfg, now = Date.now()) {
 		const request = { ...createRequest(ns, plan, objective, reserve, ++state.sequence, now),
 			fleetPort: cfg.fleetStatusPort ?? PORTS.FLEET_STATUS };
 		if (validateRequest(request, reset, now)) { blocked(objective, "Invalid objective in plan"); continue; }
-		const script = objective.kind === "backdoor" ? BACKDOOR : PURCHASE;
+		const script = objective.kind === "backdoor" ? BACKDOOR : objective.kind === "join-faction" ? JOIN : PURCHASE;
 		const ram = ns.getScriptRam(script, "home");
 		if (ram > 0) reclaimHomeShare(ns, ram);
 		const free = ns.getServerMaxRam("home") - ns.getServerUsedRam("home");

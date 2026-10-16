@@ -17,6 +17,7 @@ import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
 import { prepareIntelligenceInstallation } from "lib/intelligence-automation.js";
 import { intelligencePolicy } from "lib/intelligence-session.js";
 import { quoteEndgamePackage, purchaseEndgamePackage, donateEndgameReputation } from "lib/augmentation-endgame.js";
+import { routeGangKarma } from "lib/gang-karma.js";
 
 const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP = "bootstrap.js";
 const NEUROFLUX = "NeuroFlux Governor", MAX_NEUROFLUX_PURCHASES = 100;
@@ -26,7 +27,7 @@ export async function main(ns) {
     const flags = ns.flags([
         ["port", PORTS.AUGMENTATION_STATUS], ["interval", 5_000], ["focus", "hacking"], ["target", ""],
         ["price-multiplier", 0], ["cash-reserve", 0.10], ["join-factions", true], ["city-faction", ""], ["work", true],
-        ["route", true], ["program-creation", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5], ["reset-policy", "auto"],
+        ["route", true], ["gang-karma", true], ["program-creation", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5], ["reset-policy", "auto"],
         ["intelligence", true], ["intelligence-minutes", 10], ["intelligence-target", 0],
     ]);
     ns.disableLog("ALL");
@@ -122,16 +123,25 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
             return handleInstallation(ns, cfg, state, plan, queued, true);
         const backdoor = routeBackdoorYield(ns, state);
         if (backdoor) return { ...backdoor, plan, queued };
-        if (cfg.joinFactions && new Set(installed).size >= context.objective.countRequired && player.skills.hacking >= 2500) {
+        const karma = routeGangKarma(ns, cfg, state, context, plan);
+        if (karma) {
+            // Shopping and approved resets keep priority during crime time.
+            if (plan.next && !(plan.next.repGap > 0) && !plan.errors.length) {
+                const shopping = handleNextAugmentation(ns, cfg, state, plan, plan.next, context);
+                if (shopping.action) return { ...shopping, karma: karma.karma };
+            }
+            return { ...karma, plan, queued };
+        }
+        if (!context.objective.gangRoute && cfg.joinFactions && new Set(installed).size >= context.objective.countRequired && player.skills.hacking >= 2500) {
             const daedalus = routeDaedalus(ns, cfg, state, installed, context.objective.countRequired);
             if (daedalus) return { ...daedalus, queued, plan };
         }
-        if (cfg.joinFactions && !player.factions.includes("Daedalus")) {
+        if (!context.objective.gangRoute && cfg.joinFactions && !player.factions.includes("Daedalus")) {
             const unlock = routeUnlock(ns, cfg, state, [...installed, ...pending], Boolean(plan.next));
             if (unlock) return { ...unlock, queued, plan };
         }
     }
-    if (progression) { const unlock = routeSelectiveFaction(ns, cfg, state, context, plan); if (unlock) return { ...unlock, plan, queued }; }
+    if (progression && !context.objective.gangRoute) { const unlock = routeSelectiveFaction(ns, cfg, state, context, plan); if (unlock) return { ...unlock, plan, queued }; }
     if (plan.errors.length) return { state: "BLOCKED", phase: "PLAN", plan,
         recommendation: plan.errors.join("; "), queued: queuedCount(ns) };
     const creation = routeProgramCreation(ns, cfg, state, context, plan);
@@ -140,7 +150,7 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
     if (next) return handleNextAugmentation(ns, cfg, state, plan, next, context);
 
     if (progression) {
-        const daedalus = cfg.joinFactions ? routeDaedalus(ns, cfg, state, installed, context.objective.countRequired) : null;
+        const daedalus = !context.objective.gangRoute && cfg.joinFactions ? routeDaedalus(ns, cfg, state, installed, context.objective.countRequired) : null;
         return { ...(daedalus || trainHacking(ns, cfg, state, Math.max(2500, player.skills.hacking + 1))), plan, queued };
     }
     return handleInstallation(ns, cfg, state, plan, queued);
@@ -191,6 +201,7 @@ async function tickEndgame(ns, cfg, state, context, pending) {
             }
             state.endgameQuote = { neurofluxLevels: proposal.purchases.filter(item => item.name === NEUROFLUX).length,
                 augmentations: proposal.purchases.filter(item => item.name !== NEUROFLUX).map(item => item.name), cost: proposal.cost };
+            state.endgameProjection = { at: Date.now(), decision: projected };
             if (proposal.purchases.length && useful(projected)) {
                 state.endgameFundingFloor = Math.max(state.endgameFundingFloor || 0, proposal.floor);
                 const goal = proposal.funding[0];
@@ -223,13 +234,14 @@ async function tickEndgame(ns, cfg, state, context, pending) {
     if (!pending.length) decision = { ...decision, reason: cfg.purchase ? state.endgameReason || decision.reason : "Endgame purchases disabled" };
     state.resetHistory = decision.history; state.resetDecision = decision;
     if (decision.action === "INSTALL") return handleInstallation(ns, cfg, state, null, pending.length, true);
+    const displayProjection = projected || (Date.now() - state.endgameProjection?.at <= 45000 ? state.endgameProjection.decision : null);
     return { ...(fundingStatus || routeEndgame(ns, cfg, state)), queued: pending.length,
         ...(purchases?.purchased ? { action: `Queued ${purchases.purchased} endgame upgrades; measuring reset advantage` }
             : joined ? { action: `Joined ${joined} for endgame upgrade access` } : {}),
         endgame: { reason: fundingStatus?.recommendation || (pending.length ? decision.reason : state.endgameReason || decision.reason),
-            continueEtaMs: projected?.wait.totalMs ?? decision.wait.totalMs,
-            resetEtaMs: projected?.installNow.etaMs ?? decision.installNow.etaMs,
-            recoverySource: projected?.recoverySource ?? decision.recoverySource,
+            continueEtaMs: decision.wait.totalMs ?? displayProjection?.wait.totalMs,
+            resetEtaMs: decision.installNow.etaMs ?? displayProjection?.installNow.etaMs,
+            recoverySource: decision.recoverySource ?? displayProjection?.recoverySource,
             funding: state.endgameFunding, purchases, xp: context.endgameXp, quote: state.endgameQuote,
             neurofluxQueued: pending.filter(name => name === NEUROFLUX).length } };
 }
@@ -364,6 +376,11 @@ function handleNextAugmentation(ns, cfg, state, plan, next, context) {
     const queued = queuedCount(ns), current = ns.singularity.getCurrentWork(), busy = ns.singularity.isBusy();
     refreshSelectedAugmentation(ns, next);
 	if (next.repGap > 0) {
+        if (next.passiveReputation) {
+            const eta = next.workEtaMs > 0 ? `; conservative ETA ${formatDuration(next.workEtaMs)}` : "; observing gang reputation progress";
+            return { state: "WAITING", phase: "REPUTATION", plan, queued, reputationPerSecond: next.rate,
+                etaMs: next.workEtaMs, recommendation: `Gang members are earning ${Math.ceil(next.repGap)} reputation with ${next.faction} for ${next.name}${eta}` };
+        }
         const donation = Date.now() < (state.nextDonateAt || 0) ? 0 : affordableDonation(ns, cfg, next);
         if (donation > 0) {
             const donated = ns.singularity.donateToFaction(next.faction, donation);
@@ -482,7 +499,7 @@ function formatDuration(ms) {
 function normalizeConfig(flags) {
     const cfg = {
         priceMultiplier: Number(flags["price-multiplier"] || 0), port: Number(flags.port), interval: Math.max(1_000, Number(flags.interval) || 5_000),
-        programCreation: bool(flags["program-creation"]), route: bool(flags.route), focus: String(flags.focus), target: String(flags.target), cashReserve: fraction(flags["cash-reserve"]),
+        programCreation: bool(flags["program-creation"]), route: bool(flags.route), gangKarma: bool(flags["gang-karma"] ?? true), focus: String(flags.focus), target: String(flags.target), cashReserve: fraction(flags["cash-reserve"]),
         joinFactions: bool(flags["join-factions"]), cityFaction: String(flags["city-faction"]), work: bool(flags.work), donate: bool(flags.donate),
         purchase: bool(flags.purchase), focusWork: bool(flags["focus-work"]),
         minInstall: Number(flags["min-install"]),

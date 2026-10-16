@@ -254,7 +254,7 @@ test('every BitNode repeats through its third run and does not invent a destinat
     const f = fixture();
     for (const node of [...Array.from({ length: 15 }, (_, i) => i + 1), 100]) {
         f.reset.currentNode = node;
-        for (const [level, next] of [[0, node], [1, node], [2, null], [3, null]]) {
+        for (const [level, next] of [[0, node], [1, node], [2, node === 10 ? 10 : null], [3, null]]) {
             f.reset.ownedSF.set(node, level); assert.equal(f.policy.nextRouteNode(f.reset), next);
         }
     }
@@ -276,7 +276,7 @@ test('invalid BitNode numbers and Source-File levels cannot authorize a reset', 
     }
 });
 
-for (let node = 1; node <= 15; node++) test(`BN${node}.1 -> BN${node}.2 -> BN${node}.3 restores automation and waits at the final exit`, async () => {
+for (const node of Array.from({ length: 15 }, (_, i) => i + 1).filter(n => n !== 10)) test(`BN${node}.1 -> BN${node}.2 -> BN${node}.3 restores automation and waits at the final exit`, async () => {
     const f = fixture(), transitions = [];
     f.reset.currentNode = node; f.reset.ownedSF.set(4, 3);
     f.ns.serverExists = host => host === 'w0r1d_d43m0n'; f.ns.getServerRequiredHackingLevel = () => 9000;
@@ -334,6 +334,83 @@ test('route travels for useful factions, joins, earns reputation, buys, and inst
     assert.equal((await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state)).state, 'RESETTING');
     assert.equal(f.world.pending.length, 2);
     assert.ok(f.world.calls.some(c => c[0] === 'stop'));
+});
+
+test('BN10 earns all three Source-File levels, bootstraps only twice, and parks after the third clear', async () => {
+    const f = fixture(), transitions = [];
+    f.reset.currentNode = 10; f.reset.ownedSF.set(4, 3); f.reset.ownedSF.set(1, 3);
+    f.ns.serverExists = host => host === 'w0r1d_d43m0n'; f.ns.getServerRequiredHackingLevel = () => 9000;
+    f.ns.fileExists = () => true; f.ns.getScriptRam = () => 7.8;
+    f.ns.singularity.destroyW0r1dD43m0n = (...args) => {
+        transitions.push(args);
+        f.reset.ownedSF.set(10, (f.reset.ownedSF.get(10) || 0) + 1);
+        f.reset.lastNodeReset = ++f.clock.now; f.reset.lastAugReset = f.clock.now;
+        f.world.scripts = []; f.world.installed = []; f.world.hacking = 1;
+    };
+    for (const level of [0, 1, 2]) {
+        assert.equal(f.reset.ownedSF.get(10) || 0, level);
+        f.ns.pid = 10; f.world.calls.length = 0; f.world.work = null;
+        f.world.scripts = [{ pid: 10, filename: 'augmentation-manager.js' }];
+        f.world.installed = ['The Red Pill']; f.world.hacking = 9000;
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.equal(status.phase, 'COMPLETE_NODE');
+        if (level === 2) assert.match(status.recommendation, /SF10.3.*stopped/);
+        const launch = f.world.calls.find(c => c[0] === 'run' && c[1] === 'node-complete.js');
+        assert.ok(launch, 'third clear must actually award SF10.3, not wait at exit readiness');
+        f.ns.args = [launch[3]]; f.ns.pid = 99;
+        await loadScript('node-complete.js', f.clock).main(f.ns);
+        if (level < 2) {
+            let restarted = false;
+            await loadScript('bootstrap.js', f.clock).main({ ...f.ns, spawn: (file) => { assert.equal(file, 'supervisor.js'); restarted = true; } });
+            assert.equal(restarted, true);
+        }
+    }
+    assert.deepEqual(transitions, [[10, 'bootstrap.js'], [10, 'bootstrap.js'], [10]]);
+    assert.equal(f.reset.ownedSF.get(10), 3); assert.equal(f.world.scripts.length, 0);
+    assert.equal(f.policy.nextRouteNode(f.reset), null);
+    await loadScript('node-complete.js', f.clock).main(f.ns);
+    assert.equal(transitions.length, 3, 'stale completion request cannot start a fourth run');
+});
+
+test('BN10 player karma yields for augmentation purchases, reputation and reset without replacing Daedalus', async () => {
+    const f = fixture(); f.reset.currentNode = 10; f.reset.ownedSF.set(4, 3); f.reset.ownedSF.set(2, 1);
+    f.cfg.gangKarma = true; f.cfg.joinFactions = false;
+    f.ns.heart = { break: () => -100 }; f.ns.gang = { inGang: () => false };
+    f.ns.singularity.commitCrime = name => { f.world.work = { type: 'CRIME', crimeType: name }; f.world.calls.push(['crime', name]); return 3000; };
+    f.clock.now = f.reset.lastNodeReset + 300000;
+    f.world.rep = 0;
+    let status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'GANG_KARMA'); assert.equal(status.progression.countRequired, 30);
+    f.clock.now += 60000;
+    status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'REPUTATION'); assert.equal(f.world.work.type, 'FACTION');
+    f.clock.now += 240000; f.world.rep = 1e9;
+    status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.phase, 'PURCHASE', 'crime must not block ready purchases');
+    f.world.pending = ['The Red Pill'];
+    status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+    assert.equal(status.state, 'RESETTING'); assert.ok(f.world.calls.some(c => c[0] === 'install'));
+});
+
+test('six virtual BN10 hours keep reputation progressing while gang karma is still locked', async () => {
+    const f = fixture(); f.reset.currentNode = 10; f.reset.ownedSF.set(4, 3); f.reset.ownedSF.set(2, 1);
+    f.cfg.gangKarma = true; f.cfg.joinFactions = false; f.cfg.programCreation = false;
+    let karma = 0, factionSeconds = 0, crimeSeconds = 0;
+    f.ns.heart = { break: () => karma }; f.ns.gang = { inGang: () => false };
+    f.ns.singularity.getAugmentationRepReq = () => 1e9;
+    f.ns.singularity.commitCrime = name => { f.world.work = { type: 'CRIME', crimeType: name }; return 3000; };
+    f.clock.now = f.reset.lastNodeReset + 1200000; f.world.rep = 0;
+    for (let elapsed = 0; elapsed < 6 * 3600; elapsed += 5) {
+        const status = await f.api.tickAugmentationLoop(f.ns, f.cfg, f.state);
+        assert.notEqual(status.state, 'BLOCKED'); assert.notEqual(status.state, 'ERROR');
+        if (f.world.work?.type === 'CRIME') { karma -= 1; crimeSeconds += 5; }
+        if (f.world.work?.type === 'FACTION') { f.world.rep += 10; factionSeconds += 5; }
+        f.clock.now += 5000;
+    }
+    assert.ok(karma > -54000, 'fixture intentionally keeps the gang locked');
+    assert.equal(crimeSeconds, 6 * 3600 / 5);
+    assert.equal(factionSeconds, 6 * 3600 * 4 / 5, 'gang access must not hold normal reputation work hostage');
+    assert.ok(f.world.rep > 0);
 });
 
 test('faction backdoors preserve both managed and manual work while the actor installs', async () => {

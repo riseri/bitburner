@@ -114,6 +114,79 @@ function supervisorFixture(node) {
     return { ns, api, clock, processes, launches, files, reads, logs, killed, uiCalls, unlockDarknet: () => { navigator = true; } };
 }
 
+test('BN2 gang service is enabled without Singularity and preserves settings through bootstrap', async () => {
+    const f = supervisorFixture(2);
+    f.ns.args = ['--gang-faction', 'The Black Hand', '--gang-budget', .02];
+    await assert.rejects(f.api.main(f.ns), /end fixture/);
+    const gang = f.launches.find(p => p.filename === 'gang-manager.js');
+    assert.ok(gang);
+    assert.deepEqual(Array.from(gang.args), ['--port', 3, '--faction', 'The Black Hand', '--budget', .02]);
+    assert.ok(!f.launches.some(p => p.filename === 'augmentation-manager.js'));
+    const restored = [];
+    await loadScript('bootstrap.js', f.clock).main({ getHostname: () => 'home',
+        read: () => f.files.get('data/supervisor-bootstrap.json'), spawn: (...args) => restored.push(...args.slice(2)), tprint() {} });
+    assert.deepEqual(restored, f.ns.args);
+});
+
+test('gang capability gates files, RAM and launch; explicit opt-out also works in BN2', async () => {
+    const api = loadScript('lib/service-catalog.js', new Clock()), cfg = api.supervisorServiceConfig();
+    assert.equal(cfg.gangs, true);
+    assert.ok(!api.supervisorFiles(cfg, { gang: false }).includes('gang-manager.js'));
+    assert.ok(api.supervisorFiles(cfg, { gang: true }).includes('gang-manager.js'));
+    const queried = [];
+    api.supervisorRamBudget({ getScriptRam: name => { queried.push(name); return 20; } }, cfg, { gang: false });
+    assert.ok(!queried.includes('gang-manager.js'));
+    assert.equal(api.supervisorRamBudget({ getScriptRam: () => 20 }, { gangs: true }, { gang: true }).optionalRam, 20);
+    for (const [node, sf2, enabled, expected] of [[1, false, true, false], [1, true, true, true], [2, false, false, false]]) {
+        const f = supervisorFixture(node); f.ns.args = ['--gangs', enabled];
+        if (sf2) f.ns.getResetInfo().ownedSF.set(2, 1);
+        await assert.rejects(f.api.main(f.ns), /end fixture/);
+        assert.equal(f.launches.some(p => p.filename === 'gang-manager.js'), expected);
+    }
+});
+
+for (const args of [['--gang-budget', -1], ['--gang-budget', 1.1], ['--gang-budget', 'oops'], ['--gang-faction', 'CyberSec']]) {
+    test(`invalid gang options fail before saving or spending: ${args.join(' ')}`, async () => {
+        const f = supervisorFixture(2); f.ns.args = args;
+        await assert.rejects(f.api.main(f.ns), /gang-budget|gang-faction/);
+        assert.equal(f.launches.length, 0);
+        assert.equal(f.files.has('data/supervisor-bootstrap.json'), false);
+    });
+}
+
+test('gang dashboard reports income, member count and wanted control', () => {
+    const f = supervisorFixture(2);
+    f.api.renderGang(f.ns, { type: 'gang-status', inGang: true, state: 'ACTIVE', faction: 'NiteSec',
+        isHacking: true, memberCount: 8, incomePerSecond: 2e6, wantedPenalty: .97 }, { gangs: true });
+    const output = f.logs.join('\n');
+    assert.match(output, /NiteSec/); assert.match(output, /8\/12/); assert.match(output, /97.0%/);
+});
+
+test('BN10 defaults launch sleeves and gang karma without SF10 and preserve settings through bootstrap', async () => {
+    const f = supervisorFixture(10); f.ns.getResetInfo().ownedSF.set(4, 3); f.ns.getResetInfo().ownedSF.set(2, 1);
+    f.ns.args = ['--sleeve-budget', .01];
+    await assert.rejects(f.api.main(f.ns), /end fixture/);
+    const sleeves = f.launches.find(p => p.filename === 'sleeve-manager.js'); assert.ok(sleeves);
+    assert.deepEqual(Array.from(sleeves.args), ['--port', 2, '--karma', true, '--budget', .01]);
+    const manager = f.launches.find(p => p.filename === 'augmentation-manager.js');
+    assert.equal(loadScript('lib/service-lifecycle.js', f.clock).readArgument(manager.args, '--gang-karma'), true);
+    const restored = [];
+    await loadScript('bootstrap.js', f.clock).main({ getHostname: () => 'home', read: () => f.files.get('data/supervisor-bootstrap.json'),
+        spawn: (...args) => restored.push(...args.slice(2)), tprint() {} });
+    assert.deepEqual(restored, f.ns.args);
+});
+
+test('sleeve capability, opt-outs and RAM accounting agree with the launch policy', async () => {
+    for (const [node, sf10, enabled, expected] of [[1, 0, true, false], [1, 1, true, true], [10, 0, false, false]]) {
+        const f = supervisorFixture(node); f.ns.getResetInfo().ownedSF.set(10, sf10); f.ns.args = ['--sleeves', enabled, '--gang-karma', false];
+        await assert.rejects(f.api.main(f.ns), /end fixture/);
+        assert.equal(f.launches.some(p => p.filename === 'sleeve-manager.js'), expected);
+        const catalog = loadScript('lib/service-catalog.js', f.clock), cfg = catalog.supervisorServiceConfig(f.ns.args);
+        assert.equal(catalog.supervisorFiles(cfg, { sleeves: node === 10 || sf10 > 0 }).includes('sleeve-manager.js'), expected);
+        assert.equal(catalog.supervisorRamBudget({ getScriptRam: () => 40 }, cfg, { sleeves: node === 10 || sf10 > 0 }).optionalRam, expected ? 40 : 0);
+    }
+});
+
 for (const [args, enabled, minutes, target] of [[[], true, 10, 0], [['--intelligence', false], false, 10, 0],
     [['--intelligence-minutes', 2, '--intelligence-target', 150], true, 2, 150]]) {
     test(`supervisor forwards and restores the INT policy: ${JSON.stringify(args)}`, async () => {

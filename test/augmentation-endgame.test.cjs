@@ -10,7 +10,7 @@ function fixture() {
         work: { type: 'CLASS', classType: 'Computer Science', location: 'Rothman University' },
         buys: [], installs: [], stops: 0, offers: [NFG, 'Neural Accelerator'],
         bootstrap: true, formulas: true, measured: true, producer: true, priceFactor: 1, goBonus: 0, scriptRate: 10000,
-        skillMult: 20, xpRate: 10000, xp: null, income: 1000, backgroundPrep: false, suspended: false,
+        skillMult: 20, xpRate: 10000, xp: null, xpCycleMs: null, income: 1000, backgroundPrep: false, suspended: false,
         favor: 0, workRep: 1000, donations: [], workStarts: [], stable: true };
     const stats = name => name === NFG ? { hacking: 1.01, hacking_exp: 1.01 } : { hacking: 1.2, hacking_exp: 1.5 };
     const price = name => (name === NFG ? 1e6 * 1.14 ** world.pending.filter(n => n === NFG).length : 1e9) *
@@ -60,7 +60,7 @@ function fixture() {
     const refresh = () => { ports.get(17).clear(); ports.get(17).write({ type: 'jit-status', version: 2, pid: 20,
         generatedAt: clock.now, income60: world.income,
         pipelines: [{ mode: world.stable ? 'LIVE' : 'PREP' }, ...(world.backgroundPrep ? [{ mode: 'PREP' }] : [])],
-        prepRam: world.backgroundPrep ? 8 : 0, policy: { balance: {
+        prepRam: world.backgroundPrep ? 8 : 0, policy: { xp: { cycleMs: world.xpCycleMs }, balance: {
             milestone: 'FINAL_SERVER', requiredHacking: world.required, requiredCash: 0, generatedAt: clock.now,
             suspended: world.suspended,
             xpSource: world.measured ? 'measured' : 'UNKNOWN', xpRate: world.xpRate, scriptXpRate: world.scriptRate,
@@ -103,7 +103,7 @@ for (const goBonus of [100, 300, 1000]) {
             measured: false, suspended: true, backgroundPrep: true });
         f.world.xp = expFor(f.world.hacking, f.world.skillMult);
         const start = await f.tick();
-        assert.match(start.endgame.reason, /observing actual player XP \(0\/3 stable 20s windows\)/);
+        assert.match(start.endgame.reason, /observing actual player XP \(0\/3 collected windows; minimum 20s each\)/);
         assert.ok(start.endgame.quote.neurofluxLevels > 5);
         assert.equal(f.world.donations.length + f.world.buys.length + f.world.installs.length, 0);
         await observeActualXp(f, 55);
@@ -389,11 +389,65 @@ test('endgame prices loss of current Illuminati speed on script XP, while preser
     assert.ok(classes.world.buys.length > 0);
 });
 
-test('a strong hacking package can outweigh high Go reset loss before its conservative benefit is capped', async () => {
+test('completion projection retains exact hacking-level benefit after discounting Go loss and multiplier gains', async () => {
     const f = fixture(); f.world.goBonus = 1000;
     const status = await f.tick();
     assert.equal(status.resetDecision.advantage, true); assert.ok(f.world.buys.length > 5);
-    assert.equal(status.resetDecision.installNow.packageBenefit, 4);
+    const hack = 1.2 * 1.01 ** f.world.pending.filter(n => n === NFG).length;
+    const xp = 1.5 * 1.01 ** f.world.pending.filter(n => n === NFG).length;
+    const expected = 1 + (expFor(f.world.required, f.world.skillMult) /
+        expFor(f.world.required, f.world.skillMult * hack) * xp / 11 - 1) * .5;
+    assert.ok(Math.abs(status.resetDecision.installNow.packageBenefit / expected - 1) < 1e-12);
+    assert.ok(expected > 4);
+});
+
+for (const node of [2, 10]) test(`BN${node} at 13940/15000 buys and installs an advantageous package with bursty XP and no reset history`, async () => {
+    const f = fixture(); f.state.recoveryProfile.samples = [];
+    f.reset.currentNode = node; f.reset.ownedSF = new Map([[1, 3], [4, 3], [5, 3]]);
+    f.clock.now = f.reset.lastAugReset + 5 * 3600000;
+    f.state.resetEpoch = `${node}:1:${f.reset.lastAugReset}`;
+    Object.assign(f.world, { hacking: 13940, required: 15000, skillMult: 17, xpRate: 7.66e9,
+        cash: 614.13e12, goBonus: 61.925, measured: false, xpCycleMs: 30000, income: 40.26e9 });
+    f.world.xp = expFor(f.world.hacking, f.world.skillMult);
+    let status = await f.tick();
+    assert.equal(f.world.buys.length, 0, 'a nominal worker model is insufficient');
+    const originalXp = f.world.xp;
+    for (let elapsed = 5; elapsed <= 600 && !f.world.installs.length; elapsed += 5) {
+        f.clock.now += 5000;
+        f.world.xp = originalXp + Math.floor(elapsed / 30) * 30 * f.world.xpRate;
+        f.world.hacking = Math.floor(17 * (32 * Math.log(f.world.xp + 534) - 200));
+        status = await f.tick();
+    }
+    assert.ok(f.world.buys.length >= 20);
+    assert.deepEqual(f.world.installs, ['bootstrap.js'], 'the real manager must reach installation autonomously');
+    assert.equal(status.resetDecision.recoverySource, 'current-run');
+    assert.equal(status.resetDecision.confidence, 'LOW');
+    assert.ok(status.resetDecision.recoveryMs >= 5 * 3600000 * 1.25);
+    assert.ok(status.resetDecision.installNow.etaMs < status.resetDecision.wait.totalMs * .5);
+    assert.equal(f.state.recoveryProfile.samples.length, 0, 'allowances never become measured history');
+});
+
+test('known long XP jobs cannot qualify a reset from small background XP before the first completion', async () => {
+    const f = firstEndgame(); Object.assign(f.world, { measured: false, rep: 1e8, xpCycleMs: 120000 });
+    f.world.xp = expFor(f.world.hacking, f.world.skillMult);
+    await f.tick(); const status = await observeActualXp(f, 110, 10);
+    assert.equal(f.world.buys.length + f.world.installs.length, 0);
+    assert.equal(status.endgame.xp.rate, null);
+});
+
+test('the current-run allowance preserves nearly completed hacking instead of blindly spending surplus cash', async () => {
+    const f = fixture(); f.state.recoveryProfile.samples = [];
+    f.clock.now = f.reset.lastAugReset + 5 * 3600000;
+    Object.assign(f.world, { hacking: 14995, required: 15000, skillMult: 17, xpRate: 7.66e9,
+        cash: 614.13e12, goBonus: 61.925, scriptRate: 7.66e9, income: 40.26e9 });
+    const status = await f.tick();
+    assert.equal(status.resetDecision.recoverySource, 'current-run');
+    assert.equal(f.world.buys.length + f.world.installs.length, 0);
+    assert.match(status.endgame.reason, /current multipliers/);
+    assert.ok(status.endgame.continueEtaMs < status.endgame.resetEtaMs);
+    f.clock.now += 5000;
+    assert.equal((await f.tick()).endgame.continueEtaMs, status.endgame.continueEtaMs,
+        'the last quote stays visible between evaluation ticks');
 });
 
 test('endgame rejoins available factions after an augmentation reset while training continues', async () => {

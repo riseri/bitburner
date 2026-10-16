@@ -74,8 +74,76 @@ function fixture(node = 4) {
             read: file => files.get(p.host + ':' + file) || '' });
         processes.delete(p.pid);
     }
-    return { ns, clock, cfg, world, reset, costs, hosts, services, processes, launches, purchases, copies, supervisor, utilities, dispatcher, actions, goal, setGoal, plan, runActor, add };
+    return { ns, clock, cfg, world, reset, costs, hosts, parents, services, processes, launches, purchases, copies, supervisor, utilities, dispatcher, actions, goal, setGoal, plan, runActor, add };
 }
+
+test('reported BN2 bootstrap joins NiteSec and starts the gang while augmentation waits for home RAM', async () => {
+    const f = fixture(2); f.world.cash = 11.1e6; f.world.tor = true;
+    f.reset.ownedSF.set(2, 1);
+    for (const name of ['BruteSSH.exe', 'FTPCrack.exe', 'relaySMTP.exe', 'Formulas.exe']) f.world.owned.add(name);
+    f.costs['progression-join.js'] = 7.6; f.costs['gang-manager.js'] = 32.1;
+    f.costs['augmentation-manager.js'] = 114.9;
+    f.add('gang-manager.js');
+    f.world.installed.add('CSEC');
+    f.hosts['avmnite-02h'] = { ram: 32, ports: 2 }; f.world.installed.add('avmnite-02h');
+    f.parents['avmnite-02h'] = 'CSEC';
+    const factions = ['CyberSec'], joins = [];
+    f.ns.getPlayer = () => ({ factions, skills: { hacking: 266 } });
+    f.ns.singularity.checkFactionInvitations = () => ['NiteSec'];
+    f.ns.singularity.joinFaction = name => { joins.push(name); factions.push(name); return true; };
+    await f.setGoal();
+    const blocker = f.supervisor.tickServicePriority(f.ns, f.services, '', 0, 12.05);
+    assert.match(blocker, /augmentation-manager.js needs 114.90 GB/);
+    assert.ok(f.launches.some(p => p.filename === 'contract-manager.js'), 'contracts can fund admission using idle RAM');
+    assert.ok(!f.launches.some(p => p.filename === 'augmentation-manager.js'));
+    // The planner uses the fleet's installed-backdoor observations.
+    const plan = f.plan();
+    f.dispatcher.tickProgressionActions(f.ns, f.actions, plan, f.cfg);
+    assert.equal(f.launches.at(-1).filename, 'progression-join.js');
+    await f.runActor(); assert.deepEqual(joins, ['NiteSec']);
+    let inGang = false;
+    f.ns.gang = { inGang: () => inGang, createGang: name => { assert.equal(name, 'NiteSec'); inGang = true; return true; },
+        getGangInformation: () => ({ faction: 'NiteSec', isHacking: true, wantedPenalty: 1, respect: 1, wantedLevel: 1 }),
+        getMemberNames: () => [], canRecruitMember: () => false, getTaskNames: () => [], getEquipmentNames: () => [] };
+    const gang = loadScript('gang-manager.js', f.clock).gangTick(f.ns, { faction: 'auto', budget: .05, interval: 2000 });
+    assert.equal(gang.state, 'ACTIVE'); assert.equal(gang.inGang, true);
+    assert.equal(f.world.cash, 11.1e6, 'free bootstrap actions do not consume the home savings');
+});
+
+test('BN10 blocked services retain contract income, protect actor RAM and recover admission automatically', async () => {
+    const f = fixture(10); f.reset.ownedSF.set(2, 1);
+    Object.assign(f.cfg, { sleeves: true, sleeveBudget: .02, gangs: true, gangKarma: true });
+    Object.assign(f.costs, { 'supervisor.js': 8.2, 'sleeve-manager.js': 42.55, 'gang-manager.js': 31.6, 'progression-join.js': 9.35,
+        'augmentation-manager.js': 114.9, 'sleeve-upgrades.js': 35.6 });
+    const services = f.supervisor.createManagedServices(f.ns, f.cfg, []);
+    const capabilities = { singularity: true, route: true, sleeves: true, gang: true };
+    const budget = loadScript('lib/service-catalog.js', f.clock).supervisorRamBudget(f.ns, f.cfg, capabilities);
+    assert.equal(budget.actorRam, 12.05);
+    const blocker = f.supervisor.tickServicePriority(f.ns, services, '', 0, budget.actorRam);
+    assert.match(blocker, /augmentation-manager/);
+    for (const file of ['sleeve-manager.js', 'gang-manager.js', 'contract-manager.js']) assert.ok(f.launches.some(p => p.filename === file), file);
+    assert.ok(f.ns.getServerMaxRam('home') - f.ns.getServerUsedRam('home') >= budget.actorRam);
+    assert.ok(!f.launches.some(p => p.filename === 'sleeve-upgrades.js'));
+    f.world.cash = 101e6; await f.setGoal();
+    const hosts = loadScript('lib/starter-pool.js', f.clock).starterHosts(f.ns);
+    await f.supervisor.tickHomeServiceUpgrade(f.ns, f.cfg, capabilities, services, [], f.actions, hosts);
+    await f.runActor(); assert.equal(f.hosts.home.ram, 256);
+    f.supervisor.tickServicePriority(f.ns, services, '', 0, budget.actorRam);
+    assert.ok(f.launches.some(p => p.filename === 'augmentation-manager.js'));
+    assert.equal(f.purchases.filter(p => p === 'home:ram').length, 1);
+});
+
+test('a contract scan borrows unused RAM even when sleeve admission is the first blocked service', () => {
+    const f = fixture(10); f.cfg.sleeves = true;
+    f.costs['sleeve-manager.js'] = 42.55;
+    f.hosts.home.ram = 64;
+    f.costs['manual.js'] = 8; f.add('manual.js');
+    const services = f.supervisor.createManagedServices(f.ns, f.cfg, []);
+    const blocker = f.supervisor.tickServicePriority(f.ns, services, '', 0, 12.05);
+    assert.match(blocker, /sleeve-manager.js/);
+    assert.ok(f.launches.some(p => p.filename === 'contract-manager.js'));
+    assert.ok(!f.launches.some(p => p.filename === 'sleeve-manager.js'));
+});
 
 test('the reported BN5 empty augmentation queue buys TOR and programs, then permits a funded home upgrade', async () => {
     const f = fixture(5), augmentation = loadScript('augmentation-manager.js', f.clock);

@@ -51,6 +51,7 @@ export function validateRequest(request, reset, now = Date.now()) {
 	if (request.kind === "tor" && request.target === "TOR") return "";
 	if (request.kind === "program" && isProgressionProgram(request.target)) return "";
 	if (request.kind === "backdoor" && BACKDOORS.some(target => target.host === request.target)) return "";
+	if (request.kind === "join-faction" && BACKDOORS.some(target => target.faction === request.target)) return "";
 	return "target-not-allowed";
 }
 

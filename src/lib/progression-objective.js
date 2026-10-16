@@ -21,7 +21,7 @@ export function distinctAugmentations(names = []) { return [...new Set(names)]; 
 
 export function sharingDemand(objective, work) {
     const next = objective?.selectedPlan?.next;
-    if (objective?.limitingResource !== "reputation" || objective.resetImminent || !(next?.repGap > 0) ||
+    if (objective?.limitingResource !== "reputation" || objective.resetImminent || next?.passiveReputation || !(next?.repGap > 0) ||
         work?.type !== "FACTION" || work.factionName !== next.faction) return "OFF";
     return objective.milestone === "RED_PILL" && (next.name === "The Red Pill" || next.chainTarget === "The Red Pill")
         ? "AGGRESSIVE" : "SPARE_ONLY";
@@ -33,20 +33,21 @@ export function readSharingDemand(ns) {
 }
 
 export function progressionObjective({ currentNode, installed = [], owned = [], player = {}, money = 0,
-    multipliers = null, finalRequirement = null, backdoors = [], plan = null }) {
+    multipliers = null, finalRequirement = null, backdoors = [], plan = null, gang = null }) {
     const installedCount = distinctAugmentations(installed).length;
     const ownedCount = distinctAugmentations(owned).length;
-    const countRequired = Number.isFinite(multipliers?.DaedalusAugsRequirement) ? multipliers.DaedalusAugsRequirement : 30;
+    const gangRoute = Boolean(gang?.inGang && gang.offersRedPill);
+    const countRequired = gangRoute ? 0 : Number.isFinite(multipliers?.DaedalusAugsRequirement) ? multipliers.DaedalusAugsRequirement : 30;
     const redPill = installed.includes("The Red Pill") ? "installed" : owned.includes("The Red Pill") ? "queued" : "none";
     const level = Number(player.skills?.hacking) || 0, next = plan?.next;
     const selectedStrategy = augmentationReputationStrategy(next);
-    let milestone = "AUGMENTATIONS", limitingResource = selectedStrategy === "WORK" ? "reputation" : "cash";
+    let milestone = "AUGMENTATIONS", limitingResource = ["WORK", "PASSIVE"].includes(selectedStrategy) ? "reputation" : "cash";
     let requiredHacking = null, requiredCash = augmentationFundingCost(next), requiredReputation = next?.repRequired || null;
     if (redPill === "installed") {
         milestone = "FINAL_SERVER"; requiredHacking = finalRequirement; requiredCash = 0;
         limitingResource = finalRequirement == null ? "discovery" : level < finalRequirement ? "hacking" : "completion";
     } else if (redPill === "queued") { milestone = "INSTALL_RED_PILL"; limitingResource = "installation"; requiredCash = 0; }
-    else if (player.factions?.includes("Daedalus")) { milestone = "RED_PILL"; }
+    else if (gangRoute || player.factions?.includes("Daedalus")) { milestone = "RED_PILL"; }
     else if (installedCount >= countRequired) {
         milestone = "DAEDALUS"; requiredHacking = 2500; requiredCash = 100e9;
         const combatReady = ["strength", "defense", "dexterity", "agility"].every(k => player.skills?.[k] >= 1500);
@@ -59,7 +60,7 @@ export function progressionObjective({ currentNode, installed = [], owned = [], 
     }
     const augmentationMilestone = ["AUGMENTATIONS", "RED_PILL"].includes(milestone);
     const reputationStrategy = augmentationMilestone ? selectedStrategy : "NONE";
-    if (next && augmentationMilestone && selectedStrategy !== "WORK" && money >= requiredCash && limitingResource === "cash") limitingResource = "purchase";
+    if (next && augmentationMilestone && !["WORK", "PASSIVE"].includes(selectedStrategy) && money >= requiredCash && limitingResource === "cash") limitingResource = "purchase";
     const donation = next && augmentationMilestone ? { planned: Boolean(next.donationPlanned), eligible: Boolean(next.donationEligible),
         faction: next.faction, reputationRemaining: next.repGap, cost: next.donationCost ?? null,
         workEtaMs: next.workEtaMs ?? null, donationEtaMs: next.donationEtaMs ?? null,
@@ -67,7 +68,7 @@ export function progressionObjective({ currentNode, installed = [], owned = [], 
     const savings = requiredCash > 0 && !(milestone === "DAEDALUS" && limitingResource === "hacking") ? { amount: requiredCash,
         target: milestone === "DAEDALUS" ? "faction:Daedalus" : next ? "augmentation:" + next.name : "",
         label: milestone === "DAEDALUS" ? "Daedalus invitation" : next?.name || milestone } : null;
-    return { currentNode, strategy: currentNode === 4 ? "BN4 hacking and distinct augmentations" : "Generic capability-aware hacking/faction strategy",
+    return { currentNode, strategy: gangRoute ? "Gang reputation and hacking progression" : currentNode === 4 ? "BN4 hacking and distinct augmentations" : "Generic capability-aware hacking/faction strategy", gangRoute,
         installed: distinctAugmentations(installed), owned: distinctAugmentations(owned), installedCount, ownedCount,
         queuedDistinct: distinctAugmentations(owned).filter(name => !installed.includes(name)), countRequired, redPill,
         milestone, limitingResource, requiredHacking, requiredReputation, requiredCash, reputationStrategy, donation, moneyCovered: money >= requiredCash,

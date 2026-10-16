@@ -27,6 +27,12 @@ maps opponents as follows:
 | Daedalus | REPUTATION | faction and company reputation |
 | Illuminati | HACKING_SPEED | `hacking_speed` |
 
+Reputation valuation includes passive gang gains when the selected augmentation
+is sold by the gang faction. A fresh measured gang rate supplies the ETA without
+requiring active player faction work. Missing rates remain unknown. Daedalus's
+faction-reputation multiplier affects gang reputation through the game's gang
+respect-to-reputation calculation.
+
 The special world-daemon opponent affects hacking level and is excluded from
 ordinary play and automatic candidates. Reward strength depends on accumulated
 node power, opponent power, BitNode GoPower and active SF14. Difficulty and

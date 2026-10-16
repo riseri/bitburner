@@ -163,6 +163,11 @@ async function manageOneCloudAction(ns, cfg, state) {
 	state.stockReserveFloor = stockReserveFloor;
 	state.actionBudget = actionBudget;
 
+    if (names.length >= limit && names.every(name => ns.getServerMaxRam(name) >= ramLimit)) {
+        state.investment = "Cloud RAM is at the server count and size caps";
+        return;
+    }
+
     if (funded) {
         const candidate = state.capitalRequest.candidate;
         state.investment = `Prioritized ${formatRam(candidate.added)} cloud RAM; ${cash(actionBudget)} / ${cash(candidate.cost)} available`;

@@ -2,12 +2,12 @@ import { augmentationPackage } from "lib/augmentation-reset-policy.js";
 import { recoveryEstimate } from "lib/augmentation-recovery.js";
 import { formulaGroup } from "lib/formulas.js";
 import { restoreSupervisorArgs } from "lib/supervisor-migration.js";
-import { observeMilestoneRates, milestoneRate, MILESTONE_BALANCE } from "lib/milestone-balance.js";
+import { observeMilestoneRates, observedMilestoneRate, MILESTONE_BALANCE } from "lib/milestone-balance.js";
 
 const FIRST_RECOVERY_MS = 24 * 60 * 60 * 1000;
 
 // Measure actual total player XP independently of the daemon's allocation/prep
-// gates. Three stable positive windows are required; models never fill the gap.
+// gates. Three stable aggregate windows are required; models never fill the gap.
 export function observeEndgameXp(ns, context, state, now = Date.now()) {
     const objective = context.objective;
     if (objective.milestone !== "FINAL_SERVER" || objective.limitingResource !== "hacking") {
@@ -20,20 +20,21 @@ export function observeEndgameXp(ns, context, state, now = Date.now()) {
         work?.type, work?.classType, work?.location, work?.factionName, work?.factionWorkType,
         work?.companyName, work?.crimeType, work?.programName]);
     const series = state.endgameXp || (state.endgameXp = {});
-    observeMilestoneRates(series, { key, now, xp: context.player.exp?.hacking });
-    const direct = milestoneRate(series.xp), daemon = freshMilestoneBalance(context, now);
+    const sampleMs = Math.max(MILESTONE_BALANCE.sampleMs, (context.xpCycleMs || 0) * 2);
+    observeMilestoneRates(series, { key, now, xp: context.player.exp?.hacking, sampleMs });
+    const direct = observedMilestoneRate(series, "xp", null, sampleMs);
+    const daemon = freshMilestoneBalance(context, now);
     if (direct.source === "measured") {
         // The script share is unknown here. Charge the entire Illuminati loss,
         // rather than crediting a modeled dedicated-worker share as measurement.
         context.balance = { milestone: objective.milestone, requiredHacking: objective.requiredHacking,
             requiredCash: objective.requiredCash, generatedAt: now, xpSource: "measured", xpRate: direct.rate,
             scriptXpRate: null, cashSource: "UNKNOWN", cashRate: null };
-        context.endgameXp = { source: "manager measured", rate: direct.rate };
+        context.endgameXp = { ...direct, source: "manager measured" };
     } else if (daemon?.xpSource === "measured" && Number.isFinite(daemon.xpRate) && daemon.xpRate > 0) {
         context.endgameXp = { source: "daemon measured", rate: daemon.xpRate };
     } else {
-        context.endgameXp = { source: direct.source, rate: null, samples: series.xp.length,
-            requiredSamples: MILESTONE_BALANCE.samples, sampleMs: MILESTONE_BALANCE.sampleMs };
+        context.endgameXp = { ...direct, rate: null };
     }
     const usable = context.endgameXp.rate > 0;
     if (usable && !series.usable) state.nextEndgameQuoteAt = 0;
@@ -77,14 +78,14 @@ export function resetEconomics(ns, context, plan, state, pending) {
     }
     evidence.recoveryMs = recovery.ms;
     evidence.recoverySource = recovery.source || "measured";
-    evidence.confidence = recovery.source === "conservative" ? "LOW" : "MEDIUM";
+    evidence.confidence = recovery.source && recovery.source !== "measured" ? "LOW" : "MEDIUM";
     if (!completionGoal && (!next || !nextPack.complete || !Number.isFinite(next.etaMs) || next.etaMs < 0)) {
         evidence.reason = "Next augmentation ETA or stats unavailable"; return result;
     }
     const balance = freshMilestoneBalance(context), freshBalance = !!balance;
     const q = pack.multipliers, n = nextPack.multipliers;
     const positive = value => Number.isFinite(value) && value > 0;
-    const haircut = v => v > 1 ? Math.min(4, 1 + (v - 1) * .5) : v;
+    const haircut = v => v > 1 ? Math.min(completionGoal ? Infinity : 4, 1 + (v - 1) * .5) : v;
     const lane = (resource, target, current, credit, rate, benefit, nextBenefit) => ({ resource,
         remainingMs: Math.max(0, target - current) / rate * 1000,
         lostMs: Math.max(0, Math.min(current, target) - credit) / rate * 1000,
@@ -116,7 +117,7 @@ export function resetEconomics(ns, context, plan, state, pending) {
         if (!freshBalance || balance.xpSource !== "measured" || !positive(balance.xpRate)) {
             const xp = context.endgameXp;
             evidence.reason = xp?.source?.includes("unstable") ? "Measured hacking XP rate unavailable: actual XP gains are unstable or zero"
-                : xp ? `Measured hacking XP rate unavailable: observing actual player XP (${xp.samples}/${xp.requiredSamples} stable ${xp.sampleMs / 1000}s windows)`
+                : xp ? `Measured hacking XP rate unavailable: observing actual player XP (${xp.samples}/${xp.requiredSamples} collected windows; minimum ${Math.ceil(xp.sampleMs / 1000)}s each)`
                 : "Measured hacking XP rate unavailable: daemon evidence is missing, stale or suspended";
             return result;
         }
@@ -134,7 +135,7 @@ export function resetEconomics(ns, context, plan, state, pending) {
             const largerTarget = skills.calculateExp(objective.requiredHacking, mult * q.hacking * n.hacking);
             if (![target, queuedTarget, largerTarget].every(v => Number.isFinite(v) && v > 0)) throw new Error("invalid skill target");
             // Exact inverse skill curve + direct XP multiplier. Price physical
-            // reset losses BEFORE the conservative haircut and 4x ceiling, or
+            // reset losses BEFORE the conservative haircut, or
             // high Go power can veto every package regardless of its true gain.
             let benefit = target / queuedTarget * q.hacking_exp;
             if (completionGoal) {
@@ -166,6 +167,7 @@ export function resetEconomics(ns, context, plan, state, pending) {
     evidence.reliable = pack.complete;
     evidence.reason = recovery.source === "conservative"
         ? "Conservative 24h recovery allowance, zero recovered XP; measured current XP rate (LOW confidence)"
+        : recovery.source === "current-run" ? "Current productive run age plus 25% recovery allowance, zero recovered XP (LOW confidence)"
         : "Measured recovery and resource rates; conservative multiplier projection";
     return result;
 }
@@ -184,6 +186,12 @@ function conservativeEndgameRecovery(ns, context) {
         const homeRam = ns.getServerMaxRam("home");
         if (!costs.every(cost => Number.isFinite(cost) && cost > 0)) return { reason: "restart script RAM quotes unavailable" };
         if (!Number.isFinite(homeRam) || homeRam < costs.reduce((a, b) => a + b, 0)) return { reason: "permanent home RAM cannot run the restart scripts" };
+        // This run has already built a productive fleet using installed stats.
+        // Charge its ENTIRE age plus 25%, then charge all XP again separately.
+        // This is an explicit allowance, not fabricated comparable history.
+        const age = Date.now() - context.reset.lastAugReset;
+        if (context.engineStable && Number.isFinite(age) && age >= 30 * 60 * 1000 && age * 1.25 < FIRST_RECOVERY_MS)
+            return { recovery: { source: "current-run", ms: age * 1.25, cash: 0, xp: 0, hacking: 0, reputation: () => null } };
         return { recovery: { source: "conservative", ms: FIRST_RECOVERY_MS, cash: 0, xp: 0, hacking: 0, reputation: () => null } };
     } catch { return { reason: "restart readiness checks unavailable" }; }
 }

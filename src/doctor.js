@@ -30,6 +30,8 @@ export function diagnoseAutomation(ns) {
     const cfg = supervisorServiceConfig(supervisor?.args || []);
     const reset = ns.getResetInfo();
     const capabilities = { route: singularityAvailable(reset) && nextRouteNode(reset) !== null, singularity: singularityAvailable(reset),
+        gang: reset.currentNode === 2 || Number(reset.ownedSF?.get?.(2)) > 0,
+        sleeves: reset.currentNode === 10 || Number(reset.ownedSF?.get?.(10)) > 0,
         darknet: ns.fileExists("DarkscapeNavigator.exe", "home") || reset.currentNode === 15, stocks: false };
     try { capabilities.stocks = ns.stock.hasWseAccount() && ns.stock.hasTixApiAccess() && ns.stock.has4SDataTixApi(); } catch {}
     const enabled = selectedServices(cfg);

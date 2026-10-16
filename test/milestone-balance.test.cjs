@@ -99,6 +99,33 @@ test('long action bins use cumulative income without mistaking regular polling f
     assert.equal(f.api.milestoneRate(state.xp).rate, 1000);
 });
 
+for (const period of [30000, 90000, 105000, 240000]) {
+    test(`bursty XP paid every ${period / 1000}s yields a measured rate without a model`, () => {
+        const f = fixture(), state = {};
+        for (let now = 0; now <= 1800000; now += 5000)
+            f.api.observeMilestoneRates(state, { key: 'bursts', now, xp: Math.floor(now / period) * period * 10 });
+        const rate = f.api.observedMilestoneRate(state);
+        assert.equal(rate.source, 'measured');
+        assert.ok(Math.abs(rate.rate / 10000 - 1) < .15, JSON.stringify(rate));
+        assert.ok(rate.observedMs > 60000);
+        assert.equal(state.intervals.length, 90, 'history stays bounded');
+        // A stopped worker must lose its rate once its observed work ages out.
+        for (let now = 1805000; now <= 3600000; now += 5000)
+            f.api.observeMilestoneRates(state, { key: 'bursts', now, xp: Math.floor(1800000 / period) * period * 10 });
+        assert.equal(f.api.observedMilestoneRate(state, 'xp', 999999).rate, null);
+        f.api.observeMilestoneRates(state, { key: 'new-reset', now: 3605000, xp: 0 });
+        assert.equal(state.intervals.length, 0);
+    });
+}
+
+test('one XP windfall and idle time cannot masquerade as a sustainable measured rate', () => {
+    const f = fixture(), state = {};
+    for (let now = 0; now <= 1800000; now += 5000) {
+        f.api.observeMilestoneRates(state, { key: 'windfall', now, xp: now >= 300000 ? 1e12 : 0 });
+        assert.notEqual(f.api.observedMilestoneRate(state).source, 'measured');
+    }
+});
+
 test('university increases milestone XP rate without changing the script RAM model', () => {
     const f = fixture(), xp = loadScript('lib/hacking-xp.js', f.clock);
     let totalXp = 0;

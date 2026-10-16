@@ -1,6 +1,6 @@
 # Usage reference
 
-See [Dynamic progression policy](progression-planning.md) for shared objectives, automatic inflation, staged bootstrap, and the supervisor’s `--go-opponent auto` default. Ports 4, 5, 6 and 8 are reserved for cloud service hosting, starter target selection, home capacity policy and home-upgrade quotes; choose another unreserved port for custom fleet status. [Home G/W and capital](home-gw.md) explains opportunistic execution and evidence-based RAM/core purchases.
+See [Dynamic progression policy](progression-planning.md) for shared objectives, automatic inflation, staged bootstrap, and the supervisor’s `--go-opponent auto` default. Ports 2, 3, 4, 5, 6 and 8 are reserved for sleeve status, gang status, cloud service hosting, starter target selection, home capacity policy and home-upgrade quotes; choose another unreserved port for custom fleet status. Port 7 remains available. [Home G/W and capital](home-gw.md) explains opportunistic execution and evidence-based RAM/core purchases.
 
 Start with the [README](../README.md) for setup, automation settings, dashboard help, and restart instructions. This page keeps the full feature requirements and advanced options in one place.
 
@@ -25,6 +25,8 @@ their own requirements. BN means your **current BitNode**; SF means an owned
 | 4S stock trading, including long positions | **WSE Account + TIX API + 4S Market Data TIX API access**; no specific BN/SF gate for longs | Stock service is blocked until all three are available; it does not buy access automatically |
 | Short stock positions | All stock access above, plus **BN8 or SF8 level 2+** | Trader uses long-only entries and leaves existing shorts untouched |
 | IPvGO bot | Ordinary `ns.go` API; **no Singularity requirement** | The bot reports API/game errors if unavailable; it does not use the SF14.2-only `go.cheat` APIs |
+| Gang management (`--gangs true`) | **BN2 or SF2**, eligible joined faction and home RAM; outside BN2, karma ≤ -54,000 | Sleeves and bounded player crime build karma when enabled; ordinary progression continues |
+| Sleeve management (`--sleeves true`) | **BN10 or SF10**, home RAM | Synchronization, crime karma, shock recovery, faction/XP support and optional surplus purchases; see [BN10](bn10.md) |
 
 These are feature gates in this implementation, not a promise of identical income
 or server availability in every BitNode. BitNode rules and multipliers still apply.
@@ -42,6 +44,9 @@ show `WAITING_RAM`; the supervisor never kills workers to force a helper to fit.
 Progression actions and augmentation planning require Singularity. They are
 enabled by default and activate only when unlocked. Fixed savings needs no unlock.
 Automatic installation is always enabled in the running augmentation service.
+In BN2, SF4 level 1+ is therefore needed for unattended faction joining,
+augmentation purchases, installation and node transitions, even though gang
+management itself uses no Singularity APIs. See [gang automation](gangs.md).
 
 ## Supervisor controls
 
@@ -66,6 +71,12 @@ run supervisor.js --save-amount 1000000000 --save-label "My fund"
 | `--open-dashboards` | `true` | Open only the supervisor and active daemon logs once per PID; `false` also disables layout |
 | `--dashboard-layout` | `auto` | Fit the two logs side by side with readable text and bounded height; `none` preserves position, size, and font |
 | `--go-takeover` | `true` | Finish an existing ordinary IPvGO board on startup; set false when playing manually |
+| `--gangs` | `true` | Supervise gang creation and member management in BN2 or with SF2 |
+| `--gang-faction` | `auto` | Create from joined NiteSec, then The Black Hand; a named eligible gang faction selects creation instead; existing gangs are retained |
+| `--gang-budget` | `0.05` | Fraction of unprotected cash added to gear allowance each management interval; unused allowance accumulates up to current surplus; 0 disables purchases |
+| `--gang-karma` | `true` | Build gang karma with sleeves and bounded player crime; requires gangs enabled; player crime also needs route/work enabled |
+| `--sleeves` | `true` | Manage sleeve tasks in BN10 or with SF10 |
+| `--sleeve-budget` | `0.02` | Fraction of surplus available for one optional sleeve purchase per minute; 0 disables; maximum 0.1 |
 | `--diagnostics` | `true` | Run `doctor.js` once at startup; show warnings |
 | `--augmentations` | `true` | Refresh advice about once a minute; requires BN4 or SF4 level 1+ |
 | `--augmentation-focus` | `hacking` | `hacking` or `all` |
@@ -180,8 +191,8 @@ crawler reports `WAIT` until its heartbeat arrives; missing heartbeats, exited
 crawlers, and zero active agents report `BLOCKED`. The detailed report retains the
 last agent error and counts home crawler restarts during this manager run.
 After syncing dashboard changes, use `run supervisor-restart.js` to reload the
-supervisor, daemon, fleet manager, progression reader, and augmentation manager on their current home/cloud hosts while preserving saved supervisor flags.
-The progression and augmentation managers retain their current arguments and thread count.
+supervisor, daemon, fleet manager, progression reader, augmentation manager, and gang manager on their current home/cloud hosts while preserving saved supervisor flags.
+The progression, augmentation, and gang managers retain their current arguments and thread count.
 The helper stops the supervisor first so its old controllers cannot be adopted
 or respawned during reload. Other services and unrelated scripts keep running.
 
@@ -284,8 +295,11 @@ run augmentation-planner.js --target "BitWire" --save-goal
 **Requires BN4 or SF4 level 1+ (Singularity).** Looks at joined factions, removes owned/purchased items,
 expands prerequisite chains, compares seller acquisition ETA (work, cash, favor and
 donations), and builds an affordable basket. Unknown rates fall back to reputation
-gap and favor. Once The Red Pill is available, the plan
-focuses on it and its prerequisites; once purchased, the automatic basket is empty.
+gap and favor. The Red Pill normally becomes the progression target once available.
+When its seller is the gang and reputation is still insufficient, the automatic
+plan keeps useful upgrades eligible while gang reputation grows. The gang route
+also bypasses Daedalus's $100b invitation savings and distinct-augmentation count.
+Once The Red Pill is purchased, the automatic basket is empty.
 Earlier, it scores economy, faction reputation, skill/XP, and distinct-count progress
 against the shared bottleneck. Those progression/support upgrades are included in
 the default hacking focus; `--target` remains an explicit override. NeuroFlux is
@@ -386,7 +400,8 @@ servers and scripts. Normal completion restores the saved supervisor settings.
 The controller also acquires factions, trains hacking, upgrades starter home
 RAM, and follows BNx.1 -> BNx.2 -> BNx.3 for every BitNode x when Singularity
 is available. It restores automation after each transition; the third-run exit
-waits for your subsequent node choice. INT farming follows
+waits for your subsequent node choice, except BN10: its third clear awards SF10.3
+and re-enters BN10 without a callback, leaving all automation stopped. INT farming follows
 capabilities across nodes. See the guide for persistent faction prerequisites,
 reset effects and manual extra sessions. Other BitNodes may still require
 dedicated automation for their node-specific completion mechanics.

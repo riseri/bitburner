@@ -1,5 +1,6 @@
 // Every BitNode repeats through its third run. Source-File ownership records
-// completed runs; after the third run, wait for the user's next destination.
+// completed runs. BN10 also clears the third run and parks without a callback;
+// other nodes wait at the third-run exit for the user's next destination.
 export function bn4Route(reset) {
     const level = Number(reset.ownedSF?.get?.(4) ?? 0);
     return reset.currentNode === 4 && level < 3;
@@ -7,7 +8,14 @@ export function bn4Route(reset) {
 
 export function nextRouteNode(reset) {
     const node = reset.currentNode, level = Number(reset.ownedSF?.get?.(node) ?? 0);
-    return Number.isSafeInteger(node) && node > 0 && Number.isSafeInteger(level) && level >= 0 && level < 2 ? node : null;
+    return Number.isSafeInteger(node) && node > 0 && Number.isSafeInteger(level) && level >= 0 &&
+        level < (node === 10 ? 3 : 2) ? node : null;
+}
+
+// SF rewards are granted on entry, not at the BitVerse screen. The final BN10
+// transition awards SF10.3 and parks in BN10 without starting another run.
+export function routeStopsAfterClear(reset) {
+    return reset.currentNode === 10 && Number(reset.ownedSF?.get?.(10)) === 2;
 }
 
 export function routeCities(factions, selected = "") {

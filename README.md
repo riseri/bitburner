@@ -1,7 +1,7 @@
 # Bitburner automation
 
 Start one supervisor to manage hacking, server purchases, contracts, stocks,
-IPvGO, and Darknet exploration. It also shows progression and augmentation advice,
+IPvGO, gangs, sleeves, and Darknet exploration. It also shows progression and augmentation advice,
 with automatic purchases and augmentation installation whenever the required APIs
 are available.
 
@@ -81,6 +81,11 @@ logs open automatically.
 
 ## Automation settings
 
+**BN10.1–BN10.3:** sleeve management and gang-karma automation are enabled by
+default. The first two clears restart supervision; the third awards SF10.3,
+re-enters BN10, and leaves all scripts stopped. See the [BN10 guide](docs/bn10.md)
+for bootstrap, spending and task priorities.
+
 **`run supervisor.js` enables available automation. There are no profiles.**
 Programs, faction backdoors, faction work, donations, and augmentation purchases
 activate when Singularity is available (current BN4 or SF4 level 1+). Locked
@@ -134,6 +139,31 @@ Service toggles remain available, such as `--stocks false` or
 is not a purchase-only mode: a running augmentation service always installs.
 Fleet and stock services may spend money whenever enabled.
 
+### Unattended BN2 progression
+
+Gang automation is enabled by default in BN2 or with SF2. It creates a hacking gang
+from joined NiteSec or The Black Hand, in that order, or manages your
+existing hacking or combat gang. Recruitment, member training, task selection,
+wanted control, ascension and equipment purchases run independently of player
+work. Territory warfare stays disabled. A bounded training rotation builds
+ascension experience even after equipment raises members' displayed skills.
+Equipment allowance accrues at 5% of unprotected cash per management interval;
+unused allowance can fund larger items while shared savings remain protected.
+
+**Unattended faction joining, augmentation purchases, installation and BitNode
+transitions in BN2 require SF4 level 1+.** With that access and default progression
+settings, the existing hacking/backdoor route can unlock a hacking gang. Gang
+management itself does not require Singularity. Outside BN2, sleeves and bounded
+player crime build the required karma while ordinary augmentation progression
+continues. Use `--gang-karma false` to disable that policy.
+
+When your gang offers The Red Pill, progression uses that route without first
+saving $100b or collecting 30 augmentations for Daedalus. Useful upgrades remain
+eligible while gang reputation grows; an explicit augmentation target still takes
+precedence. Gangs survive augmentation installations and are recreated after
+BitNode transitions. Use `--gangs false` to disable supervision, or see
+[gang automation](docs/gangs.md) for faction and budget settings.
+
 ### Upgrading from profiles
 
 Sync all files, including `lib`. To adopt the new defaults, stop the old supervisor
@@ -145,7 +175,7 @@ run supervisor.js
 
 Other managers can remain running and be adopted. A running process keeps its old
 code until restarted. `supervisor-restart.js` reloads the supervisor, daemon,
-fleet manager, progression reader, and augmentation manager on their current home/cloud hosts with the saved settings:
+fleet manager, progression reader, augmentation manager, and gang manager on their current home/cloud hosts with the saved settings:
 old profiles are converted to explicit service toggles, preserving disabled
 services. Saved `--auto-install` arguments are removed. An old `assist` setup
 therefore installs automatically once the new augmentation manager is running.
@@ -259,9 +289,10 @@ On `home`, run:
 run supervisor-restart.js
 ```
 
-This reloads the supervisor, daemon, fleet manager, progression reader, and
-augmentation manager with saved settings. Both managers retain their current arguments and thread
-count. Other managers keep running and are adopted again; their code is reloaded
+This reloads the supervisor, daemon, fleet manager, progression reader,
+augmentation manager, and gang manager with saved settings. The progression,
+augmentation, and gang managers retain their current arguments and thread count.
+Other managers keep running and are adopted again; their code is reloaded
 when their own processes restart.
 
 For Darknet coordinator updates, use `run darknet-restart.js` while the supervisor
@@ -334,9 +365,11 @@ planner remains available for inspection and fallback. See
 capability limits, and validation.
 
 The advisor reserves the $100b Daedalus invitation balance only once the
-augmentation and skill requirements are met. After joining, it switches to The
-Red Pill when a price is known. The augmentation plan prioritizes The Red Pill
-once available; explicit augmentation targets still override the plan.
+augmentation and skill requirements are met and no joined gang supplies The Red
+Pill. After joining Daedalus, it switches to The Red Pill when a price is known.
+For a gang seller, useful upgrades remain eligible while reputation grows; The
+Red Pill takes priority once its reputation requirement is met. Explicit
+augmentation targets still override the plan.
 
 The supervisor automatically runs one bounded INT farming session per BitNode
 when Singularity (BN4 or SF4), INT (BN5 or SF5), a persistent faction, and enough

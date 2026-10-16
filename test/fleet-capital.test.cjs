@@ -31,6 +31,14 @@ function fixture() {
     return {clock,ns,world,cfg,state,savings,fleet,supervisor,reader,status,policy,goal,scheduler,objective,reset,actions,copies};
 }
 
+test('a capped cloud fleet reports its hard limit instead of requesting affordable upgrades', async () => {
+    const f = fixture(); f.world.names = ['cloud-00', 'cloud-01']; f.world.cash = 614e12;
+    f.ns.getServerMaxRam = () => 64;
+    await f.fleet.manageOneCloudAction(f.ns, f.cfg, f.state);
+    assert.match(f.state.investment, /server count and size caps/);
+    assert.equal(f.state.capitalRequest, null); assert.equal(f.actions.length, 0);
+});
+
 test('an actual BN5 augmentation observation with five installed and zero queued permits fleet purchases', async () => {
     const f = fixture(), api = loadScript('augmentation-manager.js', f.clock);
     f.reset.currentNode = 5; f.reset.ownedSF = new Map([[4, 3], [5, 1]]);
@@ -119,6 +127,26 @@ test('fleet request authentication rejects stale epochs, timestamps and producer
         const status=f.status();status.cloud.capitalRequest={...status.cloud.capitalRequest,...patch};
         assert.equal(f.reader.readFleetCapitalRequest(f.ns,status),null);
     }
+});
+
+test('cloud-hosted fleet requests authenticate and can accelerate a critical home upgrade', async () => {
+    const f = fixture(); f.world.names = ['cloud-00']; f.world.cash = 16000; f.cfg.cloud.minRam = 32;
+    f.ns.scan = host => host === 'home' ? ['core'] : ['home'];
+    f.ns.ps = host => host === 'core' ? [{ pid: 9, filename: 'fleet-manager.js' }]
+        : [{ pid: 7, filename: 'daemon.js' }, { pid: 10, filename: 'augmentation-manager.js' }];
+    f.scheduler({ usedRam: 80, totalRam: 90, pipelines: [{ mode: 'LIVE', modelBatchRate: 1, running: 30, queued: 20, warmupMs: 10000 }] });
+    await f.savings.writeSavings(f.ns, 1e7, 'Critical home RAM', 'home:ram', 'supervisor');
+    await f.fleet.manageOneCloudAction(f.ns, f.cfg, f.state);
+    assert.ok(f.reader.readFleetCapitalRequest(f.ns, f.status()));
+    await f.supervisor.updateSupervisorSavings(f.ns, { ...f.policy,
+        homeInvestment: { amount: 1e7, target: 'home:ram', priority: 90, label: 'Critical home RAM' } }, null, null, null, f.status());
+    assert.equal(f.goal().target, 'fleet:new:32');
+    assert.match(f.goal().label, /Cloud/);
+    assert.equal(f.state.capitalRequest.priority, 79, 'arbitration must not mutate the producer report');
+    await f.fleet.manageOneCloudAction(f.ns, f.cfg, f.state);
+    assert.deepEqual(f.actions, [['buy', 'cloud-01', 32]]);
+    f.ns.ps = () => [];
+    assert.equal(f.reader.readFleetCapitalRequest(f.ns, f.status()), null, 'remote producer must still be alive');
 });
 
 test('first purchase and ROI-disabled purchases still respect impending resets', async()=>{

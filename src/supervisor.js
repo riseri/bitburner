@@ -32,6 +32,8 @@ const STOCK_TRADER = "stock-trader.js";
 const GO_BOT = "go-bot.js";
 const AUGMENTATION_MANAGER = "augmentation-manager.js";
 const DARKNET_MANAGER = "darknet-manager.js";
+const GANG_MANAGER = "gang-manager.js";
+const SLEEVE_MANAGER = "sleeve-manager.js";
 const CONTRACT_SELFTEST = "contract-selftest.js";
 
 /** @param {NS} ns */
@@ -45,6 +47,8 @@ export async function main(ns) {
 		["open-dashboards", true],
 		["dashboard-layout", "auto"],
 		["contracts", true],
+		["gangs", true], ["gang-faction", "auto"], ["gang-budget", 0.05],
+		["sleeves", true], ["sleeve-budget", 0.02], ["gang-karma", true],
 		["progression", true],
 		["progression-actions", ACTION_DEFAULTS["progression-actions"]],
 		["progression-cash-reserve", 0.10],
@@ -142,6 +146,8 @@ export async function main(ns) {
 		// A property named share is charged as the worker API by the RAM analyzer.
 		shareEnabled: asBoolean(flags["share"]),
 		contracts: asBoolean(flags.contracts),
+		gangs: asBoolean(flags.gangs), gangFaction: String(flags["gang-faction"]), gangBudget: Number(flags["gang-budget"]),
+		sleeves: asBoolean(flags.sleeves), sleeveBudget: Number(flags["sleeve-budget"]), gangKarma: asBoolean(flags["gang-karma"]),
 		progression: asBoolean(flags.progression),
 		progressionActions: asBoolean(flags["progression-actions"]),
 		progressionCashReserve: clampFraction(flags["progression-cash-reserve"]),
@@ -228,6 +234,14 @@ export async function main(ns) {
 				blockCapabilityService(service, "Singularity is locked");
 				continue;
 			}
+			if (service.name === GANG_MANAGER && !capabilities.gang && !findProcess(ns, service.name)) {
+				blockCapabilityService(service, "Gang API requires BN2 or SF2");
+				continue;
+			}
+			if (service.name === SLEEVE_MANAGER && !capabilities.sleeves && !findProcess(ns, service.name)) {
+				blockCapabilityService(service, "Sleeve API requires BN10 or SF10");
+				continue;
+			}
 			if (service.name === DARKNET_MANAGER && !capabilities.darknet && !findProcess(ns, service.name)) {
 				blockCapabilityService(service, "DarkscapeNavigator.exe is locked");
 				continue;
@@ -276,7 +290,9 @@ export async function main(ns) {
 		const fleetStatus = snapshot(FLEET), contractStatus = snapshot(CONTRACTS),
 			progressionStatus = snapshot(PROGRESSION), stockStatus = snapshot(STOCK_TRADER),
 			goStatus = ownedServiceStatus(ns, services.find(service => service.name === GO_BOT), snapshot(GO_BOT)),
-			augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER);
+			augmentationStatus = snapshot(AUGMENTATION_MANAGER), darknetStatus = snapshot(DARKNET_MANAGER),
+			gangStatus = ownedServiceStatus(ns, services.find(service => service.name === GANG_MANAGER), snapshot(GANG_MANAGER)),
+			sleeveStatus = ownedServiceStatus(ns, services.find(service => service.name === SLEEVE_MANAGER), snapshot(SLEEVE_MANAGER));
 		try { await updateSupervisorSavings(ns, cfg, cfg.augmentationPlan, progressionStatus, augmentationStatus, fleetStatus); }
 		catch (error) { cfg.savingsStatus = `Savings update failed: ${String(error.message || error)}`; }
         await tickHomeServiceUpgrade(ns, cfg, capabilities, services, jobs, actions, upgradeHosts);
@@ -299,7 +315,7 @@ export async function main(ns) {
 		if (telemetry) await recordTelemetry(ns, telemetry, cfg.fleetStatusPort);
 		cfg.telemetryError = telemetry?.error || "";
 		if (telemetry) cfg.telemetrySummary = summarizeTelemetry(telemetry.samples, Date.now() - 3600000);
-		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, darknetStatus, stockAccess: stockGate });
+		render(ns, { cfg, services, actions, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, darknetStatus, gangStatus, sleeveStatus, stockAccess: stockGate });
 		await ns.sleep(cfg.interval);
 		finishDashboardLayout(ns, dashboardUi);
 	}
@@ -327,7 +343,11 @@ function tickServicePriority(ns, services, blockedBy = "", reserveRam = 0, actor
 			hostBlockers.set(host, blocker);
 			continue;
 		}
-		if (hostBlockers.has(host)) {
+		// A contract scan can fund the upgrade that admits progression services. It may
+		// borrow idle home RAM and is already preemptible when admission fits.
+		const bootstrapContracts = service.name === CONTRACTS && host === HOME &&
+			[SLEEVE_MANAGER, GANG_MANAGER, AUGMENTATION_MANAGER].some(name => hostBlockers.get(host)?.startsWith(`${name} needs `));
+		if (hostBlockers.has(host) && !bootstrapContracts) {
 			service.state = "WAITING_PRIORITY";
 			service.waitReason = hostBlockers.get(host);
 			continue;
@@ -589,10 +609,15 @@ function createManagedServices(ns, cfg, daemonArgs) {
 	};
 	const services = [managed(DAEMON, launchDaemonArgs), managed(FLEET, fleetArgs, fleetPort)];
 	if (cfg.progression) services.push(managed(PROGRESSION, ["--fleet-port", fleetPort, "--darknet", cfg.darknet !== false]));
+	if (cfg.sleeves) services.push(managed(SLEEVE_MANAGER, ["--port", PORTS.SLEEVE_STATUS,
+		"--karma", Boolean(cfg.gangs && cfg.gangKarma), "--budget", cfg.sleeveBudget ?? .02]));
+	if (cfg.gangs) services.push(managed(GANG_MANAGER, ["--port", PORTS.GANG_STATUS,
+		"--faction", cfg.gangFaction || "auto", "--budget", cfg.gangBudget ?? 0.05]));
 	if (cfg.augmentationActions) services.push(managed(AUGMENTATION_MANAGER,
 		["--price-multiplier", cfg.augmentationMultiplier || 0, "--port", PORTS.AUGMENTATION_STATUS, "--focus", cfg.augmentationFocus, "--target", cfg.augmentationTarget,
 			"--cash-reserve", cfg.augmentationCashReserve, "--join-factions", cfg.augmentationJoinFactions,
 			"--city-faction", cfg.augmentationCityFaction, "--work", cfg.augmentationWork,
+			"--gang-karma", Boolean(cfg.gangs && cfg.gangKarma),
 			"--donate", cfg.augmentationDonate ?? true,
 			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
 			"--min-install", cfg.minInstall, "--reset-policy", cfg.resetPolicy || "auto", "--route", cfg.progression && cfg.progressionActions,
@@ -727,7 +752,7 @@ function render(ns, state) {
 }
 
 function renderSupervisorFrame(ns, state) {
-	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, darknetStatus, fleetHealth, contractHealth, progressionHealth } = state;
+	const { cfg, fleetStatus, contractStatus, progressionStatus, stockStatus, goStatus, augmentationStatus, darknetStatus, gangStatus, fleetHealth, contractHealth, progressionHealth } = state;
 	const daemon = readDaemonDashboard(ns);
 	const fleet = fleetStatus?.type === "fleet-status" ? fleetStatus : null;
 	const contracts = contractStatus?.type === "contract-status" ? contractStatus : null;
@@ -738,6 +763,7 @@ function renderSupervisorFrame(ns, state) {
 	const go = goStatus?.type === "go-status" ? goStatus : null;
 	const augmentation = augmentationStatus?.type === "augmentation-status" ? augmentationStatus : null;
 	const darknet = darknetStatus?.type === "darknet-status" ? darknetStatus : null;
+	const gang = gangStatus?.type === "gang-status" ? gangStatus : null;
 
 	ns.clearLog();
 	dashboardTitle(ns, "BITBURNER AUTOMATION");
@@ -747,8 +773,8 @@ function renderSupervisorFrame(ns, state) {
 			services: state.services, stockAccess: state.stockAccess });
 		renderOverview(ns, daemon, fleet, cfg.shareStatus);
 		renderNextSteps(ns, { cfg, goal, progression, augmentation, actions: state.actions });
-		renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet,
-			services: state.services, stockAccess: state.stockAccess });
+		renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet, gang,
+			sleeves: state.sleeveStatus, services: state.services, stockAccess: state.stockAccess });
 		ns.print("  More detail: restart with --dashboard-details true");
 		return;
 	}
@@ -809,6 +835,8 @@ function renderSupervisorFrame(ns, state) {
 	renderContracts(ns, contracts, cfg);
 	renderProgression(ns, progression, cfg, state.actions);
 	renderAugmentationLoop(ns, augmentation, cfg);
+	renderGang(ns, gang, cfg);
+	renderSleeves(ns, state.sleeveStatus, cfg);
 	renderGoStatus(ns, go, cfg, state.services);
 	renderDarknet(ns, darknet, cfg);
 	dashboardSection(ns, "Services");
@@ -945,7 +973,7 @@ function renderNextSteps(ns, { cfg, goal, progression, augmentation, actions }) 
 	for (const [label, value] of entries) row(label, value);
 }
 
-function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet, services, stockAccess }) {
+function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, progression, go, augmentation, darknet, gang, sleeves, services, stockAccess }) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	const status = (state, value) => `[${state}] ${value}`;
 	const managed = name => services?.find(service => service.name === name);
@@ -965,6 +993,15 @@ function renderAutomationSummary(ns, { cfg, daemon, fleet, stocks, contracts, pr
 	else {
 		row("3 Progression", status("OK", `${Number(progression.programsOwned) || 0}/${Number(progression.programsTotal) || 0} programs | ${Number(progression.backdoorsInstalled) || 0}/${Number(progression.backdoorsTotal) || 0} backdoors`));
 	}
+
+	if (!cfg.gangs) row("Gangs", status("OFF", "disabled by setting"));
+	else if (!gang) row("Gangs", waiting(GANG_MANAGER, "waiting for gang status"));
+	else row("Gangs", status(gang.state || "WAIT", gang.inGang
+		? `${gang.faction} | ${gang.memberCount || 0}/12 members | ${cash(gang.incomePerSecond || 0)}/s`
+		: gang.recommendation || "waiting for an eligible faction"));
+	if (gang?.error) row("Gang issue", gang.error);
+	if (cfg.sleeves) row("Sleeves", sleeves ? status(sleeves.state, `${sleeves.count || 0} | ${sleeves.recommendation}`)
+		: waiting(SLEEVE_MANAGER, "waiting for sleeve status"));
 
 	if (cfg.augmentationActions) row("4 Aug loop", augmentation
 		? status(augmentation.error ? "BLOCKED" : "OK", `${augmentation.state} / ${augmentation.phase || "WAIT"} | ${augmentation.action || augmentation.recommendation || "waiting"}`)
@@ -1224,7 +1261,7 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
     if (augmentation.progression) {
         const p = augmentation.progression;
         row("Objective", p.milestone + " | limited by " + p.limitingResource);
-        row("Installed distinct", p.installedCount + " / " + p.countRequired + " | queued distinct " + p.queuedDistinct.length);
+        row("Installed distinct", p.installedCount + (p.gangRoute ? " | gang route (no count requirement)" : " / " + p.countRequired) + " | queued distinct " + p.queuedDistinct.length);
         if (p.installDecision) row("Install / wait", p.installDecision);
         if (p.selectedPlan?.next) row("Selected", p.selectedPlan.next.name + " from " + p.selectedPlan.next.faction + " | " +
             (p.selectedPlan.next.progressionStrategy || p.reputationStrategy || "NONE") + " | " + (p.selectedPlan.next.explanation || ""));
@@ -1235,8 +1272,8 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         row("Endgame policy", augmentation.endgame.reason);
         const xp = augmentation.endgame.xp;
         if (xp) row("Reset XP rate", Number.isFinite(xp.rate) && xp.rate > 0
-            ? `${xp.rate.toExponential(2)}/s | ${xp.source}`
-            : `${xp.source} | ${xp.samples}/${xp.requiredSamples} stable ${xp.sampleMs / 1000}s windows`);
+            ? `${xp.rate.toExponential(2)}/s | ${xp.source}${xp.observedMs ? ` over ${dashboardTime(xp.observedMs)}` : ""}`
+            : `${xp.source} | ${xp.samples}/${xp.requiredSamples} collected windows; ${dashboardTime(xp.observedMs)} observed`);
         const quote = augmentation.endgame.quote;
         if (quote) row("Upgrade quote", `${quote.neurofluxLevels} NeuroFlux levels | ${quote.augmentations.length} other upgrades | ${cash(quote.cost)} estimated`);
         if (Number.isFinite(augmentation.endgame.neurofluxQueued)) row("NeuroFlux", `${augmentation.endgame.neurofluxQueued} queued levels`);
@@ -1256,7 +1293,8 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         dashboardSection(ns, "Reset decision");
         row("Decision", `${d.action}${d.action === "FALLBACK" ? " -> " + d.fallback.action : ""} | confidence ${d.confidence}`);
         row("Recovery", dashboardTime(d.recoveryMs));
-        if (d.recoverySource) row("Recovery model", d.recoverySource === "conservative" ? "Conservative 24h allowance; zero recovered XP" : "Measured augmentation-reset history");
+        if (d.recoverySource) row("Recovery model", d.recoverySource === "conservative" ? "Conservative 24h allowance; zero recovered XP"
+            : d.recoverySource === "current-run" ? "Productive run age +25%; zero recovered XP (allowance)" : "Measured augmentation-reset history");
         const benefit = n => Number.isFinite(n) ? `${n.toFixed(2)}x` : "unknown";
         row("Current package", `${benefit(d.installNow.packageBenefit)} relevant benefit | break-even ${dashboardTime(d.installNow.breakEvenMs)}`);
         row("Install now", `${dashboardTime(d.installNow.etaMs)} projected | residual loss ${dashboardTime(d.installNow.lostProgressMs)}`);
@@ -1470,6 +1508,37 @@ function stripPrefix(line) {
 		.trimStart();
 }
 
+function renderGang(ns, gang, cfg) {
+	dashboardSection(ns, "Gang");
+	const row = (label, value) => dashboardRow(ns, label, value);
+	if (!cfg.gangs) { row("Status", "Disabled"); return; }
+	if (!gang) { row("Status", "Waiting; requires BN2 or SF2 and home RAM"); return; }
+	row("Status", `${gang.state || "WAITING"} | ${gang.recommendation || gang.faction || "waiting"}`);
+	if (gang.inGang) {
+		row("Members", `${gang.memberCount || 0}/12 | ${gang.isHacking ? "hacking" : "combat"}`);
+		row("Income", `${cash(gang.incomePerSecond || 0)}/s`);
+		row("Respect rate", `${Number(gang.respectPerSecond || 0).toPrecision(3)}/s`);
+		if (gang.tasks) row("Tasks", Object.entries(gang.tasks).map(([name, count]) => `${count} ${name}`).join(" | "));
+		if (gang.ascensionRange?.length === 2) row("Ascension", `${gang.ascensionRange[0].toFixed(2)}x–${gang.ascensionRange[1].toFixed(2)}x main skills`);
+		if (gang.growthReason) row("Growth", `${gang.growthMembers?.length || 0} growth trainees | ${gang.growthReason}`);
+		if (Number.isFinite(gang.equipmentBudget)) row("Gear allowance", cash(gang.equipmentBudget));
+		if (gang.actions?.length) row("Recent actions", gang.actions.join(" | "));
+		row("Wanted penalty", `${(100 * Number(gang.wantedPenalty ?? 1)).toFixed(1)}% production retained`);
+		row("Warfare", "Disabled");
+	}
+	if (gang.error) row("Warning", gang.error);
+}
+
+function renderSleeves(ns, status, cfg) {
+    if (!cfg.sleeves) return;
+    dashboardSection(ns, "Sleeves");
+    dashboardRow(ns, "Status", status ? `${status.state} | ${status.recommendation}` : "Waiting; requires BN10 or SF10 and home RAM");
+    if (!status) return;
+    if (Number.isFinite(status.karma)) dashboardRow(ns, "Gang karma", `${Math.round(status.karma)} / -54000 | ${Number(status.karmaPerSecond || 0).toFixed(3)}/s from sleeves`);
+    for (const sleeve of status.sleeves || []) dashboardRow(ns, `Sleeve ${sleeve.index}`,
+        `${sleeve.task?.crimeType || sleeve.task?.factionName || sleeve.task?.classType || sleeve.task?.type || "IDLE"} | shock ${sleeve.shock.toFixed(1)} | sync ${sleeve.sync.toFixed(1)} | memory ${sleeve.memory}${sleeve.error ? " | " + sleeve.error : ""}`);
+}
+
 function renderDarknet(ns, darknet, cfg) {
 	const row = (label, value) => dashboardRow(ns, label, value);
 	dashboardSection(ns, "Darknet");
@@ -1611,7 +1680,9 @@ function augmentationAccess(ns) {
 function supervisorCapabilities(ns, stockGate = stockAccess(ns)) {
 	const reset = ns.getResetInfo(), singularity = singularityAvailable(reset);
 	return { route: singularity && nextRouteNode(reset) !== null, singularity,
-		intelligence: intelligenceAvailable(reset), darknet: darknetAccess(ns), stocks: stockGate.ok };
+		intelligence: intelligenceAvailable(reset), gang: reset.currentNode === 2 || Number(reset.ownedSF?.get?.(2)) > 0,
+		sleeves: reset.currentNode === 10 || Number(reset.ownedSF?.get?.(10)) > 0,
+		darknet: darknetAccess(ns), stocks: stockGate.ok };
 }
 
 function createSupervisorUtilities(cfg) {
@@ -1669,6 +1740,9 @@ function layoutDashboard(ns, pid, column) {
 
 function validateSupervisorOptions(flags, cfg) {
     intelligencePolicy(cfg);
+	if (!Number.isFinite(cfg.gangBudget) || cfg.gangBudget < 0 || cfg.gangBudget > 1) throw new Error("gang-budget must be a fraction from 0 to 1");
+	if (!["auto", "NiteSec", "The Black Hand", "Slum Snakes", "Tetrads", "The Syndicate", "The Dark Army", "Speakers for the Dead"].includes(cfg.gangFaction))
+		throw new Error("gang-faction must be auto or a gang-capable faction");
 	schedulerLimit(cfg.maxBatchRate, "batch");
 	schedulerLimit(cfg.maxLaunches, "launch");
 	if (cfg.dashboardLayout !== undefined && !["auto", "none"].includes(cfg.dashboardLayout)) throw new Error("dashboard-layout must be auto or none");
@@ -1677,6 +1751,7 @@ function validateSupervisorOptions(flags, cfg) {
 	if (!Number.isFinite(amount) || amount < -1 || (amount < 0 && amount !== -1)) throw new Error("save-amount must be nonnegative or -1 (unset)");
 	if (amount >= 0 && !["auto", "keep"].includes(String(flags.savings))) throw new Error("Use save-amount or an automatic savings mode, not both");
 	if (!["hacking", "all"].includes(cfg.augmentationFocus)) throw new Error("augmentation-focus must be hacking or all");
+	if (!Number.isFinite(cfg.sleeveBudget) || cfg.sleeveBudget < 0 || cfg.sleeveBudget > .1) throw new Error("sleeve-budget must be between 0 and 0.1");
 	if (!Number.isFinite(cfg.augmentationMultiplier) || cfg.augmentationMultiplier !== 0 && cfg.augmentationMultiplier < 1) throw new Error("augmentation-price-multiplier must be 0 (automatic) or at least 1");
 	if (!Number.isFinite(cfg.cloudPayback) || cfg.cloudPayback <= 0) throw new Error("cloud-payback must be positive");
     if (cfg.cloudMinRam !== undefined && (!Number.isSafeInteger(cfg.cloudMinRam) || cfg.cloudMinRam < 2 || !Number.isInteger(Math.log2(cfg.cloudMinRam))))
@@ -1730,7 +1805,7 @@ async function tickHomeServiceUpgrade(ns, cfg, capabilities, services, jobs, act
 }
 
 function progressionRamBlocked(services, actions = null) {
-    return services.some(s => [FLEET, PROGRESSION, AUGMENTATION_MANAGER].includes(s.name) &&
+    return services.some(s => [FLEET, PROGRESSION, SLEEVE_MANAGER, GANG_MANAGER, AUGMENTATION_MANAGER].includes(s.name) &&
         ["WAITING_RAM", "WAITING_PRIORITY"].includes(s.state)) ||
         Boolean(!actions?.active && actions?.current?.state === "waiting" &&
             actions.diagnostics?.some(item => item.state === "waiting" && item.reason.includes("WAITING_RAM")));

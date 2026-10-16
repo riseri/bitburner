@@ -1,4 +1,5 @@
 import { resetEpoch } from "lib/progression-protocol.js";
+import { serviceProcesses } from "lib/service-hosts.js";
 
 export function fleetInvestmentTarget(candidate) {
     return `fleet:${candidate.name || "new"}:${candidate.ram}`;
@@ -15,7 +16,7 @@ export function readFleetCapitalRequest(ns, status, now = Date.now()) {
             !Number.isFinite(request.amount) || request.amount <= 0 || request.priority !== 79 ||
             !Number.isFinite(request.generatedAt) || request.generatedAt > now || now - request.generatedAt > 15000 ||
             !Number.isFinite(status.generatedAt) || status.generatedAt > now || now - status.generatedAt > 15000 ||
-            !ns.ps("home").some(p => p.pid === request.producerPid && p.filename === "fleet-manager.js")) return null;
+            !serviceProcesses(ns, "fleet-manager.js").some(p => p.pid === request.producerPid)) return null;
         return request;
     } catch { return null; }
 }

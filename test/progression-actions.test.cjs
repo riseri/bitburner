@@ -33,12 +33,36 @@ function fixture() {
     ports.get(19).write({type:'fleet-status',generatedAt:clock.now,network:{parents}});
     function prepare(kind='backdoor',target='CSEC',overrides={}) {
         const request={...protocol.createRequest(ns,plan,{kind,target},.1,1),...overrides};
-        const filename=kind==='backdoor'?'progression-backdoor.js':'progression-purchase.js';
+        const filename=kind==='backdoor'?'progression-backdoor.js':kind==='join-faction'?'progression-join.js':'progression-purchase.js';
         processes.set(100,{pid:100,filename,args:[JSON.stringify(request)],threads:1});
         ports.get(14).clear();ports.get(14).write({type:'progression-action',request,state:'pending',actorPid:100});
         return {request,actor:{...ns,pid:100,args:[JSON.stringify(request)]},api:loadScript(filename,clock)};
     }
     return {clock,protocol,dispatch,manager,ports,processes,reset,world,parents,launched,connections,purchases,ns,cfg,plan,prepare};
+}
+
+for (const guard of ['missing-invitation', 'reset-changed', 'expired', 'disallowed-faction', 'owner-exited']) {
+    test(`bootstrap faction join rechecks ${guard} without spending or changing work`, async () => {
+        const f = fixture(), joined = [];
+        f.ns.singularity.checkFactionInvitations = () => guard === 'missing-invitation' ? [] : ['NiteSec'];
+        f.ns.singularity.joinFaction = name => { joined.push(name); return true; };
+        const job = f.prepare('join-faction', guard === 'disallowed-faction' ? 'Sector-12' : 'NiteSec');
+        if (guard === 'reset-changed') f.reset.lastAugReset++;
+        if (guard === 'expired') f.clock.now += 16000;
+        if (guard === 'owner-exited') f.processes.delete(1);
+        await job.api.main(job.actor);
+        assert.deepEqual(joined, []); assert.deepEqual(f.purchases, []); assert.deepEqual(f.connections, []);
+        assert.equal(f.ports.get(14).peek().state, 'blocked');
+    });
+}
+
+for (const option of ['augmentationActions', 'augmentationJoinFactions', 'progressionActions']) {
+    test(`bootstrap faction join respects disabled ${option}`, () => {
+        const f = fixture(); f.cfg[option] = false;
+        f.plan.objectives = [{ kind: 'join-faction', target: 'NiteSec', ready: true, costEstimate: 0 }];
+        f.dispatch.tickProgressionActions(f.ns, f.dispatch.createActionState(), f.plan, f.cfg);
+        assert.equal(f.launched.length, 0);
+    });
 }
 
 test('shared savings defers an unrelated purchase but still allows an independent backdoor', () => {

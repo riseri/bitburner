@@ -87,7 +87,8 @@ export function goProgressionContext(objective, jit, now = Date.now()) {
     const cashNeeded = active && (objective.limitingResource === "cash" || goPositive(objective.remainingCash) !== null);
     const hackingNeeded = active && (objective.limitingResource === "hacking" ||
         (goPositive(objective.requiredHacking) !== null && goNonnegative(objective.currentHacking) !== null && objective.currentHacking < objective.requiredHacking));
-    const repNeeded = active && objective.reputationStrategy === "WORK" && objective.limitingResource === "reputation";
+    const passiveRep = objective?.reputationStrategy === "PASSIVE" && next?.passiveReputation === true;
+    const repNeeded = active && (objective.reputationStrategy === "WORK" || passiveRep) && objective.limitingResource === "reputation";
     const income = goPositive(jit?.income60), cashRate = goPositive(b?.cashRate) || income;
     const cashEtaMs = !cashNeeded ? 0 : goNonnegative(b?.cashEtaMs) ??
         (goNonnegative(objective?.remainingCash) !== null && income ? objective.remainingCash / income * 1000 : null);
@@ -97,7 +98,7 @@ export function goProgressionContext(objective, jit, now = Date.now()) {
     const scriptFraction = b?.xpSource === "measured" && goPositive(b.xpRate) && goNonnegative(b.scriptXpRate) !== null
         ? Math.min(1, b.scriptXpRate / b.xpRate) : null;
     const repRate = goPositive(next?.rate), repGap = goNonnegative(next?.repGap);
-    const repEtaMs = !repNeeded ? 0 : repRate && repGap !== null && next.workActive !== false ? repGap / repRate * 1000 : null;
+    const repEtaMs = !repNeeded ? 0 : repRate && repGap !== null && (passiveRep || next.workActive !== false) ? repGap / repRate * 1000 : null;
     const speed = goCashSpeedCapacity(jit);
     const scriptRunning = jit?.policy?.xp?.state === "RUNNING";
     const c = goCapacity(jit);
@@ -108,11 +109,11 @@ export function goProgressionContext(objective, jit, now = Date.now()) {
     if (hackingNeeded || cashNeeded && (!speed.known || speed.usable)) candidates.push("Illuminati");
     if (repNeeded) candidates.push("Daedalus");
     if (!candidates.length) candidates.push(prior);
-    return { objective, prior, active, cashNeeded, hackingNeeded, repNeeded, income, cashRate,
+    return { objective, prior, active, cashNeeded, hackingNeeded, repNeeded, passiveRep, income, cashRate,
         cashEtaMs, hackingEtaMs, repEtaMs, scriptFraction, scriptRunning, xpCeiling, speed, candidates,
         baselineMs: baselineKnown ? Math.max(cashEtaMs, hackingEtaMs, repEtaMs) : null,
         cashIncomeShare: income && cashRate ? Math.min(1, income / cashRate) : null,
-        repMeasured: next?.rateSource === "measured" && next.workActive === true,
+        repMeasured: passiveRep ? next?.rateSource === "measured gang" : next?.rateSource === "measured" && next.workActive === true,
         balanceMeasured: b?.cashSource === "measured" && b?.xpSource === "measured" };
 }
 
@@ -141,7 +142,7 @@ export function projectGoMilestoneValue(effect, bonusPercent, bonusPerMinute, co
     }
     if (effect === "REPUTATION" && p.repNeeded) {
         repGain = relative;
-        reason = "direct faction-work ETA reduction";
+        reason = p.passiveRep ? "gang reputation ETA reduction" : "direct faction-work ETA reduction";
     }
     const afterMs = Math.max(p.cashEtaMs / (1 + cashGain), p.hackingEtaMs / (1 + xpGain), p.repEtaMs / (1 + repGain));
     const value = Math.max(0, p.baselineMs - afterMs);

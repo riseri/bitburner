@@ -3,7 +3,7 @@ import { formulaGroup } from "lib/formulas.js";
 import { HACKING_POLICY, refreshHackingPolicy, hackingXpProgress, renderHackingPolicy } from "lib/hacking-policy.js";
 import { PORTS } from "lib/ports.js";
 import { dashboardTitle, dashboardRow } from "lib/dashboard.js";
-import { MILESTONE_BALANCE, boundedXpAllocation, milestoneKey, observeMilestoneRates, milestoneRate } from "lib/milestone-balance.js";
+import { MILESTONE_BALANCE, boundedXpAllocation, milestoneKey, observeMilestoneRates, observedMilestoneRate } from "lib/milestone-balance.js";
 import { pipelineUsesBudget } from "lib/scheduler-scaling.js";
 import { recentPipelineIncome } from "lib/background-prep.js";
 
@@ -285,8 +285,8 @@ export function refreshMilestoneEvidence(ns, pool) {
 	const scriptXpRate = safe && state?.status === "RUNNING" && state.choice?.ram > 0 ?
 		state.choice.score * Math.min(1, ram / state.choice.ram) : null;
 	cfg.milestoneEvidence = { key, generatedAt: now, safe,
-		cash: milestoneRate(safe ? samples.money : [], moneyModel),
-		xp: milestoneRate(safe ? samples.xp : [], scriptXpRate), scriptXpRate };
+		cash: observedMilestoneRate(safe ? samples : {}, "money", moneyModel),
+		xp: observedMilestoneRate(safe ? samples : {}, "xp", scriptXpRate), scriptXpRate };
 }
 
 export function tickXpPipeline(ns, pool, launchBudget) {
@@ -440,6 +440,7 @@ export function xpPipelineStatus(ns, pool) {
 	return { operationalMode: state.jobs.size ? "MONEY+XP" : pool.cfg.hackingPolicy?.mode === "MONEY" ? "MONEY" : "NORMAL",
 		progress: pool.cfg.hackingPolicy?.mode === "XP" ? hackingXpProgress(ns, pool.cfg.hackingPolicy, rate, pool.cfg.policyOptions || HACKING_POLICY) : null,
 		xp: { target: state.choice?.name || "", action: state.wave?.action || state.choice?.action || "",
+			cycleMs: state.wave?.duration || null,
 			state: state.status, reason: state.reason, ram: [...state.jobs.values()].reduce((n, j) => n + j.ram, 0),
 			workers: state.jobs.size, estimatedXpPerSecond: state.choice?.score || null,
 			availableRam: state.availableRam ?? null,

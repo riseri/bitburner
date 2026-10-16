@@ -8,5 +8,5 @@ export function augmentationFundingCost(next) {
 }
 
 export function augmentationReputationStrategy(next) {
-    return next?.repGap > 0 ? next.donationPlanned ? "DONATE" : "WORK" : "NONE";
+    return next?.repGap > 0 ? next.passiveReputation ? "PASSIVE" : next.donationPlanned ? "DONATE" : "WORK" : "NONE";
 }

@@ -33,8 +33,10 @@ continue using existing capacity while the reset evidence matures.
 
 The projection prefers the economic policy's two comparable recovery observations,
 and uses measured total player XP rate, live BitNode/player multipliers, skill
-Formulas, half-credit for recovered XP, conservative multiplier haircut and
-4x benefit ceiling. A package qualifies only when recovery plus rebuilding the
+Formulas, half-credit for recovered XP and a 50% haircut on incremental benefit.
+The final-server projection preserves the inverse skill curve's full benefit
+before that haircut; the ordinary augmentation policy's 4x ceiling does not
+apply here. A package qualifies only when recovery plus rebuilding the
 lost hacking progress projects at least 20% and 30 seconds faster completion than
 continuing with current multipliers. Installation then requires 60 seconds of
 stable evidence and the existing bootstrap, reset-epoch and player-work guards.
@@ -42,15 +44,33 @@ Missing live XP, Formulas or multiplier evidence leaves training active and
 reports the missing input.
 
 The augmentation manager measures player XP independently of the daemon's
-allocation and preparation gates. It requires three positive 20-second windows
-with at most 25% rate variation. Changing the reset epoch, multiplier, goal or
+allocation and preparation gates. It compares three positive, non-overlapping
+windows with at most 25% rate variation. Steady earnings can qualify in three
+20-second windows. Bursty earnings use longer aggregate windows, covering at
+least twice the authenticated XP action duration or observed payout gap. Up to
+90 intervals are retained; zero short bins between grow/weaken completions no
+longer make productive XP permanently unknown. A single windfall cannot qualify.
+Changing the reset epoch, multiplier, goal or
 player work, decreasing XP, or losing observations for 45 seconds discards the
 series. Until it matures, fresh authenticated measured daemon XP can be used;
 a potential XP-worker model cannot qualify a purchase or reset. Newly usable XP
 triggers an immediate package evaluation. Ordinary background prep therefore
-cannot hide steady actual XP gains from the endgame controller.
+cannot hide actual XP gains from the endgame controller. The daemon uses the
+same aggregate measurement for milestone ETAs. The dashboard distinguishes
+collected samples from accepted measurements and reports the measured duration.
 
-Without comparable recovery history, the final-server policy can use a declared
+Without comparable recovery history, a currently stable productive run at least
+30 minutes old can supply a **current-run allowance**: its entire age since the
+augmentation reset, plus 25%, with zero recovered XP. This credits neither cash
+nor retained XP, and charges rebuilding the XP separately. It assumes the next
+run can rebuild with stronger installed augmentations in no more than that
+allowance; it is explicitly **LOW confidence**, not measured recovery history.
+It requires the same authenticated income, permanent home RAM and restart checks
+as the fallback below, and is used only when smaller than 24 hours. Acquisition
+plus rebuilding must project at least **50% faster** completion, sustained for
+60 seconds. Comparable measured recovery history always takes precedence.
+
+When neither recovery history nor a current-run allowance is available, the final-server policy can use a declared
 **24-hour recovery allowance**, with zero recovered XP and **LOW confidence**.
 This is a policy assumption, not a measured recovery or a guaranteed upper
 bound. It requires fresh authenticated income with at least one live income
@@ -69,13 +89,13 @@ recovery events are separate observations.
 
 Augmentation installation also clears IPvGO speed power. The endgame projection
 prices the loss of the current Illuminati bonus against script XP only, before
-applying the conservative haircut and benefit ceiling. Capping the gain before
+applying the conservative haircut. Capping the gain before
 charging the Go loss could incorrectly veto every first reset at 100% or higher
 Go power, however many NeuroFlux levels were in the package. Player work XP
 keeps its rate; unavailable script share (including independent manager samples)
 is conservatively treated as all script XP. Speed benefits from new augmentations
-remain unpriced. The reported reset ETA uses the capped conservative benefit;
-it is not a prediction that the full multiplier gain is limited to 4x.
+remain unpriced. The reported reset ETA uses the discounted benefit; the exact
+skill-curve improvement is not arbitrarily limited to 4x.
 
 An old or complete queue does not force an automatic endgame reset. The
 alternative being compared is finishing the node, not buying another item.

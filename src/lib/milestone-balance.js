@@ -23,7 +23,7 @@ export function observeMilestoneRates(state, { key, now, xp, income = [], money 
     if (state.key !== key || !state.last || now < state.last.at || now - state.seenAt > o.staleMs ||
         !Number.isFinite(xp) || !Number.isFinite(state.last.xp) || xp < state.last.xp ||
         (Number.isFinite(money) && Number.isFinite(state.last.money) && money < state.last.money)) {
-        Object.assign(state, { key, seenAt: now, last: { at: now, xp, money }, money: [], xp: [] });
+        Object.assign(state, { key, seenAt: now, last: { at: now, xp, money }, money: [], xp: [], intervals: [] });
         return;
     }
     state.seenAt = now;
@@ -33,6 +33,9 @@ export function observeMilestoneRates(state, { key, now, xp, income = [], money 
         income.filter(s => s.time > state.last.at && s.time <= now).reduce((sum, s) => sum + Math.max(0, s.money), 0);
     state.money.push(earned * 1000 / elapsed);
     state.xp.push((xp - state.last.xp) * 1000 / elapsed);
+    state.intervals ||= [];
+    state.intervals.push({ ms: elapsed, xp: xp - state.last.xp, money: earned });
+    state.intervals = state.intervals.slice(-90);
     state.money = state.money.slice(-o.samples); state.xp = state.xp.slice(-o.samples);
     state.last = { at: now, xp, money };
 }
@@ -44,6 +47,45 @@ export function milestoneRate(samples = [], model = null) {
     if (samples.some(r => !Number.isFinite(r) || r <= 0) || Math.max(...samples) / Math.min(...samples) > 1 + o.rateTolerance)
         return { rate: null, source: "UNKNOWN (unstable or zero)" };
     return { rate: samples.reduce((a, b) => a + b, 0) / samples.length, source: "measured" };
+}
+
+// Keep the fast path for steady earnings, but also compare three disjoint,
+// progressively longer windows. HGW pays at completion, so a zero short bin
+// followed by a burst is not evidence that the long-run rate is unknowable.
+// Only observed deltas qualify; a model cannot rescue a mature noisy series.
+export function observedMilestoneRate(state, resource = "xp", model = null, minWindowMs = MILESTONE_BALANCE.sampleMs) {
+    const intervals = state.intervals || [], requiredSamples = MILESTONE_BALANCE.samples;
+    // Infer the payout cadence when the producer cannot supply an action time.
+    // Ignore tiny background gains between large script payouts. Otherwise
+    // three lucky bins containing one payout each can overstate a slow cycle.
+    const significant = Math.max(0, ...intervals.map(bin => bin[resource])) * .1;
+    let gap = 0, longestGap = 0;
+    for (const bin of intervals) {
+        gap += bin.ms; longestGap = Math.max(longestGap, gap);
+        if (bin[resource] >= significant && bin[resource] > 0) gap = 0;
+    }
+    if (longestGap > Math.max(0, ...intervals.map(bin => bin.ms)) * 1.5)
+        minWindowMs = Math.max(minWindowMs, longestGap * 2);
+    for (let size = 1; size <= 30; size++) {
+        if (intervals.length < size * requiredSamples) continue;
+        const recent = intervals.slice(-size * requiredSamples), windows = [];
+        for (let i = 0; i < requiredSamples; i++) {
+            const group = recent.slice(i * size, (i + 1) * size);
+            const ms = group.reduce((sum, bin) => sum + bin.ms, 0);
+            const gain = group.reduce((sum, bin) => sum + bin[resource], 0);
+            windows.push({ ms, rate: gain * 1000 / ms });
+        }
+        if (windows.some(w => w.ms < minWindowMs)) continue;
+        const estimate = milestoneRate(windows.map(w => w.rate));
+        if (estimate.source === "measured") return { ...estimate, samples: requiredSamples,
+            requiredSamples, sampleMs: Math.min(...windows.map(w => w.ms)),
+            observedMs: windows.reduce((sum, w) => sum + w.ms, 0) };
+    }
+    const estimate = milestoneRate(state[resource] || [], model);
+    return { rate: estimate.source === "measured" ? null : estimate.rate,
+        source: estimate.source === "measured" ? "UNKNOWN (observing complete XP cycles)" : estimate.source,
+        samples: Math.min(requiredSamples, intervals.length), requiredSamples,
+        sampleMs: minWindowMs, observedMs: intervals.reduce((sum, bin) => sum + bin.ms, 0) };
 }
 
 export function balanceMilestone(state, { objective, level, remainingXp, cash, xp, scriptXpRate = null,

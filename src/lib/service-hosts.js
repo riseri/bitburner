@@ -2,7 +2,7 @@ import { resetEpoch } from "lib/progression-protocol.js";
 
 export const CLOUD_SERVICES = Object.freeze(["daemon.js", "fleet-manager.js", "progression-manager.js"]);
 export const SERVICE_HOSTS_FILE = "data/service-hosts.json";
-const SAVED_SERVICE_SETTINGS = [...CLOUD_SERVICES, "augmentation-manager.js"];
+const SAVED_SERVICE_SETTINGS = [...CLOUD_SERVICES, "augmentation-manager.js", "gang-manager.js", "sleeve-manager.js", "go-bot.js"];
 
 // Purchased servers are direct neighbours of home. Optional services and actors
 // retain home ownership; only these three controllers may be adopted remotely.

@@ -72,9 +72,10 @@ optional managers and home-specific actors remain on home. When Singularity and
 progression/augmentation actions are enabled, the supervisor quotes and funds
 home upgrades for those services in BN4 and other BitNodes with SF4 access.
 
-A local run of the official upstream RAM calculator reports 7.70 GB for the
-supervisor and 2.50 GB per starter thread. This checks source RAM against upstream
-definitions, not the installed game's runtime. The internal sharing setting is
+A local run of the installed 3.0.1 game's RAM calculator reports 8.20 GB for the
+supervisor. The BN10 integration check verifies it fits the SF1 32 GB starting
+home, and that sleeves plus the supervisor and progression actor reserve fit
+64 GB. It checks source RAM, not a live execution. The internal sharing setting is
 named `shareEnabled`: a `.share` property is otherwise mistaken for the 2.4 GB
 worker API by the analyzer. The public `--share` flag is unchanged. See the
 [RAM calculator](https://github.com/bitburner-official/bitburner-src/blob/dev/src/Script/RamCalculations.ts)
@@ -155,6 +156,37 @@ remote strategy readers' copies each tick. Only a supervisor-owned
 requests/results use reserved port 4 with owner, timestamp and reset checks.
 This coordination is budget-only: stocks do not own JIT RAM, fleet allocation,
 worker ports or target selection.
+
+## Gang service
+
+Sleeve management is also supervised on home when BN10 or SF10 grants access,
+with heartbeat port 2. It is admitted after progression and before gangs and
+augmentation management. Optional sleeve purchases run separately and never
+increase the critical helper reserve. `supervisor-restart.js` reloads the sleeve
+manager with its adopted arguments. See [BN10 automation](bn10.md) for task,
+karma, budget and final-stop behavior.
+
+Port 3 (`PORTS.GANG_STATUS`) carries the `gang-manager.js` heartbeat. The service
+is enabled by default through `--gangs true` and admitted when BN2 or SF2 grants
+access and home RAM fits. Locked gang services require neither files nor RAM in
+the enabled budget. Gang APIs stay outside the resident supervisor's imports.
+
+The supervisor forwards `--gang-faction auto` and `--gang-budget 0.05` as manager
+flags `--faction auto` and `--budget 0.05`. The manager creates from an eligible
+joined faction or adopts the existing gang, recruits and trains members, manages
+wanted level, selects tasks, ascends members and buys equipment with protected
+cash. It keeps territory warfare disabled. A named faction controls creation;
+it does not replace an existing gang. Creation outside BN2 waits for sufficient
+karma, and the manager does not own Singularity player work.
+
+`supervisor-restart.js` reloads the gang manager and Go bot along with the core
+controllers and augmentation manager, preserving their current arguments and
+thread counts. This loads updated passive-reputation policy code as well as the
+gang growth policy. The Go bot resumes its existing board under its ownership rules.
+Augmentation installations preserve the gang; the restarted manager reads its
+current members and equipment. BitNode transitions clear the gang. Automatic
+faction joining, player work, augmentations and node completion in BN2 require
+SF4 level 1+, separately from gang access. See [gang automation](gangs.md).
 
 ## Darknet service
 

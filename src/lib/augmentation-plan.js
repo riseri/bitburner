@@ -111,7 +111,7 @@ export function chooseAugmentationSeller(sellers, { price, cash, income, donate 
         const workEta = s.repGap === 0 ? 0 : s.rate > 0 ? s.repGap / s.rate * 1000 : null;
         const moneyEta = eta(price - cash);
         const directEta = workEta != null && moneyEta != null ? Math.max(workEta, moneyEta) : null;
-        const donationEta = donate && s.repGap > 0 && s.donationEligible && Number.isFinite(s.donationCost) && s.donationCost > 0
+        const donationEta = donate && !s.passiveReputation && s.repGap > 0 && s.donationEligible && Number.isFinite(s.donationCost) && s.donationCost > 0
             ? eta(augmentationFundingCost({ ...s, price, donationPlanned: true }) - cash) : null;
         const donation = donationEta != null && (directEta == null || donationEta < directEta);
         const selected = { ...s, price, donationPlanned: donation };
@@ -119,7 +119,8 @@ export function chooseAugmentationSeller(sellers, { price, cash, income, donate 
             workEtaMs: workEta, donationEtaMs: donationEta,
             fundingCost: augmentationFundingCost(selected), progressionStrategy: augmentationReputationStrategy(selected),
             acquisitionCost: augmentationFundingCost({ ...selected, chainCost: 0 }),
-            explanation: donation ? "Donation + purchase beats faction-work ETA" : workEta == null ? "work rate unknown; reputation/favor fallback" : "work and cash can accrue together" };
+            explanation: s.passiveReputation ? workEta == null ? "Gang reputation rate unknown; waiting for measured progress" : "Gang reputation and cash accrue together"
+                : donation ? "Donation + purchase beats faction-work ETA" : workEta == null ? "work rate unknown; reputation/favor fallback" : "work and cash can accrue together" };
     }).sort((a,b) => (a.etaMs ?? Infinity) - (b.etaMs ?? Infinity) || a.repGap - b.repGap || b.favor - a.favor || a.faction.localeCompare(b.faction));
     const best = ranked[0], old = ranked.find(s => s.faction === previous);
     // Keep an incumbent within 10%; never hide an immediately eligible seller.
@@ -153,12 +154,23 @@ export function planAugmentationBasket(catalog, owned, context, { cash = 0, mult
                 fundingCost,
                 etaMs: items.every(v => v.etaMs != null) ? Math.max(...items.map(v => v.etaMs), context.income > 0 ? Math.max(0,fundingCost-remainingCash)/context.income*1000 : fundingCost<=remainingCash ? 0 : Infinity) : null };
         }).filter(c => c && (target || c.value > 0));
-        candidates.sort((a,b) => Number(b.affordable)-Number(a.affordable) || b.utility-a.utility || a.cost-b.cost || a.item.name.localeCompare(b.item.name));
+        // Purchases ready now still win. For deferred chains, compare benefit
+        // per acquisition time; price-only utility can pin a funded goal for days.
+        // One minute of smoothing avoids thrashing on tiny ETA differences.
+        for (const candidate of candidates) {
+            candidate.knownEta = Number.isFinite(candidate.etaMs) && candidate.etaMs >= 0;
+            candidate.selectionScore = !candidate.affordable && candidate.knownEta
+                ? candidate.value / (60000 + candidate.etaMs) : candidate.utility;
+        }
+        candidates.sort((a,b) => Number(b.affordable)-Number(a.affordable) ||
+            (!a.affordable ? Number(b.knownEta)-Number(a.knownEta) : 0) ||
+            b.selectionScore-a.selectionScore || b.utility-a.utility || a.cost-b.cost || a.item.name.localeCompare(b.item.name));
         if (!candidates.length) break;
         let best = candidates[0];
         const old = candidates.find(c => c.item.name === previous);
-        if (old && old.affordable === best.affordable && old.utility >= best.utility*.9) best = old;
-        if (!best.affordable) { deferred.push(...candidates.map(c => ({ ...c.items[0], chainTarget:c.item.name, chainCost:c.cost,
+        if (old && old.affordable === best.affordable && (best.affordable || old.knownEta === best.knownEta) &&
+            old.selectionScore >= best.selectionScore*.9) best = old;
+        if (!best.affordable) { deferred.push(...[best,...candidates.filter(c=>c!==best)].map(c => ({ ...c.items[0], chainTarget:c.item.name, chainCost:c.cost,
             fundingCost:c.fundingCost, progressionStrategy:augmentationReputationStrategy(c.items[0]),
             benefitNow:0, benefitAfterInstall:augmentationValue(c.items[0],context), etaMs:Number.isFinite(c.etaMs)?c.etaMs:null }))); break; }
         for (const item of best.items) {
@@ -179,7 +191,7 @@ export function planAugmentationBasket(catalog, owned, context, { cash = 0, mult
 
 function buildDynamicPlan(ns, options) {
     const context = { ...options.context, includeAll: options.focus === "all" }, state = options.state || {}, now = Date.now();
-    const factions = context.player.factions, key = context.resetEpoch + ":" + [...factions].sort().join("|") + ":" + (options.target || "");
+    const factions = context.player.factions, key = context.resetEpoch + ":" + [...factions].sort().join("|") + ":" + (options.target || "") + ":" + (context.gang?.faction || "");
     // Cache only static metadata. Quotes, ownership, reputation and spending limits are live.
     if (state.catalog?.key !== key || !state.catalog.items.length || now-state.catalog.at >= 60000) {
         const items = new Map();
@@ -194,10 +206,11 @@ function buildDynamicPlan(ns, options) {
         savings.owner === "supervisor" && savings.target?.startsWith("augmentation:") ? 0 : savings.floor);
     const cash = Math.max(0,context.money-reserve), factionData = new Map();
     for (const faction of factions) {
+        const passiveReputation = context.gang?.faction === faction;
         let rate = null, rateSource = "unknown", favor = 0, projectedFavor = null, workAvailable = false;
         try {
             favor = ns.singularity.getFactionFavor(faction);
-            const types = ns.singularity.getFactionWorkTypes(faction); workAvailable = types.length > 0;
+            const types = passiveReputation ? [] : ns.singularity.getFactionWorkTypes(faction); workAvailable = types.length > 0;
             const analysis = factionWorkAnalysis(ns,faction,types,context.player);
             rate = analysis?.reputationPerSecond * (options.focusWork || context.installed.includes("Neuroreceptor Management Implant") ? 1 : .8) || null;
             if (rate > 0) rateSource = "model";
@@ -205,11 +218,19 @@ function buildDynamicPlan(ns, options) {
         } catch {}
         const rep = ns.singularity.getFactionRep(faction), prior = state.repSamples?.[faction];
         const current = ns.singularity.getCurrentWork?.();
-        if (!(state.lastDonation?.faction === faction && state.lastDonation.at >= prior?.at) && prior && prior.epoch === context.resetEpoch && now>prior.at && now-prior.at<=15000 && rep>prior.rep && current?.type === "FACTION" && current.factionName === faction && prior.working)
-            { rate = (rep-prior.rep)*1000/(now-prior.at); rateSource = "measured"; }
-        state.repSamples ||= {}; state.repSamples[faction] = {epoch:context.resetEpoch,at:now,rep,working:current?.type === "FACTION" && current.factionName === faction};
+        if (!(state.lastDonation?.faction === faction && state.lastDonation.at >= prior?.at) && prior && prior.epoch === context.resetEpoch && now>prior.at && now-prior.at<=15000 && rep>prior.rep &&
+            (passiveReputation && prior.passiveReputation || current?.type === "FACTION" && current.factionName === faction && prior.working)) {
+            rate = (rep-prior.rep)*1000/(now-prior.at);
+            // Gang task changes and bonus time can make one interval optimistic.
+            // Require two positive intervals and use the slower rate with a haircut.
+            if (passiveReputation) { rate = prior.gangRate > 0 ? Math.min(rate, prior.gangRate) * .8 : null; rateSource = rate > 0 ? "measured gang" : "observing gang"; }
+            else rateSource = "measured";
+        }
+        const gangRate = passiveReputation && prior?.passiveReputation && prior.epoch === context.resetEpoch && now > prior.at && now-prior.at <= 15000 && rep > prior.rep
+            ? (rep-prior.rep)*1000/(now-prior.at) : null;
+        state.repSamples ||= {}; state.repSamples[faction] = {epoch:context.resetEpoch,at:now,rep,working:current?.type === "FACTION" && current.factionName === faction,passiveReputation,gangRate};
         factionData.set(faction,{faction,rep,rate,rateSource,workActive:current?.type === "FACTION" && current.factionName === faction,
-            favor,projectedFavor,donationEligible:workAvailable && favor >= (ns.getFavorToDonate?.() ?? Infinity)});
+            favor,projectedFavor,passiveReputation,donationEligible:!passiveReputation && workAvailable && favor >= (ns.getFavorToDonate?.() ?? Infinity)});
     }
     const catalog = state.catalog.items.filter(a=>!context.owned.includes(a.name)).map(a=>{
         const price=ns.singularity.getAugmentationPrice(a.name), repRequired=ns.singularity.getAugmentationRepReq(a.name);
@@ -217,15 +238,19 @@ function buildDynamicPlan(ns, options) {
             return {...s,repGap,donationCost:s.donationEligible ? formulaDonationForRep(ns,repGap,context.player) : null}; });
         const seller=chooseAugmentationSeller(sellers,{price,cash,income:context.income,donate:options.donate,previous:state.selectedSellers?.[a.name]});
         const fullDonation=formulaDonationForRep(ns,repRequired,context.player);
-        const favorUnlockEtaMs=seller.projectedFavor >= (ns.getFavorToDonate?.() ?? Infinity) && !seller.donationEligible &&
+        const favorUnlockEtaMs=!seller.passiveReputation && seller.projectedFavor >= (ns.getFavorToDonate?.() ?? Infinity) && !seller.donationEligible &&
             fullDonation>0 && context.income>0 && state.recoveryMs>0 ? state.recoveryMs + (price+fullDonation)/context.income*1000 : null;
         return {...a,price,repRequired,...seller,sellers,favorUnlockEtaMs};
     });
     state.selectedSellers=Object.fromEntries(catalog.map(a=>[a.name,a.faction]));
-    const target = options.target || (context.owned.includes("The Red Pill") ? "" : catalog.some(a=>a.name === "The Red Pill") ? "The Red Pill" : "");
+    const redPill = catalog.find(a => a.name === "The Red Pill");
+    const gangPillWaiting = redPill?.passiveReputation && redPill.repGap > 0;
+    const target = options.target || (!context.owned.includes("The Red Pill") && redPill && !gangPillWaiting ? "The Red Pill" : "");
     if (!options.target && context.owned.includes("The Red Pill")) return {order:[],next:null,errors:[],total:0,multiplier:purchaseInflation(context.reset)};
-    const selected = catalog;
-    const plan=planAugmentationBasket(selected,context.owned,context,{cash,multiplier:Number(options.multiplier || options["price-multiplier"]) || purchaseInflation(context.reset),target,previous:state.selectedAugmentation});
+    const selected = !options.target && gangPillWaiting ? catalog.filter(a => a !== redPill) : catalog;
+    const basketOptions = {cash,multiplier:Number(options.multiplier || options["price-multiplier"]) || purchaseInflation(context.reset),target,previous:state.selectedAugmentation};
+    let plan=planAugmentationBasket(selected,context.owned,context,basketOptions);
+    if (!options.target && gangPillWaiting && !plan.next) plan=planAugmentationBasket(catalog,context.owned,context,{...basketOptions,target:"The Red Pill"});
     state.selectedAugmentation=plan.next?.name;
     return plan;
 }

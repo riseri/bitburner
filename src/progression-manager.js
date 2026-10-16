@@ -94,7 +94,7 @@ function buildStatus(ns, fleetStatus, options = {}) {
     const ranked = rankPrograms(programs, { servers, money, homeRam: ns.getServerMaxRam(HOME), darknetAvailableRam: darknet.availableRam,
         darknetRam: darknet.minimumRam,
         income: objective?.incomePerSecond, objective });
-    const objectives = planObjectives({ torOwned, programs: ranked, backdoors, money, progression: objective });
+    const objectives = planObjectives({ torOwned, programs: ranked, backdoors, money, progression: objective, factions: ns.getPlayer().factions });
     if (darknet.navigator === "MISSING") darknet.navigator = money >= programs.find(p => p.category === "darknet")?.cost && torOwned ? "PURCHASABLE" : "SAVING";
 	const milestone = planMilestone({ currentNode, nextNode: nextRouteNode(reset), player: ns.getPlayer(), money, worldDaemon,
 		observation: readProgressionObservation(ns) });
@@ -189,8 +189,13 @@ function analyzeBackdoor(ns, target, discovered, parents, hackingLevel) {
 }
 
 // Independent backdoors do not sit behind an unaffordable shopping cart.
-export function planObjectives({ torOwned, programs, backdoors, money, progression = null }) {
+export function planObjectives({ torOwned, programs, backdoors, money, progression = null, factions = [] }) {
 	const objectives = [];
+	// Joining these compatible hacking factions costs no money. Keep this path
+	// available before the full augmentation service fits on home.
+	for (const target of backdoors) if (target.installed && !factions.includes(target.faction))
+		objectives.push({ kind: "join-faction", target: target.faction, label: `Join ${target.faction}`,
+			ready: true, affordable: true, costEstimate: 0 });
 	if (!torOwned) objectives.push({ kind: "tor", target: "TOR", label: "Get a TOR router",
 		ready: true, costEstimate: 200_000, affordable: money >= 200_000, blocker: money >= 200_000 ? "" : "insufficient-cash" });
 	const missing = programs.find(program => !program.owned && program.useful !== false);

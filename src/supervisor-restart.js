@@ -2,7 +2,7 @@ import { reclaimHomeShare } from "lib/home-share.js";
 import { serviceProcesses, readServiceHosts, readServiceSettings, saveServiceHosts } from "lib/service-hosts.js";
 
 const HOME = "home", SUPERVISOR = "supervisor.js", BOOTSTRAP = "bootstrap.js";
-const CONTROLLERS = ["daemon.js", "fleet-manager.js", "progression-manager.js", "augmentation-manager.js"];
+const CONTROLLERS = ["daemon.js", "fleet-manager.js", "progression-manager.js", "augmentation-manager.js", "gang-manager.js", "sleeve-manager.js", "go-bot.js"];
 
 /** Reload supervisor and core controllers, preserving saved arguments. @param {NS} ns */
 export async function main(ns) {
@@ -11,7 +11,7 @@ export async function main(ns) {
 	await ns.sleep(1_000);
 	const hosts = readServiceHosts(ns), settings = readServiceSettings(ns);
 	let changed = false;
-	for (const name of ["progression-manager.js", "augmentation-manager.js"]) {
+	for (const name of ["progression-manager.js", "augmentation-manager.js", "gang-manager.js", "sleeve-manager.js", "go-bot.js"]) {
 		const matches = serviceProcesses(ns, name);
 		if (matches.length !== 1) continue;
 		const process = matches[0];

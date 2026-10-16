@@ -107,6 +107,48 @@ test('supervisor restart reloads home scheduler controllers before bootstrap can
     assert.deepEqual(f.launches.at(-1).args,saved);assert.ok(!f.logs.some(line=>line.startsWith('ERROR')));
 });
 
+test('supervisor restart reloads the gang manager and preserves its adopted arguments', async () => {
+    const f = fixture(512), files = new Map();
+    f.costs['gang-manager.js'] = 36;
+    f.ns.getResetInfo = () => ({ currentNode: 2, lastNodeReset: 1, lastAugReset: 2 });
+    f.ns.read = name => files.get(name) || '';
+    f.ns.write = async (name, value) => files.set(name, value);
+    f.ns.scan = () => [];
+    const manual = f.add('manual.js'), gang = f.add('gang-manager.js', 1, ['--faction', 'NiteSec', '--budget', .01]);
+    await loadScript('supervisor-restart.js', f.clock).main(f.ns);
+    assert.ok(f.killed.includes(gang.pid)); assert.ok(f.processes.has(manual.pid));
+    const settings = loadScript('lib/service-hosts.js', f.clock).readServiceSettings(f.ns);
+    assert.deepEqual(Array.from(settings['gang-manager.js'].args), gang.args);
+    const services = loadScript('supervisor.js', f.clock).createManagedServices(f.ns, { gangs: true, serviceSettings: settings }, []);
+    assert.deepEqual(Array.from(services.find(s => s.name === 'gang-manager.js').args), gang.args);
+});
+
+test('supervisor restart reloads Go policy code and preserves arguments', async () => {
+    const f = fixture(512), files = new Map();
+    f.costs['go-bot.js'] = 36;
+    f.ns.getResetInfo = () => ({ currentNode: 2, lastNodeReset: 1, lastAugReset: 2 });
+    f.ns.read = name => files.get(name) || '';
+    f.ns.write = async (name, value) => files.set(name, value);
+    f.ns.scan = () => [];
+    const go = f.add('go-bot.js', 1, ['--opponent', 'auto', '--size', 5]);
+    await loadScript('supervisor-restart.js', f.clock).main(f.ns);
+    assert.ok(f.killed.includes(go.pid));
+    const settings = loadScript('lib/service-hosts.js', f.clock).readServiceSettings(f.ns);
+    assert.deepEqual(Array.from(settings['go-bot.js'].args), go.args);
+});
+
+test('supervisor restart reloads sleeve policy and preserves adopted task/spending settings', async () => {
+    const f = fixture(512), files = new Map(); f.costs['sleeve-manager.js'] = 42.55;
+    f.ns.getResetInfo = () => ({ currentNode: 10, lastNodeReset: 1, lastAugReset: 2 });
+    f.ns.read = name => files.get(name) || ''; f.ns.write = async (name, value) => files.set(name, value); f.ns.scan = () => [];
+    const sleeve = f.add('sleeve-manager.js', 1, ['--karma', false, '--budget', 0]);
+    await loadScript('supervisor-restart.js', f.clock).main(f.ns);
+    assert.ok(f.killed.includes(sleeve.pid));
+    const settings = loadScript('lib/service-hosts.js', f.clock).readServiceSettings(f.ns);
+    const services = loadScript('supervisor.js', f.clock).createManagedServices(f.ns, { sleeves: true, serviceSettings: settings }, []);
+    assert.deepEqual(Array.from(services.find(s => s.name === 'sleeve-manager.js').args), sleeve.args);
+});
+
 for(const blocked of ['supervisor.js','daemon.js'])test(`failed ${blocked} stop prevents a stale-code reload`,async()=>{
     const f=fixture(512);f.add('supervisor.js');f.add('daemon.js');f.add('fleet-manager.js');
     const kill=f.ns.kill;f.ns.kill=pid=>f.processes.get(pid)?.filename===blocked?false:kill(pid);

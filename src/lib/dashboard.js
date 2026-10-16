@@ -29,8 +29,12 @@ export function renderFactionProgression(ns, next, currentCash) {
     row("Augmentation", next.name); row("Faction", next.faction);
     row("Strategy", next.progressionStrategy || augmentationReputationStrategy(next));
     row("Rep remaining", number(next.repGap));
-    row("Work rate", next.rate > 0 ? number(next.rate) + " rep/s" : "unknown");
-    row("Work ETA", dashboardTime(next.workEtaMs));
+    const passive = next.passiveReputation || next.progressionStrategy === "PASSIVE";
+    const rate = next.rate > 0 && Number.isFinite(next.rate)
+        ? (next.rate < .01 ? next.rate.toPrecision(2) : next.rate.toLocaleString("en-US", { maximumFractionDigits: 2 })) + " rep/s" : "unknown";
+    row(passive ? "Gang rep rate" : "Work rate", rate);
+    row(passive ? "Rep ETA" : "Work ETA", dashboardTime(next.workEtaMs));
+    if (passive) row("ETA basis", "Conservative recent rate; future gang growth is not projected");
     row("Donation", money(next.donationCost)); row("Donation ETA", dashboardTime(next.donationEtaMs));
     row("Purchase", money(next.price));
     if (next.chainCost) row("Chain purchase", money(next.chainCost));

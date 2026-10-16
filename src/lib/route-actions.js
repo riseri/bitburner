@@ -1,7 +1,7 @@
 import { augmentationValue } from "lib/augmentation-plan.js";
 import { progressionPrograms, programCreationEstimate } from "lib/programs.js";
 import { readSavings } from "lib/savings.js";
-import { nextRouteNode, routeCities } from "lib/bitnode-route.js";
+import { nextRouteNode, routeCities, routeStopsAfterClear } from "lib/bitnode-route.js";
 import { resetEpoch, progressionBackdoors } from "lib/progression-protocol.js";
 import { matchingFactionWork } from "lib/augmentation-loop.js";
 
@@ -107,7 +107,9 @@ export function routeEndgame(ns, cfg, state) {
     state.nextNodeAttempt = Date.now() + 30000;
     const pid = ns.run(script, 1, JSON.stringify({ nextNode, ownerPid: ns.pid, resetEpoch: resetEpoch(reset), createdAt: Date.now() }));
     const nextRun = Number(reset.ownedSF?.get?.(nextNode) ?? 0) + 2;
-    return status(pid ? "ACTIVE" : "BLOCKED", "COMPLETE_NODE", pid ? `Completing this node and entering BN${nextNode}.${nextRun}` : "Node transition helper failed to launch");
+    return status(pid ? "ACTIVE" : "BLOCKED", "COMPLETE_NODE", pid ? routeStopsAfterClear(reset)
+        ? "Completing BN10.3, awarding SF10.3, then parking in BN10 with automation stopped"
+        : `Completing this node and entering BN${nextNode}.${nextRun}` : "Node transition helper failed to launch");
 }
 
 export function routeDaedalus(ns, cfg, state, installed, countRequired = 30) {

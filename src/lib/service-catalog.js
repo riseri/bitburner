@@ -7,6 +7,8 @@ export const SERVICES = Object.freeze([
     { name: "daemon.js", core: true, type: "", port: 0 },
     { name: "fleet-manager.js", core: true, type: "fleet-status", port: PORTS.FLEET_STATUS },
     { name: "progression-manager.js", option: "progression", flag: "progression", defaultEnabled: true, type: "progression-status", port: PORTS.PROGRESSION_STATUS },
+    { name: "sleeve-manager.js", option: "sleeves", flag: "sleeves", defaultEnabled: true, capability: "sleeves", type: "sleeve-status", port: PORTS.SLEEVE_STATUS },
+    { name: "gang-manager.js", option: "gangs", flag: "gangs", defaultEnabled: true, capability: "gang", type: "gang-status", port: PORTS.GANG_STATUS },
     { name: "augmentation-manager.js", option: "augmentationActions", flag: "augmentation-actions", defaultEnabled: true, capability: "singularity", type: "augmentation-status", port: PORTS.AUGMENTATION_STATUS },
     { name: "contract-manager.js", option: "contracts", flag: "contracts", defaultEnabled: true, type: "contract-status", port: PORTS.CONTRACT_STATUS },
     { name: "stock-trader.js", option: "stocks", flag: "stocks", defaultEnabled: true, capability: "stocks", type: "stock-status", port: PORTS.STOCK_STATUS },
@@ -57,6 +59,7 @@ export function supervisorFiles(cfg, capabilities = null) {
     const files = [...selectedServices(cfg, capabilities).map(service => service.name), "starter-worker.js", "starter-target.js",
         "jit-hack.js", "jit-grow.js", "jit-weaken.js", "lib/formulas.js"];
     if (cfg.cloudServices) files.push("service-cloud.js");
+    if (cfg.sleeves && (!capabilities || capabilities.sleeves)) files.push("sleeve-upgrades.js");
     if (cfg.shareEnabled) files.push("share-worker.js");
     if (cfg.stocks && singularity) files.push("stock-access.js");
     if (cfg.diagnostics) files.push("doctor.js");
@@ -68,7 +71,7 @@ export function supervisorFiles(cfg, capabilities = null) {
     if ((!capabilities || capabilities.intelligence) && singularity && cfg.intelligence !== false &&
         cfg.augmentationActions && cfg.progression && cfg.progressionActions)
         files.push("intelligence-handoff.js", "intelligence-farm.js");
-    if (singularity && cfg.progression && cfg.progressionActions) files.push("progression-purchase.js", "progression-backdoor.js");
+    if (singularity && cfg.progression && cfg.progressionActions) files.push("progression-purchase.js", "progression-backdoor.js", "progression-join.js");
     if (darknet && cfg.darknet) files.push("darknet-bootstrap.js", "darknet-agent.js", "darknet-phish.js", "darknet-stasis.js",
         "darknet-migrate.js", "darknet-freeze.js", "darknet-stock.js", "darknet-storm.js", "lib/darknet-solvers.js", "lib/darknet-formulas.js", "lib/darknet-coordination.js", "lib/home-share.js");
     return files;
@@ -78,10 +81,12 @@ export function supervisorFiles(cfg, capabilities = null) {
 export function supervisorRamBudget(ns, cfg, capabilities) {
     const cost = file => Math.max(0, Number(ns.getScriptRam(file, "home")) || 0);
     const actorRam = capabilities.singularity && cfg.progression && cfg.progressionActions
-        ? Math.max(cost("progression-purchase.js"), cost("progression-backdoor.js")) : 0;
+        ? Math.max(cost("progression-purchase.js"), cost("progression-backdoor.js"), cost("progression-join.js")) : 0;
     const utilityRam = Math.max(actorRam, homeUpgradeEnabled(cfg, capabilities) ? cost("home-upgrade.js") : 0, cfg.stocks && capabilities.singularity ? cost("stock-access.js") : 0, capabilities.route && cfg.augmentationActions && cfg.progression && cfg.progressionActions ? cost("node-complete.js") : 0, cfg.diagnostics ? cost("doctor.js") : 0,
         capabilities.singularity && cfg.augmentations ? cost("augmentation-planner.js") : 0);
-    const optionalRam = (capabilities.singularity && cfg.augmentationActions ? cost("augmentation-manager.js") : 0) +
+    const optionalRam = (capabilities.sleeves && cfg.sleeves ? cost("sleeve-manager.js") : 0) +
+        (capabilities.gang && cfg.gangs ? cost("gang-manager.js") : 0) +
+        (capabilities.singularity && cfg.augmentationActions ? cost("augmentation-manager.js") : 0) +
         (capabilities.darknet && cfg.darknet ? cost("darknet-manager.js") + cost("darknet-agent.js") : 0);
     return { actorRam, utilityRam, optionalRam };
 }
