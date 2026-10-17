@@ -114,7 +114,7 @@ test('BN10 blocked services retain contract income, protect actor RAM and recove
     const f = fixture(10); f.reset.ownedSF.set(2, 1);
     Object.assign(f.cfg, { sleeves: true, sleeveBudget: .02, gangs: true, gangKarma: true });
     Object.assign(f.costs, { 'supervisor.js': 8.2, 'sleeve-manager.js': 42.55, 'gang-manager.js': 31.6, 'progression-join.js': 9.35,
-        'augmentation-manager.js': 114.9, 'sleeve-upgrades.js': 35.6 });
+        'augmentation-manager.js': 134.9, 'sleeve-upgrades.js': 35.6 });
     const services = f.supervisor.createManagedServices(f.ns, f.cfg, []);
     const capabilities = { singularity: true, route: true, sleeves: true, gang: true };
     const budget = loadScript('lib/service-catalog.js', f.clock).supervisorRamBudget(f.ns, f.cfg, capabilities);

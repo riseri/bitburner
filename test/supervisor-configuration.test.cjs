@@ -170,10 +170,20 @@ test('BN10 defaults launch sleeves and gang karma without SF10 and preserve sett
     assert.deepEqual(Array.from(sleeves.args), ['--port', 2, '--karma', true, '--budget', .01]);
     const manager = f.launches.find(p => p.filename === 'augmentation-manager.js');
     assert.equal(loadScript('lib/service-lifecycle.js', f.clock).readArgument(manager.args, '--gang-karma'), true);
+    assert.equal(loadScript('lib/service-lifecycle.js', f.clock).readArgument(manager.args, '--grafting'), true);
     const restored = [];
     await loadScript('bootstrap.js', f.clock).main({ getHostname: () => 'home', read: () => f.files.get('data/supervisor-bootstrap.json'),
         spawn: (...args) => restored.push(...args.slice(2)), tprint() {} });
     assert.deepEqual(restored, f.ns.args);
+});
+
+test('grafting opt-out reaches augmentation manager and survives saved bootstrap arguments', async () => {
+    const f = supervisorFixture(10); f.ns.getResetInfo().ownedSF.set(4, 3);
+    f.ns.args = ['--grafting', false];
+    await assert.rejects(f.api.main(f.ns), /end fixture/);
+    const manager = f.launches.find(p => p.filename === 'augmentation-manager.js');
+    assert.equal(loadScript('lib/service-lifecycle.js', f.clock).readArgument(manager.args, '--grafting'), false);
+    assert.deepEqual(JSON.parse(f.files.get('data/supervisor-bootstrap.json')).args, f.ns.args);
 });
 
 test('sleeve capability, opt-outs and RAM accounting agree with the launch policy', async () => {

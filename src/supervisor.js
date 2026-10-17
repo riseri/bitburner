@@ -87,6 +87,7 @@ export async function main(ns) {
 		["augmentation-work", true],
 		["augmentation-donate", true],
 		["augmentation-purchase", true],
+        ["grafting", true],
 		["augmentation-focus-work", false],
 		["min-install", 5],
 		["reset-policy", "auto"],
@@ -133,6 +134,7 @@ export async function main(ns) {
 		augmentationWork: asBoolean(flags["augmentation-work"]),
 		augmentationDonate: asBoolean(flags["augmentation-donate"]),
 		augmentationPurchase: asBoolean(flags["augmentation-purchase"]),
+        grafting: asBoolean(flags.grafting),
 		augmentationFocusWork: asBoolean(flags["augmentation-focus-work"]),
         intelligence: asBoolean(flags.intelligence), intelligenceMinutes: Number(flags["intelligence-minutes"]),
         intelligenceTarget: Number(flags["intelligence-target"]),
@@ -620,6 +622,7 @@ function createManagedServices(ns, cfg, daemonArgs) {
 			"--gang-karma", Boolean(cfg.gangs && cfg.gangKarma),
 			"--donate", cfg.augmentationDonate ?? true,
 			"--purchase", cfg.augmentationPurchase, "--focus-work", cfg.augmentationFocusWork,
+            "--grafting", cfg.grafting ?? true,
 			"--min-install", cfg.minInstall, "--reset-policy", cfg.resetPolicy || "auto", "--route", cfg.progression && cfg.progressionActions,
             "--intelligence", cfg.intelligence ?? true, "--intelligence-minutes", cfg.intelligenceMinutes ?? 10, "--intelligence-target", cfg.intelligenceTarget ?? 0]));
 	if (cfg.contracts) services.push(managed(CONTRACTS, ["--fleet-port", fleetPort]));
@@ -1268,6 +1271,12 @@ function renderAugmentationLoop(ns, augmentation, cfg) {
         if (p.missingInformation?.length) row("Unknown", p.missingInformation.join(", "));
     }
 	if (augmentation.recommendation) row("Next", augmentation.recommendation);
+    if (augmentation.grafting) {
+        const g = augmentation.grafting;
+        row("Grafting", `${g.state} | ${g.name || "BN10 planner"} | ${g.reason}`);
+        if (Number.isFinite(g.price)) row("Graft quote", `${cash(g.price)} graft / ${cash(g.normalCost)} normal | ${dashboardTime(g.timeMs)} work | entropy ${g.entropy?.stacksAfter ?? "?"}`);
+        if (Number.isFinite(g.graftMs)) row("Graft comparison", `${dashboardTime(g.graftMs)} graft | ${dashboardTime(g.normalMs)} purchase/reset | ${dashboardTime(g.continueMs)} continue`);
+    }
     if (augmentation.endgame) {
         row("Endgame policy", augmentation.endgame.reason);
         const xp = augmentation.endgame.xp;

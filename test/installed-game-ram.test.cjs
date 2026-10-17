@@ -5,8 +5,23 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { Clock, loadScript } = require('./helpers.cjs');
 const { stripTypeScriptTypes } = require('node:module');
 const mapPath = process.env.BITBURNER_SOURCE_MAP || 'C:/Program Files (x86)/Steam/steamapps/common/Bitburner/resources/app/dist/main.bundle.js.map';
+
+test('graft entropy and focus assumptions match the installed game, including its actual Congruity name', {
+    skip: !fs.existsSync(mapPath),
+}, () => {
+    const map = JSON.parse(fs.readFileSync(mapPath, 'utf8'));
+    const source = map.sourcesContent.filter(Boolean).join('\n');
+    const name = source.match(/CongruityImplant = "([^"]+)"/)[1];
+    const effect = Number(source.match(/EntropyEffect: ([\d.]+)/)[1]);
+    const focus = Number(source.match(/BaseFocusBonus: ([\d.]+)/)[1]);
+    const policy = loadScript('lib/augmentation-grafting.js', new Clock());
+    assert.equal(effect, .98); assert.equal(focus, .8);
+    assert.equal(policy.graftMultipliers({}, [], 12, name).factor, effect ** -12);
+    assert.equal(policy.graftMultipliers({}, [name], 0, 'Upgrade').factor, 1);
+});
 
 test('installed game RAM calculator: BN10 bootstrap fits 32 GB and sleeve tasks fit the first 64 GB home upgrade', {
     skip: !fs.existsSync(mapPath) || !stripTypeScriptTypes,

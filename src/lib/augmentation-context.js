@@ -32,6 +32,7 @@ export function augmentationContext(ns, state = {}) {
     if (gang?.incomePerSecond > 0) income = (income || 0) + gang.incomePerSecond;
     const capabilities = { singularity: singularityAvailable(reset), formulas: ns.fileExists("Formulas.exe", "home"),
         multipliers: !!multipliers, sleeves: reset.currentNode === 10 || Number(reset.ownedSF?.get?.(10)) > 0,
+        grafting: reset.currentNode === 10 || Number(reset.ownedSF?.get?.(10)) > 0,
         gang: reset.currentNode === 2 || Number(reset.ownedSF?.get?.(2)) > 0,
         corporation: reset.currentNode === 3 || Number(reset.ownedSF?.get?.(3)) >= 3,
         optionalSystems: "Gang and sleeve automation available; corporation flag is an access hint only" };
@@ -82,6 +83,7 @@ export function makeProgressionSnapshot(ns, context, status) {
         installDecision: status.installDecision || status.plan?.installDecision || null,
         resetImminent,
         resetPending: Boolean(status.resetDecision?.completionGoal && status.resetDecision.advantage), recommendation: status.recommendation,
+        grafting: status.grafting || null,
         sharingDemand: sharingDemand({ ...shareObjective, resetImminent }, work),
         missingInformation: [!context.income && "measured income", !context.capabilities.formulas && "Formulas work/donation rates",
             !context.multipliers && "BitNode multipliers"].filter(Boolean) };

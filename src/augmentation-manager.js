@@ -18,6 +18,7 @@ import { prepareIntelligenceInstallation } from "lib/intelligence-automation.js"
 import { intelligencePolicy } from "lib/intelligence-session.js";
 import { quoteEndgamePackage, purchaseEndgamePackage, donateEndgameReputation } from "lib/augmentation-endgame.js";
 import { routeGangKarma } from "lib/gang-karma.js";
+import { activeGraft, planGrafting, startGraft } from "lib/augmentation-grafting.js";
 
 const HOME = "home", STATE_FILE = "data/augmentation-loop-state.json", BOOTSTRAP = "bootstrap.js";
 const NEUROFLUX = "NeuroFlux Governor", MAX_NEUROFLUX_PURCHASES = 100;
@@ -27,7 +28,7 @@ export async function main(ns) {
     const flags = ns.flags([
         ["port", PORTS.AUGMENTATION_STATUS], ["interval", 5_000], ["focus", "hacking"], ["target", ""],
         ["price-multiplier", 0], ["cash-reserve", 0.10], ["join-factions", true], ["city-faction", ""], ["work", true],
-        ["route", true], ["gang-karma", true], ["program-creation", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5], ["reset-policy", "auto"],
+        ["route", true], ["gang-karma", true], ["grafting", true], ["program-creation", true], ["donate", true], ["purchase", true], ["focus-work", false], ["min-install", 5], ["reset-policy", "auto"],
         ["intelligence", true], ["intelligence-minutes", 10], ["intelligence-target", 0],
     ]);
     ns.disableLog("ALL");
@@ -61,6 +62,7 @@ export async function tickAugmentationLoop(ns, cfg, state) {
     if (state.recoveryBaseline) observeResetRecovery(state, context, recoveryResources(ns, context));
     state.currentIncome=context.income;
     const status = await tickAugmentationDecision(ns, cfg, state, context);
+    if (state.grafting) status.grafting = state.grafting;
     status.resetDecision = state.resetDecision;
     if (state.resetDecision) status.installDecision = resetDecisionSummary(state.resetDecision);
     context.installed=ns.singularity.getOwnedAugmentations(false); context.owned=ns.singularity.getOwnedAugmentations(true);
@@ -76,6 +78,8 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
     // transitions repeat the current BitNode through its third run.
     const progression = Boolean(cfg.route);
     if (!singularityAvailable(reset)) return { state: "BLOCKED", phase: "UNLOCK", recommendation: singularityRecommendation(), queued: 0 };
+    const graft = activeGraft(ns, state);
+    if (graft) return graft;
 
     // A threshold is a reset decision, independent of the remaining shopping list.
     // Install before joining another faction or extending the ordinary basket.
@@ -119,6 +123,11 @@ async function tickAugmentationDecision(ns, cfg, state, context = null) {
                 context.objective.requiredHacking, context.objective.requiredCash, plan.next?.faction]), history: state.resetHistory });
         state.resetHistory = decision.history; state.resetDecision = decision;
         plan.installDecision = resetDecisionSummary(decision);
+        // Hard queue deadlines and threshold policy retain their liveness guarantee.
+        if (!(queued && (cfg.resetPolicy === "threshold" || Date.now() - state.queuedSince >= 3600000))) {
+            const graft = startGraft(ns, cfg, state, context, planGrafting(ns, cfg, state, context, plan, decision.installNow.etaMs));
+            if (graft) return { ...graft, plan };
+        }
         if (decision.action === "INSTALL" || decision.action === "FALLBACK" && decision.fallback.action === "INSTALL")
             return handleInstallation(ns, cfg, state, plan, queued, true);
         const backdoor = routeBackdoorYield(ns, state);
@@ -202,6 +211,9 @@ async function tickEndgame(ns, cfg, state, context, pending) {
             state.endgameQuote = { neurofluxLevels: proposal.purchases.filter(item => item.name === NEUROFLUX).length,
                 augmentations: proposal.purchases.filter(item => item.name !== NEUROFLUX).map(item => item.name), cost: proposal.cost };
             state.endgameProjection = { at: Date.now(), decision: projected };
+            const resetEta = Math.min(...[decision.installNow.etaMs, projected.installNow.etaMs].filter(n => Number.isFinite(n)));
+            const graft = startGraft(ns, cfg, state, context, planGrafting(ns, cfg, state, context, plan, resetEta));
+            if (graft) return graft;
             if (proposal.purchases.length && useful(projected)) {
                 state.endgameFundingFloor = Math.max(state.endgameFundingFloor || 0, proposal.floor);
                 const goal = proposal.funding[0];
@@ -233,6 +245,10 @@ async function tickEndgame(ns, cfg, state, context, pending) {
     if (fundingStatus) state.endgameReason = fundingStatus.recommendation;
     if (!pending.length) decision = { ...decision, reason: cfg.purchase ? state.endgameReason || decision.reason : "Endgame purchases disabled" };
     state.resetHistory = decision.history; state.resetDecision = decision;
+    if (!purchases?.purchased && !fundingStatus) {
+        const graft = startGraft(ns, cfg, state, context, planGrafting(ns, cfg, state, context, plan, decision.installNow.etaMs));
+        if (graft) return graft;
+    }
     if (decision.action === "INSTALL") return handleInstallation(ns, cfg, state, null, pending.length, true);
     const displayProjection = projected || (Date.now() - state.endgameProjection?.at <= 45000 ? state.endgameProjection.decision : null);
     return { ...(fundingStatus || routeEndgame(ns, cfg, state)), queued: pending.length,
@@ -501,7 +517,7 @@ function normalizeConfig(flags) {
         priceMultiplier: Number(flags["price-multiplier"] || 0), port: Number(flags.port), interval: Math.max(1_000, Number(flags.interval) || 5_000),
         programCreation: bool(flags["program-creation"]), route: bool(flags.route), gangKarma: bool(flags["gang-karma"] ?? true), focus: String(flags.focus), target: String(flags.target), cashReserve: fraction(flags["cash-reserve"]),
         joinFactions: bool(flags["join-factions"]), cityFaction: String(flags["city-faction"]), work: bool(flags.work), donate: bool(flags.donate),
-        purchase: bool(flags.purchase), focusWork: bool(flags["focus-work"]),
+        purchase: bool(flags.purchase), focusWork: bool(flags["focus-work"]), grafting: bool(flags.grafting ?? true),
         minInstall: Number(flags["min-install"]),
         resetPolicy: String(flags["reset-policy"] || "auto"),
         intelligence: bool(flags.intelligence ?? true), intelligenceMinutes: Number(flags["intelligence-minutes"] ?? 10),

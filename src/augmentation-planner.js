@@ -5,6 +5,7 @@ import { buildAugmentationPlan } from "lib/augmentation-plan.js";
 import { writeSavings } from "lib/savings.js";
 import { augmentationFundingCost } from "lib/augmentation-funding.js";
 import { renderFactionProgression } from "lib/dashboard.js";
+import { readProgressionSnapshot } from "lib/progression-objective.js";
 
 /** Read-only purchasing advice; --save-goal only writes a cash reserve. @param {NS} ns */
 export async function main(ns) {
@@ -22,6 +23,7 @@ export async function main(ns) {
                 report = { state: "BLOCKED", summary: "Singularity is locked" };
             } else {
                 const plan = buildAugmentationPlan(ns, { ...options, context: augmentationContext(ns), route: ![false, "false", "0", "off", "no"].includes(f.route) && bn4Route(ns.getResetInfo()) });
+                plan.grafting = readProgressionSnapshot(ns)?.grafting || null;
                 report = { state: plan.errors.length ? "BLOCKED" : "READY", plan, progression: progressionObservation(ns),
                     summary: plan.errors.length ? plan.errors.join("; ") : plan.next
                         ? `${plan.next.name} | ${plan.next.faction} | ${plan.next.progressionStrategy} | rep gap ${Math.ceil(plan.next.repGap)} | funding ${Math.ceil(plan.next.fundingCost)}`
@@ -38,6 +40,9 @@ export async function main(ns) {
     const context = augmentationContext(ns);
     const plan = buildAugmentationPlan(ns, { ...options, context, route: ![false, "false", "0", "off", "no"].includes(f.route) && bn4Route(ns.getResetInfo()) }), multiplier = plan.multiplier;
     ns.tprint(`AUGMENTATION PLAN | joined factions only | ${plan.order.length} purchases`);
+    const grafting = readProgressionSnapshot(ns)?.grafting;
+    if (grafting) ns.tprint(`GRAFTING | ${grafting.state} | ${grafting.name || "BN10 planner"} | ${grafting.reason}`);
+    else if (context.reset.currentNode === 10) ns.tprint("GRAFTING | Live cost/time/entropy comparisons are published by augmentation-manager.js; no fresh decision available.");
     for (const [index, a] of plan.order.entries()) ns.tprint(`${index + 1}. ${a.name} from ${a.faction} | quote ${ns.format.number(a.price)} | projected ${ns.format.number(a.estimatedPrice)} | rep gap ${ns.format.number(a.repGap)} | prerequisites: ${a.prerequisites.join(", ") || "none"}`);
     for (const error of plan.errors) ns.tprint(`BLOCKED: ${error}`);
     ns.tprint(`Basket ${ns.format.number(plan.total)} (${multiplier === 1 ? "current-price lower bound; excludes future purchase inflation" : `estimate assuming ${multiplier}x price growth per purchase`}). Re-run after purchases or reputation changes.`);
